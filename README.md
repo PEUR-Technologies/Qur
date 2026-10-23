@@ -16,18 +16,16 @@ Rust + GPUI · no Electron · runs locally · uses your Claude Code login, not a
 
 ## Features
 
-| | |
-|---|---|
-| **Browser + Inspect** | Your dev server opens beside the agent, so you see its changes live. Click an element and ask the agent to change it. |
-| **Run in Worktree** | Each agent's app runs on its own port, so parallel agents never collide. |
-| **Parallel agents** | Each agent works in its own git worktree, so your checkout stays untouched. |
-| **File heatmap** | Files glow while the agent reads or edits them, with `+n −m` on each changed file. |
-| **Live view** | Watch the file the agent is typing in, and **Take over** whenever you want. |
-| **Review & Merge** | Comment on diff lines to send them back to the agent, then merge without touching your staged changes or stash. |
-| **Turn-end checks** | Your checks run after each agent turn, and failures go back to the agent. |
-| **Alerts** | A notification, Dock badge and chime when an agent finishes or needs you. |
-| **Any CLI agent** | Claude Code by default; Aider and other CLI agents through `agents.toml`. |
-| **Editor** | Tree-sitter highlighting for 13 languages, multi-cursor, optional Vim mode, and 17 themes. |
+- **Browser + Inspect.** Your dev server, right next to the agent. Click an element to point at it.
+- **Worktree per agent.** Run as many as you like. Your checkout never changes.
+- **Port per agent.** Run Project starts each agent's app on its own port.
+- **Heatmap.** See which files are being read and edited.
+- **Live.** Follow the agent's cursor. Take over anytime.
+- **Review → Merge.** Comment on lines, send them back, merge.
+- **Checks.** `cargo check` (or anything) after every turn.
+- **Alerts.** Notification and Dock badge when it's your turn.
+- **Any CLI agent.** Claude Code, Aider, …
+- **Editor.** 13 languages, multi-cursor, Vim, 17 themes.
 
 ![Browser + Inspect: pick an element, ask the agent](docs/images/browser-inspect.png)
 
