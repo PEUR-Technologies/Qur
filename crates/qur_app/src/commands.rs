@@ -66,6 +66,11 @@ pub mod editor {
     );
 }
 
+/// The first-run picker's keys (Enter saves, Esc cancels).
+pub mod setup {
+    gpui::actions!(setup, [Done, Cancel]);
+}
+
 /// Answers for the permission bar of the selected agent.
 pub mod agent {
     gpui::actions!(agent, [AllowOnce, AllowAlways, Deny]);
@@ -136,7 +141,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::HideOthers, "Qur", "Hide Others", "cmd-alt-h", W, R),
     cmd!(qur::ShowAll, "Qur", "Show All", "", W, R),
     cmd!(qur::About, "Qur", "About Qur", "", W, L("M7")),
-    cmd!(qur::CheckSetup, "Qur", "Check Setup…", "", W, L("M6")),
+    cmd!(qur::CheckSetup, "Qur", "Setup…", "", W, R),
     cmd!(qur::OpenConfig, "Qur", "Open config.toml", "cmd-,", W, R),
     cmd!(qur::OpenKeymap, "Qur", "Open keymap.toml", "", W, L("M6")),
     cmd!(qur::OpenAgents, "Qur", "Agents (agents.toml)", "", W, R),
@@ -314,6 +319,8 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(input::ConfirmAlt, "Input", "Confirm (Previous)", "shift-enter", I, R),
     cmd!(input::ConfirmAll, "Input", "Confirm All", "cmd-enter", I, R),
     cmd!(input::Cancel, "Input", "Cancel", "escape", I, R),
+    cmd!(setup::Done, "Input", "Setup: Done", "enter", Some("Setup"), R),
+    cmd!(setup::Cancel, "Input", "Setup: Cancel", "escape", Some("Setup"), R),
     cmd!(input::Up, "Input", "Up", "up", I, R),
     cmd!(input::Down, "Input", "Down", "down", I, R),
     cmd!(input::Tab, "Input", "Tab", "tab", I, R),

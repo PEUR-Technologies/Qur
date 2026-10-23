@@ -404,6 +404,8 @@ const MAX_RECENT: usize = 12;
 pub struct State {
     /// Most recent first.
     pub recent_projects: Vec<PathBuf>,
+    /// The first-run picker was shown (or this home predates it).
+    pub setup_done: bool,
 }
 
 pub fn state_path() -> PathBuf {
@@ -425,6 +427,9 @@ impl State {
             arr.push(p.to_string_lossy().as_ref());
         }
         doc["recent_projects"] = toml_edit::value(arr);
+        if self.setup_done {
+            doc["setup_done"] = toml_edit::value(true);
+        }
         let text = format!("# Managed by Qur. Edit config.toml instead.\n{doc}");
         write_atomic(&state_path(), text.as_bytes())
     }

@@ -34,6 +34,7 @@ use crate::look::Look;
 use crate::picker::{PickItem, Picker, PickerEvent};
 use crate::prompt::{PromptEvent, PromptInput};
 use crate::search_view::{SearchEvent, SearchPanel};
+use crate::setup_view::{SetupEvent, SetupView};
 use crate::terminal::{Kind, PanelEvent, TerminalPanel};
 use crate::tree_view::{TreeEvent, TreeView};
 
@@ -119,6 +120,8 @@ enum Overlay {
     GoTo(Entity<TextInput>),
     /// Rename Agent…: the selected agent's name.
     Rename(Entity<TextInput>),
+    /// The first-run picker (M6), also Qur > Setup….
+    Setup(Entity<SetupView>),
     Transparency { project_scope: bool },
     NewTask { input: Entity<PromptInput>, agent: usize },
 }
@@ -228,6 +231,10 @@ impl Workspace {
         ];
         let mut state = qur_config::State::load();
         state.touch_project(&root);
+        // First run (M6): no config.toml yet. A home that already has one
+        // predates the picker and is left alone.
+        let first_run = !state.setup_done && !qur_config::config_path().exists();
+        state.setup_done = true;
         state.save().ok();
         crate::mark("state_saved");
         let mut ws = Workspace {
@@ -283,6 +290,11 @@ impl Workspace {
         ws.restore_tasks(window, cx);
         // Something must hold focus, or shortcuts have nowhere to go.
         window.focus(&ws.focus, cx);
+        // The first-run picker, once (not in scripted runs, unless asked).
+        let scripted = ["QUR_DEBUG_ACTIONS", "QUR_DEBUG_TASKS", "QUR_BENCH"].iter().any(|v| std::env::var_os(v).is_some());
+        if (first_run && !scripted) || std::env::var_os("QUR_DEBUG_SETUP").is_some() {
+            ws.open_setup(&qur::CheckSetup, window, cx);
+        }
         if let Some(e) = err.or(roster_err) {
             ws.flash(e, cx);
         }
@@ -2575,6 +2587,49 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Qur > Setup… (and the first launch): the first-run picker.
+    fn open_setup(&mut self, _: &qur::CheckSetup, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_overlays(window, cx);
+        self.prev_focus = window.focused(cx);
+        let view = cx.new(|cx| SetupView::new(&self.config, &self.roster, cx));
+        let sub = cx.subscribe_in(&view, window, |this, _, ev: &SetupEvent, window, cx| match ev {
+            SetupEvent::PreviewTheme(name) => {
+                this.preview_theme = Some(name.clone());
+                this.apply_look(window, cx);
+            }
+            SetupEvent::Cancel => this.close_overlays(window, cx),
+            SetupEvent::Done(c) => {
+                this.preview_theme = None;
+                this.write_setting(false, "theme", Some(c.theme.as_str().into()), cx);
+                this.write_setting(false, "peek_layout", Some(c.layout.as_str().into()), cx);
+                this.write_setting(false, "keys.vim", Some(Value::Bool(c.vim)), cx);
+                if !c.agents.is_empty() {
+                    // Keep agents added by hand; replace the ones the picker knows.
+                    let mut roster = qur_agents::Roster::load().0;
+                    roster.agents.retain(|a| !matches!(a.id.as_str(), "claude" | "claude-cli" | "aider"));
+                    let mut agents = c.agents.clone();
+                    agents.extend(roster.agents);
+                    roster.agents = agents;
+                    if let Err(e) = roster.save() {
+                        this.flash(format!("Couldn't save agents.toml: {e}"), cx);
+                    }
+                    this.roster = roster;
+                }
+                this.overlay = None;
+                this.reload_settings(window, cx);
+                this.set_layout(Layout::parse(&c.layout), cx);
+                this.broadcast_reload(cx);
+                this.restore_focus(window, cx);
+                this.flash("Setup saved", cx);
+            }
+        });
+        self._subs.push(sub);
+        let f = view.read(cx).focus.clone();
+        window.focus(&f, cx);
+        self.overlay = Some(Overlay::Setup(view));
+        cx.notify();
+    }
+
     fn new_agent_task(&mut self, _: &qur::NewAgentTask, window: &mut Window, cx: &mut Context<Self>) {
         self.close_overlays(window, cx);
         self.prev_focus = window.focused(cx);
@@ -2645,7 +2700,7 @@ impl Workspace {
     }
 
     fn close_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Overlay::Picker(_, PickKind::Themes { .. })) = &self.overlay
+        if matches!(&self.overlay, Some(Overlay::Picker(_, PickKind::Themes { .. })) | Some(Overlay::Setup(_)))
             && self.preview_theme.take().is_some()
         {
             self.apply_look(window, cx);
@@ -3279,6 +3334,7 @@ impl Workspace {
         };
         match self.overlay.as_ref()? {
             Overlay::Picker(p, _) => Some(centered(p.clone().into_any_element())),
+            Overlay::Setup(s) => Some(centered(s.clone().into_any_element())),
             Overlay::GoTo(g) | Overlay::Rename(g) => Some(centered(
                 div()
                     .w(look.z(360.))
@@ -3678,6 +3734,13 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::run_checks_action))
             .on_action(cx.listener(Self::run_project))
             .on_action(cx.listener(Self::rename_agent))
+            .on_action(cx.listener(Self::open_setup))
+            // Scripted runs may reach here before the picker is drawn.
+            .on_action(cx.listener(|this, _: &commands::setup::Done, _, cx| {
+                if let Some(Overlay::Setup(v)) = &this.overlay {
+                    v.clone().update(cx, |v, cx| v.done(cx));
+                }
+            }))
             .on_action(cx.listener(Self::find_in_project))
             .on_action(cx.listener(Self::replace_in_project))
             .on_action(cx.listener(Self::search_panel))
