@@ -12,13 +12,14 @@ use gpui::{
     Subscription, Task, Window, div, list, prelude::*, px,
 };
 use qur_acp::{
-    AgentCommand, Client, Event, PermissionKind, PermissionOption, PermissionOutcome, PlanEntry, PlanStatus,
+    AgentCommand, Client, ConfigOption, Event, PermissionKind, PermissionOption, PermissionOutcome, PlanEntry, PlanStatus,
     PromptBlock, RequestId, SessionUpdate, StopReason, ToolCall, ToolCallUpdate, ToolContent, ToolKind, ToolStatus,
 };
 use qur_agents::{AgentDef, TaskRecord};
 use qur_theme::Rgba;
 
 use crate::browser_view::{BrowserPane, BrowserPaneEvent, base64};
+use crate::commands::agent as aa;
 use crate::changes_view::{ChangesEvent, ChangesView};
 use crate::dock::{self, Docks, Kind, Panel};
 use crate::live::{LiveEvent, LivePane};
@@ -81,6 +82,8 @@ pub enum AgentEvent {
     Discard,
     /// A turn ended after changing files: run the project's checks.
     TurnChangedFiles,
+    /// A setting chip (mode, model…) was clicked: offer its values.
+    PickSetting(String),
 }
 
 #[derive(Clone)]
@@ -208,6 +211,8 @@ pub struct AgentTask {
     turn_wrote: bool,
     /// Slash commands the agent advertised.
     pub commands: Vec<qur_acp::AvailableCommand>,
+    /// Session settings the agent offers (mode, model…), shown above the prompt.
+    pub settings: Vec<ConfigOption>,
     /// Setup command still running for a new worktree.
     pub setting_up: bool,
     focus: FocusHandle,
@@ -306,6 +311,7 @@ impl AgentTask {
             changes,
             turn_wrote: false,
             commands: Vec::new(),
+            settings: Vec::new(),
             setting_up: false,
             focus: cx.focus_handle(),
             turn_started: None,
@@ -396,20 +402,21 @@ impl AgentTask {
             .ok();
             let session = match saved.filter(|_| can_load) {
                 Some(id) => match client.load_session(&id, &cwd).await {
-                    Ok(Ok(())) => Some(id),
+                    Ok(Ok(settings)) => Some((id, settings)),
                     _ => None,
                 },
                 None => None,
             };
-            let session = match session {
+            let (session, settings) = match session {
                 Some(s) => s,
                 None => match client.new_session(&cwd).await {
-                    Ok(Ok(id)) => id,
+                    Ok(Ok(s)) => s,
                     Ok(Err(e)) => return this.update(cx, |t, cx| t.fail(format!("session/new: {e}"), cx)).ok(),
                     Err(_) => return this.update(cx, |t, cx| t.fail("agent exited during start".into(), cx)).ok(),
                 },
             };
             this.update(cx, |t, cx| {
+                t.settings = settings;
                 t.session_id = Some(session.clone());
                 t.record.session_id = Some(session);
                 t.set_status(Status::Idle, cx);
@@ -624,6 +631,53 @@ impl AgentTask {
         self.set_status(Status::Working, cx);
     }
 
+    /// The agent's full new set of settings. A mode kept the old way
+    /// (`modes`) stays unless the new set has a mode of its own.
+    fn replace_settings(&mut self, list: Vec<ConfigOption>) {
+        let legacy = self.settings.iter().find(|o| o.legacy_mode).cloned().filter(|_| !list.iter().any(ConfigOption::is_mode));
+        self.settings = legacy.into_iter().chain(list).collect();
+    }
+
+    /// Change a session setting (mode, model…). Shown at once; the agent's
+    /// answer then replaces the whole set.
+    pub fn set_setting(&mut self, id: &str, value: &str, cx: &mut Context<Self>) {
+        let (Some(client), Some(session)) = (self.client.clone(), self.session_id.clone()) else { return };
+        let Some(opt) = self.settings.iter_mut().find(|o| o.id == id) else { return };
+        let before = std::mem::replace(&mut opt.current, value.to_string());
+        let pending = client.set_option(&session, opt, value);
+        let id = id.to_string();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let res = pending.await;
+            this.update(cx, |t, cx| {
+                match res {
+                    Ok(Ok(Some(list))) => t.replace_settings(list),
+                    Ok(Ok(None)) => {}
+                    // Refused: put it back and say why.
+                    Ok(Err(e)) => {
+                        if let Some(o) = t.settings.iter_mut().find(|o| o.id == id) {
+                            o.current = before;
+                        }
+                        t.notice(format!("couldn't change {id}: {e}"), cx);
+                    }
+                    Err(_) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Shift+Tab: the next mode, as in Claude Code's own terminal UI.
+    fn cycle_mode(&mut self, _: &aa::CycleMode, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(o) = self.settings.iter().find(|o| o.is_mode()) else { return };
+        if let Some(next) = o.next_value().map(str::to_string) {
+            let id = o.id.clone();
+            self.set_setting(&id, &next, cx);
+        }
+    }
+
     pub fn has_permission(&self) -> bool {
         self.permission.is_some()
     }
@@ -686,6 +740,13 @@ impl AgentTask {
                 }
                 SessionUpdate::Plan(p) => self.plan = p,
                 SessionUpdate::AvailableCommands(c) => self.commands = c,
+                // The agent switched mode itself (e.g. out of plan mode).
+                SessionUpdate::CurrentMode(m) => {
+                    if let Some(o) = self.settings.iter_mut().find(|o| o.legacy_mode) {
+                        o.current = m;
+                    }
+                }
+                SessionUpdate::ConfigOptions(list) => self.replace_settings(list),
                 _ => {}
             },
             Event::Permission { id, tool_call, options, .. } => {
@@ -975,21 +1036,42 @@ impl AgentTask {
             .border_color(look.c(ui.border_strong))
             .bg(look.c(ui.editor_bg))
             .child(self.prompt.clone());
-        // Queue and Esc hints sit just above the field, outside it, and only
-        // while there's something to say (inside, they squeezed the field).
-        let hints = (working || !self.pending.is_empty()).then(|| {
+        // Just above the field, outside it (inside, they squeezed it): the
+        // session's settings on the left (click to choose; Shift+Tab cycles
+        // the mode), queue and Esc hints on the right while working.
+        let chips: Vec<_> = self
+            .settings
+            .iter()
+            .map(|o| {
+                let id = o.id.clone();
+                div()
+                    .id(SharedString::from(format!("setting-{}", o.id)))
+                    .flex_none()
+                    .px(look.z(6.))
+                    .py(look.z(1.))
+                    .rounded(look.z(4.))
+                    .cursor_pointer()
+                    .text_color(look.c(if o.is_mode() && o.current != o.values.first().map(|v| v.value.clone()).unwrap_or_default() { self.accent } else { ui.text_secondary }))
+                    .hover(|d| d.bg(look.c(ui.hover_bg)))
+                    .child(format!("{} ▾", o.current_name()))
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(AgentEvent::PickSetting(id.clone()))))
+            })
+            .collect();
+        let busy = working || !self.pending.is_empty();
+        let hints = (busy || !chips.is_empty()).then(|| {
             div()
                 .flex_none()
-                .mx(look.z(14.))
+                .mx(look.z(12.))
                 .mb(look.z(3.))
                 .flex()
-                .justify_end()
                 .items_center()
-                .gap(look.z(6.))
+                .gap(look.z(2.))
                 .text_size(look.text(-3.))
                 .text_color(look.c(ui.text_muted))
-                .when(!self.pending.is_empty(), |d| d.child(div().flex_none().text_color(look.c(ui.text_secondary)).child(format!("{} queued", self.pending.len()))))
-                .when(working, |d| d.child(div().min_w(px(0.)).truncate().child("esc to stop")))
+                .children(chips)
+                .child(div().flex_1())
+                .when(!self.pending.is_empty(), |d| d.child(div().flex_none().mr(look.z(6.)).text_color(look.c(ui.text_secondary)).child(format!("{} queued", self.pending.len()))))
+                .when(working, |d| d.child(div().min_w(px(0.)).mr(look.z(2.)).truncate().child("esc to stop")))
         });
         div()
             .size_full()
@@ -1119,6 +1201,7 @@ impl Render for AgentTask {
         div()
             .key_context("AgentView")
             .track_focus(&self.focus)
+            .on_action(cx.listener(Self::cycle_mode))
             .size_full()
             .flex()
             .flex_col()

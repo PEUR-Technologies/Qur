@@ -117,6 +117,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Esc` (prompt) / `Cmd+.` | Stop the agent's turn (`session/cancel`) | M2 ✅ |
 | `@` / `/` in the prompt | Mention a file / pick an agent slash command | M2 ✅ |
 | Agent menu | Permission: Allow Once / Allow for This Task / Deny | M2 ✅ |
+| `Shift+Tab` (chat agent) | Next mode (Default / Accept Edits / Plan…), from the agent's session settings; click the Mode or Model chip above the prompt to choose | ✅ |
 | Agent menu | Discard Task…, Reveal Worktree in Finder, Open Task Worktree in Terminal | M2 ✅ |
 | `Cmd+K Cmd+L` | Cycle peek layout | M3 ✅ |
 | `Cmd+1..4` | Live / To-do / Chat / Changes (layout B) | M3 ✅ |

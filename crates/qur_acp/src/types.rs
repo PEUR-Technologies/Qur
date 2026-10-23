@@ -140,7 +140,100 @@ pub enum SessionUpdate {
     Plan(Vec<PlanEntry>),
     AvailableCommands(Vec<AvailableCommand>),
     CurrentMode(String),
+    /// `config_option_update`: the agent's whole set of session settings.
+    ConfigOptions(Vec<ConfigOption>),
     Other { kind: String, raw: Value },
+}
+
+/// One session setting the agent offers (mode, model, thinking…): a
+/// `select` from `configOptions`, or the older `modes` made to look like one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConfigOption {
+    pub id: String,
+    pub name: String,
+    /// `mode`, `model`, `thought_level`, … (None or unknown is fine).
+    pub category: Option<String>,
+    pub current: String,
+    pub values: Vec<ConfigValue>,
+    /// Came from `modes`: set with `session/set_mode`, not `set_config_option`.
+    pub legacy_mode: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConfigValue {
+    pub value: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+impl ConfigOption {
+    pub fn is_mode(&self) -> bool {
+        self.category.as_deref() == Some("mode")
+    }
+
+    /// The current value's display name.
+    pub fn current_name(&self) -> &str {
+        self.values.iter().find(|v| v.value == self.current).map_or(self.current.as_str(), |v| v.name.as_str())
+    }
+
+    /// The value after the current one, wrapping (Shift+Tab cycles modes).
+    pub fn next_value(&self) -> Option<&str> {
+        let i = self.values.iter().position(|v| v.value == self.current).map_or(0, |i| i + 1);
+        self.values.get(i % self.values.len().max(1)).map(|v| v.value.as_str())
+    }
+
+    fn parse(o: &Value) -> Option<Self> {
+        // Only selects: boolean options need a client capability we don't send.
+        if o.get("type").and_then(Value::as_str) != Some("select") {
+            return None;
+        }
+        let value = |v: &Value| Some(ConfigValue { value: s(v, "value")?, name: s(v, "name")?, description: s(v, "description") });
+        let mut values = Vec::new();
+        for item in o.get("options").and_then(Value::as_array).into_iter().flatten() {
+            match item.get("options").and_then(Value::as_array) {
+                // A group: its values, flattened.
+                Some(group) => values.extend(group.iter().filter_map(value)),
+                None => values.extend(value(item)),
+            }
+        }
+        Some(ConfigOption {
+            id: s(o, "id")?,
+            name: s(o, "name").unwrap_or_default(),
+            category: s(o, "category"),
+            current: o.get("currentValue").and_then(Value::as_str)?.to_string(),
+            values,
+            legacy_mode: false,
+        })
+    }
+
+    /// `configOptions` from a `session/new`, `session/load` or
+    /// `set_config_option` result, or a `config_option_update`.
+    pub fn parse_list(v: &Value) -> Vec<Self> {
+        v.get("configOptions").and_then(Value::as_array).map(|a| a.iter().filter_map(Self::parse).collect()).unwrap_or_default()
+    }
+
+    /// The settings in a `session/new` or `session/load` result: its
+    /// `configOptions`, plus `modes` when no option is the mode (the spec
+    /// says to prefer config options and fall back to modes).
+    pub fn parse_session(v: &Value) -> Vec<Self> {
+        let mut list = Self::parse_list(v);
+        if !list.iter().any(Self::is_mode)
+            && let Some(m) = v.get("modes")
+            && let Some(current) = s(m, "currentModeId")
+        {
+            let values: Vec<ConfigValue> = m
+                .get("availableModes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|x| Some(ConfigValue { value: s(x, "id")?, name: s(x, "name")?, description: s(x, "description") }))
+                .collect();
+            if !values.is_empty() {
+                list.insert(0, ConfigOption { id: "mode".into(), name: "Mode".into(), category: Some("mode".into()), current, values, legacy_mode: true });
+            }
+        }
+        list
+    }
 }
 
 impl SessionUpdate {
@@ -162,6 +255,7 @@ impl SessionUpdate {
                     .unwrap_or_default(),
             ),
             "current_mode_update" => SessionUpdate::CurrentMode(s(u, "currentModeId").unwrap_or_default()),
+            "config_option_update" => SessionUpdate::ConfigOptions(ConfigOption::parse_list(u)),
             k => SessionUpdate::Other { kind: k.to_string(), raw: u.clone() },
         }
     }

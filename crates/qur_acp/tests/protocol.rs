@@ -67,7 +67,33 @@ fn start(client: &Client) -> String {
     assert_eq!(init.protocol_version, 1);
     assert_eq!(init.agent_name.as_deref(), Some("fake-agent"));
     assert!(init.load_session);
-    wait(client.new_session(Path::new("/tmp")), 10).unwrap()
+    wait(client.new_session(Path::new("/tmp")), 10).unwrap().0
+}
+
+#[test]
+fn session_settings_modes_and_config_options() {
+    let (client, mut rx) = fake(&[]);
+    wait(client.initialize(), 10).unwrap();
+    let (sid, opts) = wait(client.new_session(Path::new("/tmp")), 10).unwrap();
+    // Legacy modes first, then the model; the boolean option is skipped.
+    let ids: Vec<_> = opts.iter().map(|o| o.id.as_str()).collect();
+    assert_eq!(ids, ["mode", "model"]);
+    let (mode, model) = (&opts[0], &opts[1]);
+    assert!(mode.legacy_mode && mode.is_mode());
+    assert_eq!(mode.current_name(), "Default");
+    assert_eq!(mode.next_value(), Some("acceptEdits"));
+    assert_eq!(model.values.len(), 2, "groups flattened");
+    assert_eq!(model.current_name(), "Sonnet");
+
+    // Mode the old way: no result, a current_mode_update instead.
+    assert_eq!(wait(client.set_option(&sid, mode, "plan"), 10).unwrap(), None);
+    let evs = events_until(&mut rx, 10, |e| matches!(e, Event::Update { update: SessionUpdate::CurrentMode(_), .. }));
+    assert!(matches!(evs.last(), Some(Event::Update { update: SessionUpdate::CurrentMode(m), .. }) if m == "plan"));
+
+    // A config option: the full new set comes back.
+    let new = wait(client.set_option(&sid, model, "opus"), 10).unwrap().unwrap();
+    assert_eq!(new[0].current_name(), "Opus");
+    client.shutdown(Duration::from_secs(2));
 }
 
 #[test]
@@ -218,7 +244,7 @@ fn real_claude_agent_acp() {
     eprintln!("initialize {:?}: {:?} {:?}", t0.elapsed(), init.agent_name, init.agent_version);
     assert_eq!(init.protocol_version, 1);
     let t1 = Instant::now();
-    let sid = wait(client.new_session(&repo), 120).unwrap();
+    let sid = wait(client.new_session(&repo), 120).unwrap().0;
     eprintln!("session/new {:?}", t1.elapsed());
     let t2 = Instant::now();
     let stop = wait(client.prompt(&sid, vec![PromptBlock::Text("Reply with just the word ok.".into())]), 300).unwrap();

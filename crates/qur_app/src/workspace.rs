@@ -112,6 +112,8 @@ enum PickKind {
     Projects(Vec<PathBuf>),
     /// The agent's slash commands, inserted into its prompt.
     Slash { names: Vec<String>, target: Entity<PromptInput> },
+    /// A session setting's values (mode, model…) for one agent.
+    Setting { agent: Entity<AgentTask>, id: String, values: Vec<String> },
 }
 
 enum Overlay {
@@ -805,6 +807,20 @@ impl Workspace {
                     let items = cmds.iter().map(|c| PickItem::new(format!("/{}", c.name)).detail(c.description.clone())).collect();
                     this.open_picker("Agent command…", items, PickKind::Slash { names, target }, false, window, cx);
                 }
+            }
+            AgentEvent::PickSetting(id) => {
+                let Some(o) = a.read(cx).settings.iter().find(|o| &o.id == id).cloned() else { return };
+                let values = o.values.iter().map(|v| v.value.clone()).collect();
+                let items = o
+                    .values
+                    .iter()
+                    .map(|v| {
+                        let item = PickItem::new(v.name.clone()).detail(v.description.clone().unwrap_or_default());
+                        if v.value == o.current { item.right("current") } else { item }
+                    })
+                    .collect();
+                let title = if o.is_mode() { format!("{}…  (⇧⇥ next)", o.name) } else { format!("{}…", o.name) };
+                this.open_picker(&title, items, PickKind::Setting { agent: a.clone(), id: id.clone(), values }, false, window, cx);
             }
             AgentEvent::OpenFile(p, line) => {
                 let p = p.clone();
@@ -2517,6 +2533,15 @@ impl Workspace {
                 let f = target.read(cx).focus.clone();
                 window.focus(&f, cx);
                 cx.notify();
+            }
+            (PickerEvent::Confirm(i), PickKind::Setting { agent, id, values }) => {
+                let (agent, id, value) = (agent.clone(), id.clone(), values.get(*i).cloned());
+                self.close_overlays(window, cx);
+                if let Some(v) = value {
+                    agent.update(cx, |a, cx| a.set_setting(&id, &v, cx));
+                }
+                let f = agent.read(cx).prompt.read(cx).focus.clone();
+                window.focus(&f, cx);
             }
             (PickerEvent::Confirm(i), PickKind::Projects(list)) => {
                 let target = list.get(*i).cloned();

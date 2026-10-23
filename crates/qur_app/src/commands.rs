@@ -73,7 +73,7 @@ pub mod setup {
 
 /// Answers for the permission bar of the selected agent.
 pub mod agent {
-    gpui::actions!(agent, [AllowOnce, AllowAlways, Deny]);
+    gpui::actions!(agent, [AllowOnce, AllowAlways, Deny, CycleMode]);
 }
 
 pub mod terminal {
@@ -274,6 +274,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(agent::AllowOnce, "Agent", "Permission: Allow Once", "", W, R),
     cmd!(agent::AllowAlways, "Agent", "Permission: Allow for This Task", "", W, R),
     cmd!(agent::Deny, "Agent", "Permission: Deny", "", W, R),
+    cmd!(agent::CycleMode, "Agent", "Next Mode (Default / Accept Edits / Plan…)", "shift-tab", Some("AgentView"), R),
     cmd!(qur::ReviewChanges, "Agent", "Review Changes", "", W, R),
     cmd!(qur::Merge, "Agent", "Merge into My Branch", "", W, R),
     cmd!(qur::KeepWorking, "Agent", "Keep Working", "", W, R),

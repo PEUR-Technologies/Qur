@@ -64,8 +64,37 @@ fn main() {
             })),
             "session/new" => {
                 send(json!({ "jsonrpc": "2.0", "method": "_fake/extension", "params": {} }));
-                reply(json!({ "sessionId": "s1" }))
+                // Modes the old way, the model as a config option (in a group).
+                reply(json!({
+                    "sessionId": "s1",
+                    "modes": {
+                        "currentModeId": "default",
+                        "availableModes": [
+                            { "id": "default", "name": "Default" },
+                            { "id": "acceptEdits", "name": "Accept Edits" },
+                            { "id": "plan", "name": "Plan Mode", "description": "Read only" }
+                        ]
+                    },
+                    "configOptions": [
+                        { "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "sonnet",
+                          "options": [{ "group": "all", "name": "All", "options": [
+                              { "value": "sonnet", "name": "Sonnet" }, { "value": "opus", "name": "Opus" }
+                          ] }] },
+                        { "id": "fast", "name": "Fast", "type": "boolean", "currentValue": false }
+                    ]
+                }))
             }
+            "session/set_mode" => {
+                let sid = p["sessionId"].as_str().unwrap_or("s1").to_string();
+                update(&sid, json!({ "sessionUpdate": "current_mode_update", "currentModeId": p["modeId"] }));
+                reply(json!({}))
+            }
+            "session/set_config_option" => reply(json!({
+                "configOptions": [
+                    { "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": p["value"],
+                      "options": [{ "value": "sonnet", "name": "Sonnet" }, { "value": "opus", "name": "Opus" }] }
+                ]
+            })),
             "session/load" => {
                 let sid = p["sessionId"].as_str().unwrap_or("s1").to_string();
                 update(&sid, json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": "earlier question" } }));

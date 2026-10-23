@@ -342,21 +342,39 @@ impl Client {
         rx
     }
 
-    pub fn new_session(&self, cwd: &Path) -> Pending<String> {
+    /// A new session: its id and the settings it offers (mode, model…).
+    pub fn new_session(&self, cwd: &Path) -> Pending<(String, Vec<ConfigOption>)> {
         let (rx, r) = typed(|v| {
-            v.get("sessionId")
+            let id = v
+                .get("sessionId")
                 .and_then(Value::as_str)
                 .map(str::to_owned)
-                .ok_or_else(|| AcpError::new("session/new returned no sessionId"))
+                .ok_or_else(|| AcpError::new("session/new returned no sessionId"))?;
+            Ok((id, ConfigOption::parse_session(&v)))
         });
         self.inner.request("session/new", json!({ "cwd": cwd, "mcpServers": [] }), r);
         rx
     }
 
     /// Resume a session; the agent replays its history as `Update` events.
-    pub fn load_session(&self, session_id: &str, cwd: &Path) -> Pending<()> {
-        let (rx, r) = typed(|_| Ok(()));
+    /// Resolves with the session's settings.
+    pub fn load_session(&self, session_id: &str, cwd: &Path) -> Pending<Vec<ConfigOption>> {
+        let (rx, r) = typed(|v| Ok(ConfigOption::parse_session(&v)));
         self.inner.request("session/load", json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [] }), r);
+        rx
+    }
+
+    /// Change a session setting. Resolves with the agent's full new set of
+    /// settings, or None for a mode set the old way (`session/set_mode`
+    /// answers with nothing; the agent sends `current_mode_update`).
+    pub fn set_option(&self, session_id: &str, option: &ConfigOption, value: &str) -> Pending<Option<Vec<ConfigOption>>> {
+        if option.legacy_mode {
+            let (rx, r) = typed(|_| Ok(None));
+            self.inner.request("session/set_mode", json!({ "sessionId": session_id, "modeId": value }), r);
+            return rx;
+        }
+        let (rx, r) = typed(|v| Ok(Some(ConfigOption::parse_list(&v))));
+        self.inner.request("session/set_config_option", json!({ "sessionId": session_id, "configId": option.id, "value": value }), r);
         rx
     }
 
