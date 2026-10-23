@@ -206,7 +206,7 @@ fn opacity_floors_keep_text_readable_on_any_desktop() {
     let mut worst = 0.0f32;
     for t in reg().all() {
         let floor = t.min_opacity();
-        assert!((MIN_OPACITY..=1.0).contains(&floor));
+        assert!((0.5..=1.0).contains(&floor));
         eprintln!("{:22} lowest readable opacity {floor:.2}", t.name);
         worst = worst.max(floor);
         let u = &t.ui;
@@ -220,9 +220,11 @@ fn opacity_floors_keep_text_readable_on_any_desktop() {
         }
     }
     eprintln!("one floor for every theme would be {worst:.2}; slider floor MIN_OPACITY = {MIN_OPACITY}");
-    // At least the Qur themes (the defaults) must allow real translucency.
+    // The slider is 60–100% everywhere (decision 38); the Qur themes (the
+    // defaults) stay readable across most of it.
+    assert_eq!(MIN_OPACITY, 0.6);
     for name in ["Qur Dark", "Qur Light"] {
-        assert!(reg().get(name).unwrap().min_opacity() <= 0.7, "{name}");
+        assert!(reg().get(name).unwrap().min_opacity() <= 0.65, "{name}");
     }
 }
 
