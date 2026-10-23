@@ -148,7 +148,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::ThemePicker, "Qur", "Theme…", "cmd-k cmd-t", NT, R),
     cmd!(qur::UseDefaultTheme, "Qur", "Use Default Theme for This Project", "", W, R),
     cmd!(qur::Transparency, "Qur", "Transparency…", "", W, R),
-    cmd!(qur::VimMode, "Qur", "Vim Mode", "", W, L("M6")),
+    cmd!(qur::VimMode, "Qur", "Vim Mode", "", W, R),
     cmd!(qur::NewWindow, "File", "New Window", "cmd-n", W, R),
     cmd!(qur::NewAgentTask, "Agent", "New Agent Task…", "cmd-shift-n", W, R),
     cmd!(qur::OpenFolder, "File", "Open Folder…", "cmd-o", W, R),
@@ -399,6 +399,7 @@ pub struct MenuState {
     pub recent: Vec<PathBuf>,
     /// A merge stopped on conflicts: the Merge Conflicts items are enabled.
     pub merging: bool,
+    pub vim: bool,
 }
 
 fn item(action: impl Action) -> MenuItem {
@@ -435,7 +436,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::ThemePicker),
             item(qur::UseDefaultTheme),
             item(qur::Transparency),
-            item(qur::VimMode).checked(false),
+            item(qur::VimMode).checked(s.vim),
             sep(),
             M::os_submenu("Services", SystemMenuType::Services),
             sep(),

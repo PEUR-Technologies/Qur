@@ -118,3 +118,23 @@ M5 acceptance, scripted on scratch repos with a fake CLI agent (a bash script; n
 - **Turns:** with `[checks] terminal = true`, a check ran exactly once after the agent's edit (startup and setup don't count; 2 of 2 runs).
 - **Names:** a title set by the agent (OSC 0) became the task name and was saved; generic titles ("Claude Code", shells, paths) are ignored. The real Claude CLI with a one-line prompt named its task too.
 - Find in Terminal and Cmd-click links are covered by unit tests against a real `Term`; typing into the find field and clicking need a check by hand.
+
+## M6 (2026-10-23, search, alerts, first-run picker, Vim; MacBook Air M5)
+
+| Metric | Target | M6 | |
+|---|---|---|---|
+| Project search over big-repo (5,000 files, `qur_search`, query "file": 5,000 matches) | < 300 ms | settled median 51 ms, cold 113–162 ms (`big_repo_search_timing`) | ✅ |
+| Same, from the app 1 s after launch (Search view, results shown) | < 300 ms | 200–205 ms (competes with startup) | ✅ |
+| Idle footprint, big-repo clone (window covered) | < 80 MB | 67–69 MB | ✅ |
+| With 5,000 search results open | | 71 MB | |
+| Release binary | < 40 MB | 24.8 MB (+0.4 MB for search, Vim, alerts and the chime) | ✅ |
+| Alert chime | < 50 KB | 18.5 KB (0.42 s, generated for Qur) | ✅ |
+
+No new crates: search uses `ignore` (already in qur_tree) and `regex` (already linked by GPUI); alerts use GPUI's notifications and the `objc2-app-kit` crate GPUI and qur_browser already link.
+
+M6 acceptance:
+- **Search:** under 300 ms over 5,000 files (above). Replace All is covered by `qur_search` tests (literal `$` kept, regex `$1` expanded).
+- **Vim:** 8 unit tests drive keys through `qur_editor::vim` (motions with counts, i/a/I/A/o/O, x/X/D/C/J/r, d/c/y/>/< with motions and doubled, p/P, u/Ctrl-R, `.`, visual and visual line). The code modal routes typed keys to it in normal/visual mode; Qur > Vim Mode saved `[keys] vim = true`.
+- **First-run picker writes config:** Enter in the picker saved `theme`, `peek_layout`, `keys.vim` to config.toml, the found agents to agents.toml, and `setup_done` to state.toml.
+- **Alerts only when appropriate:** with Qur in the background, two real agents (one-line prompts) gave exactly one alert per new state (finished; needs approval, then finished) and the badge counted 1 then 2. Selecting an agent clears it. Notifications are skipped in the unbundled dev build (GPUI's guard); they need the M7 `.app`.
+- Not yet checked by hand (the screen was locked): the Search view and picker on screen, typing Vim keys, the Check button, the chime being audible, and "no alert while you're on that agent".

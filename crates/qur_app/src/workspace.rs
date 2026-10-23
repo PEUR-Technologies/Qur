@@ -363,6 +363,8 @@ impl Workspace {
         let wrap = self.config.editor.soft_wrap;
         for b in &self.buffers.list {
             b.update(cx, |b, cx| b.set_soft_wrap(wrap, cx));
+            let vim = self.config.keys.vim;
+            b.update(cx, |b, cx| b.set_vim(vim, cx));
         }
         self.apply_look(window, cx);
         self.sync_menus(cx);
@@ -424,6 +426,7 @@ impl Workspace {
             soft_wrap: self.code.as_ref().map(|e| e.read(cx).soft_wrap()).unwrap_or(self.config.editor.soft_wrap),
             recent: qur_config::State::load().recent_projects,
             merging: self.merge.is_some(),
+            vim: self.config.keys.vim,
         }
     }
 
@@ -1990,8 +1993,13 @@ impl Workspace {
             None => {
                 let wrap = self.config.editor.soft_wrap;
                 let tab = self.config.editor.tab_width;
+                let vim = self.config.keys.vim;
                 let view = match EditorView::load(path) {
-                    Ok(loaded) => cx.new(|cx| EditorView::new(loaded, wrap, tab, cx)),
+                    Ok(loaded) => cx.new(|cx| {
+                        let mut v = EditorView::new(loaded, wrap, tab, cx);
+                        v.set_vim(vim, cx);
+                        v
+                    }),
                     Err(e) => {
                         self.flash(format!("Couldn't open {}: {e}", path.display()), cx);
                         return;
@@ -2588,6 +2596,16 @@ impl Workspace {
     }
 
     /// Qur > Setup… (and the first launch): the first-run picker.
+    /// Qur > Vim Mode: on/off for every editor, saved as `[keys] vim`.
+    fn toggle_vim(&mut self, _: &qur::VimMode, window: &mut Window, cx: &mut Context<Self>) {
+        let on = !self.config.keys.vim;
+        self.write_setting(false, "keys.vim", Some(Value::Bool(on)), cx);
+        self.reload_settings(window, cx);
+        self.broadcast_reload(cx);
+        self.sync_menus(cx);
+        self.flash(if on { "Vim mode on (Esc for normal mode)" } else { "Vim mode off" }, cx);
+    }
+
     fn open_setup(&mut self, _: &qur::CheckSetup, window: &mut Window, cx: &mut Context<Self>) {
         self.close_overlays(window, cx);
         self.prev_focus = window.focused(cx);
@@ -3258,6 +3276,7 @@ impl Workspace {
     fn code_modal(&self, look: &Look, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let code = self.code.clone()?;
         let ui = &look.theme.ui;
+        let vim = code.read(cx).vim_status();
         let (title, dirty, owner) = {
             let c = code.read(cx);
             let path = c.path().map(Path::to_path_buf).unwrap_or_default();
@@ -3310,6 +3329,7 @@ impl Workspace {
                                 .child(div().min_w(px(0.)).truncate().text_color(look.c(ui.text)).child(title))
                                 .when(dirty, |d| d.child(div().size(look.z(6.)).flex_none().rounded(look.z(1.5)).bg(look.c(ui.text_secondary))))
                                 .children(owner.map(|w| div().flex_none().text_color(look.c(ui.text_muted)).child(format!("in {w}"))))
+                                .children(vim.map(|m| div().flex_none().ml(look.z(8.)).px(look.z(5.)).rounded(look.z(3.)).bg(look.c(ui.active_bg)).text_size(look.text(-2.)).font_family(look.code_font.clone()).text_color(look.c(ui.text_secondary)).child(m)))
                                 .child(div().flex_1())
                                 .child(div().flex_none().text_color(look.c(ui.text_muted)).child("esc to close")),
                         )
@@ -3735,6 +3755,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::run_project))
             .on_action(cx.listener(Self::rename_agent))
             .on_action(cx.listener(Self::open_setup))
+            .on_action(cx.listener(Self::toggle_vim))
             // Scripted runs may reach here before the picker is drawn.
             .on_action(cx.listener(|this, _: &commands::setup::Done, _, cx| {
                 if let Some(Overlay::Setup(v)) = &this.overlay {

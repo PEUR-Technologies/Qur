@@ -13,7 +13,8 @@ use gpui::{
     Subscription, Task, TextRun, UTF16Selection, Window, div, fill, font, point, prelude::*, px, relative,
     size, svg,
 };
-use qur_editor::{Command, Ctx, Editor, FindOptions, Point, Rope, Selection};
+use qur_editor::vim::{Key as VimKey, Mode as VimMode, Vim};
+use qur_editor::{Command, Ctx, Editor, FindOptions, Outcome, Point, Rope, Selection};
 use qur_syntax::{HIGHLIGHT_NAMES, HighlightSpan, Language, SyntaxState, TextEdit, TextSource};
 
 use crate::commands::{edit, editor as ea};
@@ -99,6 +100,8 @@ pub struct EditorView {
     pub last_user_input: Option<Instant>,
     /// Live view: edits are ignored while the agent is editing this file.
     pub read_only: bool,
+    /// Vim mode (`[keys] vim`, M6); None = VS Code keys only.
+    pub vim: Option<Vim>,
     /// Lines the agent changed last (Live view), painted in its accent.
     pub agent_mark: Option<(Range<usize>, qur_theme::Rgba)>,
     /// The file changed on disk while this buffer had unsaved edits: ask
@@ -156,6 +159,7 @@ impl EditorView {
             dragging: false,
             last_user_input: None,
             read_only: false,
+            vim: None,
             agent_mark: None,
             disk_changed: false,
             merge_conflicts: false,
@@ -348,7 +352,65 @@ impl EditorView {
         if self.read_only && mutates(&cmd) {
             return;
         }
-        let clip = matches!(cmd, Command::Paste).then(|| cx.read_from_clipboard().and_then(|c| c.text())).flatten();
+        // Vim normal/visual: the typing keys act like Vim's (Enter = down,
+        // Backspace = left, Delete = x). Cmd shortcuts still work.
+        if self.vim.as_ref().is_some_and(|v| v.mode() != VimMode::Insert) {
+            let mapped = match cmd {
+                Command::Newline => Some(vec!['j', '^']),
+                Command::Backspace => Some(vec!['h']),
+                Command::Delete => Some(vec!['x']),
+                Command::Insert(_) | Command::Tab | Command::Backtab | Command::DeleteWordLeft | Command::DeleteWordRight | Command::DeleteToLineStart => Some(vec![]),
+                _ => None,
+            };
+            if let Some(keys) = mapped {
+                for k in keys {
+                    self.vim_key(VimKey::Char(k), cx);
+                }
+                return;
+            }
+        }
+        let paste = matches!(cmd, Command::Paste);
+        self.apply(paste, cx, move |m, ctx| m.run(cmd, ctx));
+    }
+
+    /// Turn Vim mode on or off (Qur > Vim Mode, `[keys] vim`).
+    pub fn set_vim(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on != self.vim.is_some() {
+            self.vim = on.then(Vim::new);
+            cx.notify();
+        }
+    }
+
+    /// "NORMAL", "INSERT 2d"… for the modal's header.
+    pub fn vim_status(&self) -> Option<String> {
+        let v = self.vim.as_ref()?;
+        let p = v.pending_text();
+        Some(if p.is_empty() { v.mode().label().to_string() } else { format!("{} {p}", v.mode().label()) })
+    }
+
+    /// Feed a key to Vim; false = not Vim's (type it normally).
+    fn vim_key(&mut self, key: VimKey, cx: &mut Context<Self>) -> bool {
+        if self.read_only {
+            return false;
+        }
+        let Some(mut vim) = self.vim.take() else { return false };
+        let mut used = false;
+        self.apply(false, cx, |m, ctx| match vim.key(m, key, ctx) {
+            Some(o) => {
+                used = true;
+                o
+            }
+            None => Outcome::default(),
+        });
+        self.vim = Some(vim);
+        cx.notify();
+        used
+    }
+
+    /// Run `f` on the model with this buffer's context, then refresh syntax,
+    /// find, scroll and the dirty dot.
+    fn apply(&mut self, paste: bool, cx: &mut Context<Self>, f: impl FnOnce(&mut Editor, &mut Ctx) -> Outcome) {
+        let clip = paste.then(|| cx.read_from_clipboard().and_then(|c| c.text())).flatten();
         let lang = self.language;
         let page_rows = self.bounds.map(|b| (b.size.height / self.line_h).floor() as usize).unwrap_or(30).max(1);
         // Bracket lookup goes through the syntax tree when there is one.
@@ -365,7 +427,7 @@ impl EditorView {
             matching_bracket: Some(&bracket),
         };
         let was_dirty = self.model.is_dirty();
-        let out = self.model.run(cmd, &mut ctx);
+        let out = f(&mut self.model, &mut ctx);
         if let Some((text, _whole_line)) = ctx.clipboard_out.take() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
@@ -858,6 +920,14 @@ simple! {
 impl EditorView {
     /// Esc steps out one layer at a time: find bar, extra cursors, then the modal.
     fn a_escape(&mut self, _: &ea::Escape, window: &mut Window, cx: &mut Context<Self>) {
+        // Vim first: leave insert/visual or drop a pending command. Plain
+        // normal mode falls through, so Esc still closes the modal.
+        if let Some(v) = &self.vim
+            && (v.mode() != VimMode::Normal || !v.pending_text().is_empty())
+        {
+            self.vim_key(VimKey::Esc, cx);
+            return;
+        }
         if self.find.is_some() {
             self.close_find(window, cx);
         } else if self.model.selections().len() > 1 {
@@ -913,9 +983,17 @@ impl EntityInputHandler for EditorView {
     }
     fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {}
     fn replace_text_in_range(&mut self, _: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
-        if !text.is_empty() {
-            self.insert_text(text, cx);
+        if text.is_empty() {
+            return;
         }
+        // Vim normal/visual: typed keys are commands, not text.
+        if self.vim.as_ref().is_some_and(|v| v.mode() != VimMode::Insert) && !self.read_only {
+            for c in text.chars() {
+                self.vim_key(VimKey::Char(c), cx);
+            }
+            return;
+        }
+        self.insert_text(text, cx);
     }
     fn replace_and_mark_text_in_range(
         &mut self,
@@ -1149,6 +1227,7 @@ impl Element for EditorElement {
         let focused = focus.is_focused(window);
         let lh = v.line_h;
         let cw = v.cell_w;
+        let block = v.vim.as_ref().is_some_and(|vim| vim.block_cursor());
         let gutter_x = bounds.left();
         let tx = bounds.left() + v.text_x - v.scroll_x;
         let text_clip = Bounds::from_corners(point(bounds.left() + v.text_x - look.z(4.), bounds.top()), bounds.bottom_right());
@@ -1208,7 +1287,15 @@ impl Element for EditorElement {
                     && h.col >= row.chars.start
                     && (h.col < row.chars.end || row.line_end || (h.col == row.chars.end && row.chars.is_empty()));
                 if focused && in_row {
-                    carets.push(fill(Bounds::new(point(x_at(row, h.col), row.y), size(px(2.), lh)), look.c(ed.cursor)));
+                    let mut c = look.c(ed.cursor);
+                    let w = if block {
+                        // Vim normal/visual: a translucent block over the char.
+                        c.a *= 0.45;
+                        cw
+                    } else {
+                        px(2.)
+                    };
+                    carets.push(fill(Bounds::new(point(x_at(row, h.col), row.y), size(w, lh)), c));
                 }
             }
         }
@@ -1435,6 +1522,14 @@ impl Render for EditorView {
         div()
             .key_context("Editor")
             .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                // Vim's redo (no other binding uses Ctrl+R in the editor).
+                let k = &ev.keystroke;
+                if k.modifiers.control && !k.modifiers.platform && k.key == "r" && this.vim.as_ref().is_some_and(|v| v.mode() != VimMode::Insert) {
+                    this.vim_key(VimKey::Redo, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .size_full()
             .flex()
             .flex_col()

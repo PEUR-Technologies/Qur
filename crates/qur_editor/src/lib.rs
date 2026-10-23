@@ -151,6 +151,7 @@ mod find;
 mod tests;
 mod history;
 mod text;
+pub mod vim;
 mod wrap;
 
 use std::time::Instant;
