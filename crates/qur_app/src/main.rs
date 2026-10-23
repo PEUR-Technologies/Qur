@@ -5,6 +5,7 @@
 
 mod assets;
 mod agent_view;
+mod alerts;
 mod browser_view;
 mod changes_view;
 mod commands;
@@ -200,6 +201,21 @@ fn main() {
         mark("fonts_added");
         qur_agents::warm_login_path();
         commands::bind_keys(cx);
+        // A clicked alert (M6) shows its agent: tag = qur:<window>:<task id>.
+        cx.on_system_notification_response(|resp, cx| {
+            let Some((win, id)) = resp.tag.strip_prefix("qur:").and_then(|t| t.split_once(':')) else { return };
+            let (win, id) = (win.to_string(), id.to_string());
+            for handle in cx.windows() {
+                if handle.window_id().as_u64().to_string() != win {
+                    continue;
+                }
+                let _ = handle.update(cx, |root, window, cx| {
+                    if let Ok(ws) = root.downcast::<workspace::Workspace>() {
+                        ws.update(cx, |ws, cx| ws.reveal_task(&id, window, cx));
+                    }
+                });
+            }
+        });
         mark("keys_bound");
         cx.activate(true);
 

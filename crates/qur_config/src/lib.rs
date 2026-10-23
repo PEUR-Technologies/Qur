@@ -46,6 +46,26 @@ pub struct Config {
     pub ui: UiConfig,
     pub panels: PanelsConfig,
     pub keys: KeysConfig,
+    pub alerts: AlertsConfig,
+}
+
+/// When an agent finishes, errors or needs you while you're elsewhere
+/// (handoff section 11, M6).
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AlertsConfig {
+    /// macOS notification (needs the bundled app; dev builds skip it).
+    pub notify: bool,
+    /// Dock badge with the number of agents that need you.
+    pub badge: bool,
+    /// A short, soft chime.
+    pub sound: bool,
+}
+
+impl Default for AlertsConfig {
+    fn default() -> Self {
+        AlertsConfig { notify: true, badge: true, sound: true }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -98,6 +118,7 @@ impl Default for Config {
             ui: UiConfig::default(),
             panels: PanelsConfig::default(),
             keys: KeysConfig::default(),
+            alerts: AlertsConfig::default(),
         }
     }
 }

@@ -21,6 +21,7 @@ use qur_editor::Point;
 use qur_theme::{Registry, Rgba, ThemeChoice};
 
 use crate::agent_view::{AgentEvent, AgentTask, Layout, Status, View};
+use crate::alerts;
 use crate::changes_view::{ChangesEvent, ChangesView};
 use crate::git_panel::{GitEvent, GitPanel};
 use crate::live::{LiveEvent, LivePane};
@@ -63,6 +64,8 @@ struct TermTask {
     pending_type: Option<String>,
     /// Turn detection (M5): the terminal was busy, and files changed meanwhile.
     was_busy: bool,
+    /// When the current busy stretch began (alerts: only long ones count).
+    busy_since: Option<Instant>,
     wrote: bool,
 }
 
@@ -139,6 +142,8 @@ pub struct Workspace {
     /// Sessions that finished, errored or need you while not selected (Orca's unread).
     unread: HashSet<String>,
     checks: HashMap<String, Check>,
+    /// The status each agent was last alerted for (one alert per change).
+    alerted: HashMap<String, Status>,
     /// Run Project sessions (terminal ids) per task.
     runs: HashMap<String, usize>,
     /// One file tree per root (main checkout and each worktree).
@@ -209,6 +214,10 @@ impl Workspace {
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
                     this.sync_menus(cx);
+                    // Coming back to the agent you were on counts as seeing it.
+                    if let Some(Selected::Agent(id) | Selected::TermTask(id)) = this.selected.clone() {
+                        this.seen(&id, window, cx);
+                    }
                     // Pick up files created outside Qur (the M3 watcher replaces this).
                     for t in this.trees.values() {
                         t.update(cx, |t, cx| t.refresh(cx));
@@ -237,6 +246,7 @@ impl Workspace {
             selected: None,
             unread: HashSet::new(),
             checks: HashMap::new(),
+            alerted: HashMap::new(),
             runs: HashMap::new(),
             trees: HashMap::new(),
             buffers: Buffers { list: Vec::new() },
@@ -487,7 +497,8 @@ impl Workspace {
         self.selected = s;
         match &self.selected {
             Some(Selected::Agent(id)) | Some(Selected::TermTask(id)) => {
-                self.unread.remove(id);
+                let id = id.clone();
+                self.seen(&id, window, cx);
             }
             _ => {}
         }
@@ -580,6 +591,7 @@ impl Workspace {
             first_run: None,
             pending_type: None,
             was_busy: false,
+            busy_since: None,
             wrote: false,
         });
         self.refresh_overlaps(cx);
@@ -676,10 +688,27 @@ impl Workspace {
                 let attention = matches!(status, Status::Done | Status::NeedsYou | Status::Error(_));
                 if status == Status::Working {
                     this.checks.remove(&id);
+                    this.alerted.remove(&id);
                 }
-                if attention && this.selected != Some(Selected::Agent(id.clone())) {
-                    this.unread.insert(id);
+                let looking = window.is_window_active() && this.selected == Some(Selected::Agent(id.clone()));
+                if attention && !looking {
+                    this.unread.insert(id.clone());
+                    if this.alerted.get(&id) != Some(&status) {
+                        this.alerted.insert(id.clone(), status.clone());
+                        let (title, last) = {
+                            let a = a.read(cx);
+                            (a.record.title.clone(), a.last_line())
+                        };
+                        let (kind, detail) = match &status {
+                            Status::NeedsYou => (alerts::Kind::NeedsApproval, None),
+                            Status::Error(e) => (alerts::Kind::Failed, Some(e.clone())),
+                            _ => (alerts::Kind::Finished, last),
+                        };
+                        let tag = alert_tag(window, &id);
+                        alerts::fire(cx, &this.config.alerts, tag, &title, kind, detail.as_deref());
+                    }
                 }
+                this.sync_badge(window);
                 this.save_tasks(cx);
                 cx.notify();
             }
@@ -923,6 +952,7 @@ impl Workspace {
     fn terminal_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut turns = Vec::new();
         let mut typed = Vec::new();
+        let mut finished = Vec::new();
         let mut renamed = false;
         {
             let panel = self.terms.read(cx);
@@ -951,14 +981,31 @@ impl Workspace {
                 }
                 if busy {
                     t.was_busy = true;
-                } else if std::mem::take(&mut t.was_busy) && std::mem::take(&mut t.wrote) {
-                    turns.push(t.record.id.clone());
+                    t.busy_since.get_or_insert_with(Instant::now);
+                } else {
+                    // A long busy stretch that went quiet: the agent is
+                    // probably done and waiting for you.
+                    if t.busy_since.take().is_some_and(|b| b.elapsed() >= Duration::from_secs(7)) {
+                        finished.push((t.record.id.clone(), t.record.title.clone()));
+                    }
+                    if std::mem::take(&mut t.was_busy) && std::mem::take(&mut t.wrote) {
+                        turns.push(t.record.id.clone());
+                    }
                 }
             }
         }
         if renamed {
             self.save_tasks(cx);
         }
+        for (id, title) in finished {
+            let looking = window.is_window_active() && self.selected == Some(Selected::TermTask(id.clone()));
+            if !looking {
+                self.unread.insert(id.clone());
+                let tag = alert_tag(window, &id);
+                alerts::fire(cx, &self.config.alerts, tag, &title, alerts::Kind::Finished, Some("Went quiet: probably waiting for you"));
+            }
+        }
+        self.sync_badge(window);
         for (tid, p) in typed {
             self.terms.update(cx, |panel, cx| {
                 panel.type_text(tid, &p, cx);
@@ -970,6 +1017,36 @@ impl Workspace {
                 self.run_checks(&id, false, window, cx);
             }
         }
+    }
+
+    /// You looked at an agent: it no longer needs you (badge, notification).
+    fn seen(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.unread.remove(id) {
+            alerts::dismiss(cx, &alert_tag(window, id));
+        }
+        self.sync_badge(window);
+    }
+
+    fn sync_badge(&self, window: &Window) {
+        let n = self.unread.iter().filter(|id| self.task_exists(id)).count();
+        alerts::set_needs(window.window_handle().window_id().as_u64(), n, self.config.alerts.badge);
+    }
+
+    fn task_exists(&self, id: &str) -> bool {
+        self.agents.iter().any(|a| agent_id_matches(a, id)) || self.term_tasks.iter().any(|t| t.record.id == id)
+    }
+
+    /// A notification was clicked: show that agent (main.rs routes it here).
+    pub fn reveal_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.agent(id).is_some() {
+            self.select(Some(Selected::Agent(id.to_string())), window, cx);
+        } else if self.term_tasks.iter().any(|t| t.record.id == id) {
+            self.select(Some(Selected::TermTask(id.to_string())), window, cx);
+        } else {
+            return false;
+        }
+        window.activate_window();
+        true
     }
 
     fn new_terminal_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -3717,4 +3794,9 @@ mod tests {
         assert_eq!(local_port("http://localhost.evil.com:80"), None);
         assert_eq!(local_port("http://localhost"), None);
     }
+}
+
+/// Notification tag for an agent: `qur:<window>:<task id>` (main.rs parses it).
+fn alert_tag(window: &Window, id: &str) -> String {
+    format!("qur:{}:{id}", window.window_handle().window_id().as_u64())
 }
