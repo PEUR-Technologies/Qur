@@ -3838,7 +3838,29 @@ impl Workspace {
                 .child(div().occlude().child(child))
                 .into_any_element()
         };
+        // Pickers opened from a prompt (agent commands, @ mentions, the mode
+        // and model chips) sit just above that prompt, not at the top.
+        let above_prompt = |target: &Entity<PromptInput>, child: gpui::AnyElement| -> Option<gpui::AnyElement> {
+            let b = target.read(cx).bounds?;
+            Some(
+                gpui::anchored()
+                    .position(gpui::point(b.left() - look.z(12.), b.top() - look.z(14.)))
+                    .anchor(gpui::Anchor::BottomLeft)
+                    .snap_to_window_with_margin(look.z(8.))
+                    .child(div().occlude().child(child))
+                    .into_any_element(),
+            )
+        };
         match self.overlay.as_ref()? {
+            Overlay::Picker(p, PickKind::Slash { target, .. } | PickKind::Mention { target, .. }) => {
+                let el = || p.clone().into_any_element();
+                Some(above_prompt(target, el()).unwrap_or_else(|| centered(el())))
+            }
+            Overlay::Picker(p, PickKind::Setting { agent, .. }) => {
+                let target = agent.read(cx).prompt.clone();
+                let el = || p.clone().into_any_element();
+                Some(above_prompt(&target, el()).unwrap_or_else(|| centered(el())))
+            }
             Overlay::Picker(p, _) => Some(centered(p.clone().into_any_element())),
             Overlay::Setup(s) => Some(centered(s.clone().into_any_element())),
             Overlay::About => Some(centered(self.about_box(look, cx))),

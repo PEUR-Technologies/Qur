@@ -68,6 +68,9 @@ pub struct PromptInput {
     /// Browser picks (elements, page text) sent with the next message.
     pub attachments: Vec<Attachment>,
     last_width: Pixels,
+    /// Where the text area was last drawn (window coordinates): pickers
+    /// opened from this prompt (/, @, settings) sit just above it.
+    pub bounds: Option<Bounds<Pixels>>,
     /// How far the text is scrolled up inside the field (past MAX_LINES).
     scroll_y: Pixels,
     max_scroll: Pixels,
@@ -90,6 +93,7 @@ impl PromptInput {
             base,
             attachments: Vec::new(),
             last_width: px(400.),
+            bounds: None,
             scroll_y: px(0.),
             max_scroll: px(0.),
             painted: (0, 0),
@@ -415,6 +419,9 @@ impl Element for PromptElement {
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) -> Shaped {
         let look = Look::of(window, cx);
         let width = bounds.size.width;
+        if self.input.read(cx).bounds != Some(bounds) {
+            self.input.update(cx, |i, _| i.bounds = Some(bounds));
+        }
         if self.input.read(cx).last_width != width {
             // Re-measure next frame at the real width.
             self.input.update(cx, |i, cx| {
