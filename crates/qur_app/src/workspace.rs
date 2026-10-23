@@ -28,6 +28,7 @@ use crate::git_panel::{GitEvent, GitPanel};
 use crate::live::{LiveEvent, LivePane};
 use crate::monitor::{MonitorEvent, TaskMonitor};
 use crate::assets::{self, icon};
+use crate::browser_view::{Attachment, BrowserPane, BrowserPaneEvent};
 use crate::commands::{self, MenuState, agent as aa, edit, editor as ea, qur};
 use crate::editor_view::{Buffers, EditorEvent, EditorView};
 use crate::input::{InputEvent, TextInput};
@@ -56,6 +57,7 @@ struct TermTask {
     monitor: Entity<TaskMonitor>,
     live: Entity<LivePane>,
     changes: Entity<ChangesView>,
+    browser: Entity<BrowserPane>,
     /// New Agent Task text and setup command, used on the first start only.
     first_run: Option<FirstRun>,
     /// Task text to type once the agent first goes quiet (`prompt = "type"`).
@@ -364,6 +366,7 @@ impl Workspace {
             let accent = t.accent;
             t.monitor.update(cx, |m, _| m.accent = accent);
             t.live.update(cx, |l, _| l.accent = accent);
+            t.browser.update(cx, |b, _| b.accent = accent);
             slot += 1;
         }
         window.refresh();
@@ -613,6 +616,18 @@ impl Workspace {
         let id = record.id.clone();
         let sub = cx.subscribe_in(&changes, window, move |this, _, ev: &ChangesEvent, window, cx| this.on_changes_event(&id, ev, window, cx));
         self._subs.push(sub);
+        let browser = cx.new(|cx| BrowserPane::new(record.browser_url.clone(), accent, window, cx));
+        let id = record.id.clone();
+        let sub = cx.subscribe_in(&browser, window, move |this, _, ev: &BrowserPaneEvent, window, cx| match ev {
+            BrowserPaneEvent::Attach(a) => this.paste_attachment(&id, a, window, cx),
+            BrowserPaneEvent::Navigated(url) => {
+                if let Some(t) = this.term_tasks.iter_mut().find(|t| t.record.id == id) {
+                    t.record.browser_url = Some(url.clone());
+                    this.save_tasks(cx);
+                }
+            }
+        });
+        self._subs.push(sub);
         self.term_tasks.push(TermTask {
             record,
             term_id: None,
@@ -620,6 +635,7 @@ impl Workspace {
             monitor,
             live,
             changes,
+            browser,
             first_run: None,
             pending_type: None,
             was_busy: false,
@@ -627,6 +643,29 @@ impl Workspace {
             wrote: false,
         });
         self.refresh_overlaps(cx);
+    }
+
+    /// An Inspect pick in an Agent Terminal's Browser: paste it into the
+    /// agent's terminal (not sent), with the screenshot saved to a file so a
+    /// CLI agent can read it.
+    fn paste_attachment(&mut self, id: &str, a: &Attachment, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tid) = self.term_task(id).and_then(|t| t.term_id) else {
+            return self.flash("Start the agent's terminal first", cx);
+        };
+        let mut text = a.context.trim_end().to_string();
+        if let Some(png) = &a.png {
+            let path = std::env::temp_dir().join(format!("qur-pick-{}.png", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())));
+            if std::fs::write(&path, png).is_ok() {
+                text.push_str(&format!("\nScreenshot: {}", path.display()));
+            }
+        }
+        text.push('\n');
+        self.terms.update(cx, |p, cx| {
+            p.type_text(tid, &text, cx);
+            p.activate_id(tid, cx);
+        });
+        let f = self.terms.read(cx).focus.clone();
+        window.focus(&f, cx);
     }
 
     /// A task's watcher saw files change: refresh its tree and open copies.
@@ -1074,6 +1113,12 @@ impl Workspace {
                 panel.send_keys(tid, "\r");
             });
         }
+        // The agent changed files: show the result in its Browser.
+        for id in &turns {
+            if let Some(t) = self.term_task(id) {
+                t.browser.update(cx, |b, _| b.reload());
+            }
+        }
         if !turns.is_empty() && ProjectSettings::load(&self.project_id).checks.terminal {
             for id in turns {
                 self.run_checks(&id, false, window, cx);
@@ -1285,6 +1330,10 @@ impl Workspace {
                 let on = !a.shows_browser(cx);
                 a.show_browser(on, cx)
             });
+        } else if matches!(self.selected, Some(Selected::TermTask(_))) {
+            let on = !Docks::get(cx, dock::Kind::Terminal).is_visible(dock::Panel::Browser);
+            Docks::update(cx, dock::Kind::Terminal, |d| d.activate(if on { dock::Panel::Browser } else { dock::Panel::Session }));
+            cx.notify();
         }
     }
     /// Cmd+Shift+C: open the Browser if needed and toggle Inspect.
@@ -1296,6 +1345,12 @@ impl Workspace {
                 }
                 a.browser.update(cx, |b, cx| b.toggle_inspect(cx));
             });
+        } else if let Some(Selected::TermTask(id)) = &self.selected
+            && let Some(browser) = self.term_task(id).map(|t| t.browser.clone())
+        {
+            Docks::update(cx, dock::Kind::Terminal, |d| d.activate(dock::Panel::Browser));
+            browser.update(cx, |b, cx| b.toggle_inspect(cx));
+            cx.notify();
         }
     }
     fn selected_live(&self, cx: &App) -> Option<Entity<LivePane>> {
@@ -1901,8 +1956,8 @@ impl Workspace {
 
     /// Run Project (decision 29): start the project's dev server in the
     /// selected task's worktree on a free port, under TERMINALS as
-    /// "run · <task>", then open its URL in that agent's Browser (ACP) or the
-    /// system browser (Agent Terminal). Localhost only. Running it again shows
+    /// "run · <task>", then open its URL in that agent's Browser. Localhost
+    /// only. Running it again shows
     /// the live session.
     fn run_project(&mut self, _: &qur::RunProject, window: &mut Window, cx: &mut Context<Self>) {
         let Some((id, wt, _)) = self.selected_worktree(cx) else {
@@ -1971,8 +2026,12 @@ impl Workspace {
                         }
                     }
                     None => {
-                        if let Err(e) = std::process::Command::new("/usr/bin/open").arg(&url).spawn() {
-                            this.flash(format!("Couldn't open {url}: {e}"), cx);
+                        let Some(browser) = this.term_task(&id).map(|t| t.browser.clone()) else { return };
+                        browser.update(cx, |b, cx| b.navigate(&url, cx));
+                        Docks::update(cx, dock::Kind::Terminal, |d| d.activate(dock::Panel::Browser));
+                        this.select(Some(Selected::TermTask(id.clone())), window, cx);
+                        if this.overlay.is_none() && this.code.is_none() {
+                            browser.update(cx, |b, cx| b.set_shown(true, window, cx));
                         }
                     }
                 }
@@ -3602,6 +3661,7 @@ impl Workspace {
                         dock::Panel::Session => term.take().map(|t| t.into_any_element()).unwrap_or_else(|| div().into_any_element()),
                         dock::Panel::Live => div().size_full().child(t.live.clone()).into_any_element(),
                         dock::Panel::Changes => div().size_full().child(t.changes.clone()).into_any_element(),
+                        dock::Panel::Browser => div().size_full().child(t.browser.clone()).into_any_element(),
                         _ => div().into_any_element(),
                     });
                     // The stage region's one translucent layer.
@@ -4057,6 +4117,11 @@ impl Render for Workspace {
                 (t.record.id.clone(), t.shows_browser(cx), t.browser.clone())
             };
             let show = wants && !covered && self.selected == Some(Selected::Agent(id));
+            browser.update(cx, |b, cx| b.set_shown(show, window, cx));
+        }
+        let term_wants = Docks::get(cx, dock::Kind::Terminal).is_visible(dock::Panel::Browser);
+        for (id, browser) in self.term_tasks.iter().map(|t| (t.record.id.clone(), t.browser.clone())).collect::<Vec<_>>() {
+            let show = term_wants && !covered && self.selected == Some(Selected::TermTask(id));
             browser.update(cx, |b, cx| b.set_shown(show, window, cx));
         }
         let body = div()

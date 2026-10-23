@@ -119,8 +119,8 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | Agent menu | Discard Task…, Reveal Worktree in Finder, Open Task Worktree in Terminal | M2 ✅ |
 | `Cmd+K Cmd+L` | Cycle peek layout | M3 ✅ |
 | `Cmd+1..4` | Live / To-do / Chat / Changes (layout B) | M3 ✅ |
-| `Cmd+5` | Browser: show the selected agent's browser (any layout) | Browser ✅ |
-| `Cmd+Shift+C` | Browser: Inspect Element (highlight, click to attach to the prompt; select text to attach it) | Browser ✅ |
+| `Cmd+5` | Browser: show the selected agent's browser (any layout; Agent Terminals too) | Browser ✅ |
+| `Cmd+Shift+C` | Browser: Inspect Element (highlight, click to attach to the prompt, or paste into an Agent Terminal; select text to attach it) | Browser ✅ |
 | Changes view / Agent menu | Merge into My Branch, Keep Working, Discard Task…, Review Changes | M4 ✅ |
 | Agent menu | Run Checks Now, Run Project in Worktree (no default keys) | ✅ |
 | `Cmd+F` (in a terminal) | Find in Terminal (regex; ↩ older, ⇧↩ newer, Esc closes) | M5 ✅ |

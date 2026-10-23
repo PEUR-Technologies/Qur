@@ -46,7 +46,7 @@ One window is one project. There's no permanent editor area: the window is for a
   - **SOURCE CONTROL**: branch and change count; opens the Git panel.
   - **FILES**: the file tree, and the only collapsible section. It shows the selected agent's worktree, or your checkout when no agent is selected.
 - **Stage** (the rest of the window): the selected session, in panes you arrange like VS Code.
-  - An Agent Terminal fills the stage as a real terminal; add Live or Changes beside it with the pane's **+**.
+  - An Agent Terminal fills the stage as a real terminal; add Live, Browser or Changes beside it with the pane's **+** (or `Cmd+5` for the Browser). Inspect picks are pasted into its terminal, with a screenshot file path.
   - A structured (ACP) agent shows Live, Browser and Changes next to its Chat (with the permission bar and the prompt) and To-do.
   - Drag a tab onto a pane's edge to split, onto its middle to join; drag the dividers to resize; × tucks a tab away. Your arrangement is saved.
 - **Code modal**: opening a file shows it in a modal with full editing. `Esc` closes it.
@@ -74,8 +74,6 @@ One window is one project. There's no permanent editor area: the window is for a
 - **Live view** (structured agents): the file the agent is working in, as it types. Read-only while the agent edits, with **Take over** to step in. It follows the agent across files but never jumps within 5 s of your own scroll or click.
 - **Browser with Inspect.** Open your dev server next to the agent, pick elements or text, and ask the agent to adjust them. It gets the selector, HTML, key CSS, the source location when available, and a screenshot. Uses the system WebKit, freed when idle.
 - **Run Project in Worktree.** Starts your dev server in the agent's worktree on its own port and opens it in that agent's Browser, so parallel agents never collide. Localhost only; stopped on Discard, Merge cleanup or quit.
-
-![Browser + Inspect on peur.ph: pick an element, ask the agent](images/browser-inspect.png)
 
 ### Review and merge
 
@@ -105,7 +103,7 @@ One window is one project. There's no permanent editor area: the window is for a
 | `Ctrl+1..9`, `Ctrl+Opt+↑/↓` | Switch sessions |
 | `Cmd+I`, `Esc` / `Cmd+.` | Focus the prompt, stop the agent |
 | `Cmd+P`, `Cmd+Shift+P` | Go to file, command palette |
-| `Cmd+K Cmd+L`, `Cmd+1..5` | Structured agents: cycle layouts; Live / To-do / Chat / Changes / Browser |
+| `Cmd+K Cmd+L`, `Cmd+1..5` | Structured agents: cycle layouts; Live / To-do / Chat / Changes / Browser (`Cmd+5` works for Agent Terminals too) |
 | `Cmd+Shift+C` | Browser: inspect element |
 | `Ctrl+Shift+G` | Source control |
 | `Cmd+K Cmd+T` | Theme (this project or all projects) |
