@@ -1053,7 +1053,12 @@ impl AgentTask {
                     .cursor_pointer()
                     .text_color(look.c(if o.is_mode() && o.current != o.values.first().map(|v| v.value.clone()).unwrap_or_default() { self.accent } else { ui.text_secondary }))
                     .hover(|d| d.bg(look.c(ui.hover_bg)))
-                    .child(format!("{} ▾", o.current_name()))
+                    // Mode and model read on their own; others need their name
+                    // ("Effort: high", "Fast: off").
+                    .child(match o.category.as_deref() {
+                        Some("mode" | "model") => format!("{} ▾", o.current_name()),
+                        _ => format!("{}: {} ▾", o.name, o.current_name()),
+                    })
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(AgentEvent::PickSetting(id.clone()))))
             })
             .collect();
