@@ -5,7 +5,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,8 @@ use alacritty_terminal::index::{Column, Line, Point as TPoint, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::index::Direction;
+use alacritty_terminal::term::search::{Match, RegexSearch};
 use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::tty;
 use alacritty_terminal::vte::ansi::{ClearMode, Color, CursorShape, Handler, NamedColor};
@@ -31,6 +33,7 @@ use gpui::{
 use qur_theme::{Rgba, TerminalColors};
 
 use crate::commands::{edit, qur, terminal as ta};
+use crate::input::{InputEvent, TextInput};
 use crate::look::Look;
 
 // ---------------------------------------------------------------------------
@@ -93,12 +96,21 @@ fn hex(c: u32) -> gpui::Hsla {
 // Sessions
 // ---------------------------------------------------------------------------
 
+/// The latest title the program set (OSC 0/2), e.g. Claude Code's summary
+/// of what it's working on.
+type TitleCell = Arc<std::sync::Mutex<Option<String>>>;
+
 #[derive(Clone)]
-pub struct Listener(UnboundedSender<()>);
+pub struct Listener(UnboundedSender<()>, TitleCell);
 
 impl EventListener for Listener {
     fn send_event(&self, ev: TermEvent) {
-        if matches!(ev, TermEvent::Wakeup | TermEvent::ChildExit(_) | TermEvent::Exit | TermEvent::Title(_)) {
+        match &ev {
+            TermEvent::Title(t) => *self.1.lock().unwrap_or_else(|e| e.into_inner()) = Some(t.clone()),
+            TermEvent::ResetTitle => *self.1.lock().unwrap_or_else(|e| e.into_inner()) = None,
+            _ => {}
+        }
+        if matches!(ev, TermEvent::Wakeup | TermEvent::ChildExit(_) | TermEvent::Exit | TermEvent::Title(_) | TermEvent::ResetTitle) {
             let _ = self.0.unbounded_send(());
         }
     }
@@ -133,6 +145,8 @@ pub struct Session {
     pub id: usize,
     pub kind: Kind,
     pub label: String,
+    /// Where it started (resolves relative paths on Cmd-click).
+    pub cwd: PathBuf,
     term: Arc<FairMutex<Term<Listener>>>,
     sender: EventLoopSender,
     pid: i32,
@@ -141,6 +155,7 @@ pub struct Session {
     /// Text typed since the last Enter (for the task title).
     typed: String,
     pub first_line: Option<String>,
+    title: TitleCell,
     _reader: Task<()>,
 }
 
@@ -150,9 +165,9 @@ pub fn shell() -> String {
 
 type Spawned = (Arc<FairMutex<Term<Listener>>>, EventLoopSender, i32, futures::channel::mpsc::UnboundedReceiver<()>);
 
-fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize) -> std::io::Result<Spawned> {
+fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize, title: TitleCell) -> std::io::Result<Spawned> {
     let (tx, rx) = unbounded();
-    let listener = Listener(tx);
+    let listener = Listener(tx, title);
     let (cols, lines) = (100, 12);
     // `env -u` strips vendor API keys so the CLIs use their own logins.
     let mut args = vec!["-u".into(), "ANTHROPIC_API_KEY".into(), "-u".into(), "OPENAI_API_KEY".into(), shell(), "-l".into()];
@@ -223,6 +238,18 @@ impl Session {
         }
     }
 
+    /// What the agent says it's working on (its terminal title), when that's
+    /// a real description rather than the program's or shell's name.
+    pub fn agent_title(&self) -> Option<String> {
+        let raw = self.title.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+        clean_title(&raw)
+    }
+
+    /// The program has printed something since it started.
+    pub fn has_output(&self) -> bool {
+        self.last_output.is_some()
+    }
+
     pub fn is_busy(&self) -> bool {
         self.last_output.is_some_and(|t| t.elapsed() < Duration::from_secs(2))
     }
@@ -237,6 +264,18 @@ pub enum PanelEvent {
     Activity,
     /// All tabs closed, or a tab was closed.
     Closed,
+    /// Cmd-click on a URL.
+    OpenUrl(String),
+    /// Cmd-click on `path[:line[:col]]` that exists (absolute path).
+    OpenPath(PathBuf, Option<(u32, u32)>),
+}
+
+/// Find in Terminal (Cmd+F): the query field and the current match.
+struct Find {
+    input: Entity<TextInput>,
+    last: Option<Match>,
+    error: bool,
+    _sub: gpui::Subscription,
 }
 
 pub struct TerminalPanel {
@@ -248,6 +287,7 @@ pub struct TerminalPanel {
     cell: (Pixels, Pixels),
     last_bounds: Option<Bounds<Pixels>>,
     selecting: bool,
+    find: Option<Find>,
     idle_check: Option<Task<()>>,
 }
 
@@ -264,6 +304,7 @@ impl TerminalPanel {
             cell: (px(8.), px(16.)),
             last_bounds: None,
             selecting: false,
+            find: None,
             idle_check: None,
         }
     }
@@ -275,7 +316,8 @@ impl TerminalPanel {
             Kind::Agent { command, .. } => Some(command.clone()),
             Kind::Shell => None,
         };
-        let (term, sender, pid, mut rx) = match spawn_pty(cwd, run.as_deref(), id) {
+        let title = TitleCell::default();
+        let (term, sender, pid, mut rx) = match spawn_pty(cwd, run.as_deref(), id, title.clone()) {
             Ok(x) => x,
             Err(e) => {
                 self.message = Some(format!("terminal failed: {e}"));
@@ -310,6 +352,7 @@ impl TerminalPanel {
             id,
             kind,
             label,
+            cwd: cwd.to_path_buf(),
             term,
             sender,
             pid,
@@ -317,6 +360,7 @@ impl TerminalPanel {
             last_output: None,
             typed: String::new(),
             first_line: None,
+            title,
             _reader: reader,
         });
         self.active = self.sessions.len() - 1;
@@ -389,6 +433,13 @@ impl TerminalPanel {
             s.write(t.into_bytes());
         }
         cx.notify();
+    }
+
+    /// Send raw bytes (e.g. "\r" to submit what `type_text` put there).
+    pub fn send_keys(&mut self, id: usize, keys: &str) {
+        if let Some(s) = self.sessions.iter().find(|s| s.id == id) {
+            s.write(keys.as_bytes().to_vec());
+        }
     }
 
     pub fn session_by_id(&self, id: usize) -> Option<&Session> {
@@ -508,6 +559,9 @@ impl TerminalPanel {
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        if ev.modifiers.platform && self.open_link_at(ev.position, cx) {
+            return;
+        }
         if let Some(s) = self.sessions.get(self.active) {
             let mut t = s.term.lock();
             let off = t.grid().display_offset();
@@ -516,6 +570,103 @@ impl TerminalPanel {
             t.selection = Some(Selection::new(SelectionType::Simple, p, side));
             self.selecting = true;
         }
+        cx.notify();
+    }
+
+    /// Cmd-click: open the URL or `path:line` under the pointer.
+    fn open_link_at(&mut self, pos: gpui::Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        let Some(s) = self.sessions.get(self.active) else { return false };
+        let (text, col) = {
+            let t = s.term.lock();
+            let (p, _) = self.grid_point(pos, t.grid().display_offset());
+            if p.line.0 < -(t.history_size() as i32) || p.line.0 >= t.screen_lines() as i32 {
+                return false;
+            }
+            let row = &t.grid()[p.line];
+            let text: String = (0..t.columns()).map(|c| row[Column(c)].c).collect();
+            (text, p.column.0)
+        };
+        let ev = match link_at(&text, col).and_then(|tok| classify_link(&tok)) {
+            Some(Link::Url(u)) => PanelEvent::OpenUrl(u),
+            Some(Link::Path(p, at)) => {
+                let path = if Path::new(&p).is_absolute() { PathBuf::from(&p) } else { s.cwd.join(&p) };
+                if !path.is_file() {
+                    return false;
+                }
+                PanelEvent::OpenPath(path, at)
+            }
+            None => return false,
+        };
+        cx.emit(ev);
+        true
+    }
+
+    fn find(&mut self, _: &ta::Find, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(f) = &self.find {
+            let focus = f.input.read(cx).focus.clone();
+            return window.focus(&focus, cx);
+        }
+        let input = cx.new(|cx| TextInput::new("Find in terminal (regex) · ↩ older · ⇧↩ newer · esc", cx));
+        let sub = cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, window, cx| match ev {
+            InputEvent::Confirm { alt, .. } => {
+                let q = input.read(cx).text.clone();
+                this.find_step(&q, if *alt { Direction::Right } else { Direction::Left }, cx);
+            }
+            InputEvent::Changed => {
+                if let Some(f) = &mut this.find {
+                    f.last = None;
+                }
+                let q = input.read(cx).text.clone();
+                this.find_step(&q, Direction::Left, cx);
+            }
+            InputEvent::Cancel => {
+                this.find = None;
+                if let Some(s) = this.sessions.get(this.active) {
+                    s.term.lock().selection = None;
+                }
+                window.focus(&this.focus, cx);
+                cx.notify();
+            }
+            _ => {}
+        });
+        let focus = input.read(cx).focus.clone();
+        self.find = Some(Find { input, last: None, error: false, _sub: sub });
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Next match from the current one (older = up, towards the scrollback):
+    /// select it and scroll it into view.
+    fn find_step(&mut self, query: &str, dir: Direction, cx: &mut Context<Self>) {
+        let Some(f) = self.find.as_mut() else { return };
+        let Some(s) = self.sessions.get(self.active) else { return };
+        if query.is_empty() {
+            f.error = false;
+            s.term.lock().selection = None;
+            return cx.notify();
+        }
+        let Ok(mut regex) = RegexSearch::new(query) else {
+            f.error = true;
+            return cx.notify();
+        };
+        let mut t = s.term.lock();
+        let found = search_from(&t, &mut regex, f.last.as_ref(), dir);
+        f.error = found.is_none();
+        if let Some(m) = found {
+            let mut sel = Selection::new(SelectionType::Simple, *m.start(), Side::Left);
+            sel.update(*m.end(), Side::Right);
+            t.selection = Some(sel);
+            // Scroll so the match sits mid-screen when it's off screen.
+            let off = t.grid().display_offset() as i32;
+            let rows = t.screen_lines() as i32;
+            let line = m.start().line.0;
+            if line < -off || line >= rows - off {
+                let target = (rows / 2 - line).clamp(0, t.history_size() as i32);
+                t.scroll_display(Scroll::Delta(target - off));
+            }
+            f.last = Some(m);
+        }
+        drop(t);
         cx.notify();
     }
 
@@ -848,7 +999,26 @@ impl Render for TerminalPanel {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::close_terminal))
+            .on_action(cx.listener(Self::find))
             .children(message)
+            .children(self.find.as_ref().map(|f| {
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(look.z(8.))
+                    .mx(look.z(8.))
+                    .mt(look.z(4.))
+                    .px(look.z(8.))
+                    .py(look.z(3.))
+                    .rounded(look.z(4.))
+                    .border_1()
+                    .border_color(look.c(if f.error { ui.error } else { ui.border }))
+                    .bg(look.c(ui.overlay_bg))
+                    .text_size(look.text(-1.))
+                    .child(div().flex_1().min_w(px(0.)).child(f.input.clone()))
+                    .when(f.error, |d| d.child(div().flex_none().text_color(look.c(ui.text_muted)).child("no match")))
+            }))
             .child(
                 div()
                     .flex_1()
@@ -860,5 +1030,136 @@ impl Render for TerminalPanel {
                     .on_scroll(cx.listener(Self::on_scroll))
                     .when(!self.sessions.is_empty(), |d| d.child(GridElement { panel: cx.entity() })),
             )
+    }
+}
+
+/// Find in Terminal: the next match before (`Left`, older) or after
+/// (`Right`, newer) the current one; the first search starts at the bottom.
+fn search_from<T: EventListener>(t: &Term<T>, regex: &mut RegexSearch, last: Option<&Match>, dir: Direction) -> Option<Match> {
+    let origin = match (last, dir) {
+        (Some(m), Direction::Left) => *m.start(),
+        (Some(m), Direction::Right) => *m.end(),
+        (None, _) => TPoint::new(Line(t.screen_lines() as i32 - 1), t.last_column()),
+    };
+    let side = if dir == Direction::Left { Side::Left } else { Side::Right };
+    let m = t.search_next(regex, origin, dir, side, None)?;
+    // Searching from a match's own edge finds it again: step past it.
+    if last.is_some_and(|l| l == &m) {
+        let next = if dir == Direction::Left { m.start().sub(t, alacritty_terminal::index::Boundary::Grid, 1) } else { m.end().add(t, alacritty_terminal::index::Boundary::Grid, 1) };
+        return t.search_next(regex, next, dir, side, None);
+    }
+    Some(m)
+}
+
+/// A terminal title as a task name: without spinner/status glyphs, and None
+/// for generic titles (the program's name, a shell, a path, user@host).
+fn clean_title(raw: &str) -> Option<String> {
+    let t = raw.trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
+    let lower = t.to_lowercase();
+    let generic = ["claude", "claude code", "zsh", "bash", "fish", "sh", "aider", "-zsh", "login"];
+    if t.is_empty() || generic.contains(&lower.as_str()) || t.starts_with('/') || t.starts_with('~') || (t.contains('@') && t.contains(':')) {
+        return None;
+    }
+    let mut s: String = t.chars().take(80).collect();
+    if t.chars().count() > 80 {
+        s.push('…');
+    }
+    Some(s)
+}
+
+/// What Cmd-click opens.
+#[derive(Debug, PartialEq)]
+enum Link {
+    Url(String),
+    /// Path as printed, plus line and column (1-based) when given.
+    Path(String, Option<(u32, u32)>),
+}
+
+/// The whitespace-free word at `col` in a terminal line, without wrapping
+/// quotes/brackets or trailing punctuation.
+fn link_at(text: &str, col: usize) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let stop = |c: char| c.is_whitespace() || "\"'`()[]{}<>|".contains(c);
+    if col >= chars.len() || stop(chars[col]) {
+        return None;
+    }
+    let mut a = col;
+    while a > 0 && !stop(chars[a - 1]) {
+        a -= 1;
+    }
+    let mut b = col;
+    while b + 1 < chars.len() && !stop(chars[b + 1]) {
+        b += 1;
+    }
+    let tok: String = chars[a..=b].iter().collect();
+    let tok = tok.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+    (!tok.is_empty()).then(|| tok.to_string())
+}
+
+fn classify_link(tok: &str) -> Option<Link> {
+    if tok.starts_with("http://") || tok.starts_with("https://") {
+        return Some(Link::Url(tok.to_string()));
+    }
+    let mut parts = tok.splitn(3, ':');
+    let path = parts.next()?;
+    let line = parts.next().and_then(|l| l.parse::<u32>().ok());
+    let col = parts.next().and_then(|c| c.split(|ch: char| !ch.is_ascii_digit()).next()?.parse::<u32>().ok());
+    // Something path-like: a separator or a file extension.
+    let looks = path.contains('/') || path.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && !ext.is_empty() && ext.len() <= 8);
+    if !looks {
+        return None;
+    }
+    Some(Link::Path(path.to_string(), line.map(|l| (l, col.unwrap_or(1)))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_in_terminal_walks_matches() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::term::test::TermSize;
+        let mut t = Term::new(TermConfig::default(), &TermSize::new(40, 5), VoidListener);
+        let mut parser: alacritty_terminal::vte::ansi::Processor = alacritty_terminal::vte::ansi::Processor::new();
+        // 8 lines on a 5-line screen: the first ones are in the scrollback.
+        parser.advance(&mut t, b"error one\r\nok\r\nok\r\nerror two\r\nok\r\nok\r\nerror three\r\nok");
+        let mut re = RegexSearch::new("error \\w+").unwrap();
+        let text = |t: &Term<VoidListener>, m: &Match| t.bounds_to_string(*m.start(), *m.end());
+        let a = search_from(&t, &mut re, None, Direction::Left).unwrap();
+        assert_eq!(text(&t, &a), "error three");
+        let b = search_from(&t, &mut re, Some(&a), Direction::Left).unwrap();
+        assert_eq!(text(&t, &b), "error two");
+        let c = search_from(&t, &mut re, Some(&b), Direction::Left).unwrap();
+        assert_eq!(text(&t, &c), "error one", "reaches the scrollback");
+        let d = search_from(&t, &mut re, Some(&c), Direction::Right).unwrap();
+        assert_eq!(text(&t, &d), "error two", "and back towards newer");
+    }
+
+    #[test]
+    fn terminal_titles_as_task_names() {
+        assert_eq!(clean_title("✳ Fix login redirect").as_deref(), Some("Fix login redirect"));
+        assert_eq!(clean_title("⠂ Add dark mode toggle").as_deref(), Some("Add dark mode toggle"));
+        assert_eq!(clean_title("✳ Claude Code"), None);
+        assert_eq!(clean_title("zsh"), None);
+        assert_eq!(clean_title("yobi@mac:~/qur"), None);
+        assert_eq!(clean_title("~/qur"), None);
+        assert_eq!(clean_title("   "), None);
+    }
+
+    #[test]
+    fn cmd_click_links() {
+        let line = "  --> src/main.rs:12:5 (see https://example.com/x).";
+        let at = |needle: &str| line.find(needle).unwrap();
+        assert_eq!(link_at(line, at("main")).as_deref(), Some("src/main.rs:12:5"));
+        assert_eq!(classify_link("src/main.rs:12:5"), Some(Link::Path("src/main.rs".into(), Some((12, 5)))));
+        assert_eq!(link_at(line, at("example")).as_deref(), Some("https://example.com/x"));
+        assert_eq!(classify_link("https://example.com/x"), Some(Link::Url("https://example.com/x".into())));
+        assert_eq!(link_at(line, 0), None);
+        assert_eq!(classify_link("README.md"), Some(Link::Path("README.md".into(), None)));
+        assert_eq!(classify_link("app.ts:7"), Some(Link::Path("app.ts".into(), Some((7, 1)))));
+        assert_eq!(classify_link("hello"), None);
+        assert_eq!(classify_link("-->"), None);
+        assert_eq!(link_at("error: 'lib/a.py', line 3", 9).as_deref(), Some("lib/a.py"));
     }
 }

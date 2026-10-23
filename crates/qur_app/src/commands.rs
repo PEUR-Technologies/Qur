@@ -24,7 +24,7 @@ pub mod qur {
             FocusPrompt, StopAgent, TakeOver, NextAgent, PrevAgent, ReviewChanges, Merge,
             KeepWorking, DiscardTask, OpenWorktreeInTerminal, RevealWorktree, KeyboardShortcuts,
             RunDoctor, ShowLogs, ReportProblem, ExpandSelection, ShrinkSelection,
-            RunChecks, RunProject, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge,
+            RunChecks, RunProject, RenameAgent, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge,
         ]
     );
 
@@ -72,7 +72,7 @@ pub mod agent {
 }
 
 pub mod terminal {
-    gpui::actions!(terminal, [Clear, SendLineStart, SendLineEnd, SendKillLine]);
+    gpui::actions!(terminal, [Clear, SendLineStart, SendLineEnd, SendKillLine, Find]);
 }
 
 /// Single-line text fields (find, replace, go to line, pickers).
@@ -246,6 +246,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::CloseTerminal, "Terminal", "Close Terminal", "cmd-w", T, R),
     cmd!(qur::ToggleTerminal, "View", "Go to Terminal", "ctrl-`", W, R),
     cmd!(terminal::Clear, "Terminal", "Clear", "cmd-k", T, R),
+    cmd!(terminal::Find, "Terminal", "Find in Terminal", "cmd-f", T, R),
     cmd!(qur::PrevTerminal, "Terminal", "Previous Terminal", "cmd-shift-[|cmd-{", W, R),
     cmd!(qur::NextTerminal, "Terminal", "Next Terminal", "cmd-shift-]|cmd-}", W, R),
     cmd!(terminal::SendLineStart, "Terminal", "Line Start", "cmd-left", T, R),
@@ -269,6 +270,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::ReviewChanges, "Agent", "Review Changes", "", W, R),
     cmd!(qur::Merge, "Agent", "Merge into My Branch", "", W, R),
     cmd!(qur::KeepWorking, "Agent", "Keep Working", "", W, R),
+    cmd!(qur::RenameAgent, "Agent", "Rename Agent…", "", W, R),
     cmd!(qur::RunChecks, "Agent", "Run Checks Now", "", W, R),
     cmd!(qur::RunProject, "Agent", "Run Project in Worktree", "", W, R),
     cmd!(qur::DiscardTask, "Agent", "Discard Task…", "", W, R),
@@ -544,6 +546,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::FocusPrompt),
             item(qur::StopAgent),
             item(qur::TakeOver),
+            item(qur::RenameAgent),
             sep(),
             item(agent::AllowOnce),
             item(agent::AllowAlways),

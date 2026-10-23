@@ -66,6 +66,30 @@ pub struct AgentDef {
     /// Optional "#RRGGBB" override of the theme's accent slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accent: Option<String>,
+    /// Terminal mode: how the New Agent Task text reaches the agent on its
+    /// first start. "arg" = last argument (`claude "…"`), a flag such as
+    /// "--message" = `aider --message "…"`, "type" (default) = typed into
+    /// the terminal once the agent first goes quiet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+}
+
+/// How a terminal-mode agent receives its task text (`AgentDef::prompt`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PromptVia {
+    Arg,
+    Flag(String),
+    Type,
+}
+
+impl AgentDef {
+    pub fn prompt_via(&self) -> PromptVia {
+        match self.prompt.as_deref().map(str::trim) {
+            Some("arg") => PromptVia::Arg,
+            Some(f) if f.starts_with('-') => PromptVia::Flag(f.to_string()),
+            _ => PromptVia::Type,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -91,6 +115,7 @@ impl Roster {
                 command: "claude-agent-acp".into(),
                 args: vec![],
                 accent: None,
+                prompt: None,
             }],
         }
     }
@@ -148,6 +173,10 @@ pub struct TaskRecord {
     /// Last address in the task's Browser view (decision 26).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_url: Option<String>,
+    /// The user named this task (Rename Agent…): keep the title, don't follow
+    /// the agent's terminal title.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub renamed: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -240,6 +269,7 @@ mod tests {
             created: 1,
             mode: Mode::Acp,
             browser_url: None,
+            renamed: false,
         });
         let body = toml_edit::ser::to_string_pretty(&s).unwrap();
         let back: TaskStore = toml_edit::de::from_str(&body).unwrap();
