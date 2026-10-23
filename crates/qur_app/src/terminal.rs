@@ -1054,10 +1054,14 @@ fn search_from<T: EventListener>(t: &Term<T>, regex: &mut RegexSearch, last: Opt
 /// A terminal title as a task name: without spinner/status glyphs, and None
 /// for generic titles (the program's name, a shell, a path, user@host).
 fn clean_title(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.starts_with('/') || raw.starts_with('~') || (raw.contains('@') && raw.contains(':')) {
+        return None;
+    }
     let t = raw.trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
     let lower = t.to_lowercase();
     let generic = ["claude", "claude code", "zsh", "bash", "fish", "sh", "aider", "-zsh", "login"];
-    if t.is_empty() || generic.contains(&lower.as_str()) || t.starts_with('/') || t.starts_with('~') || (t.contains('@') && t.contains(':')) {
+    if t.is_empty() || generic.contains(&lower.as_str()) {
         return None;
     }
     let mut s: String = t.chars().take(80).collect();
