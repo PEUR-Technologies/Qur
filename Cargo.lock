@@ -3237,6 +3237,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-web-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2e5aaab980c433cf470df9d7af96a7b46a9d892d521a2cbbb2f8a4c16751e7f"
+dependencies = [
+ "bitflags 2.13.2",
+ "block2 0.6.2",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "object"
 version = "0.37.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3664,6 +3678,7 @@ dependencies = [
  "nucleo-matcher",
  "qur_acp",
  "qur_agents",
+ "qur_browser",
  "qur_config",
  "qur_editor",
  "qur_heat",
@@ -3672,7 +3687,21 @@ dependencies = [
  "qur_tree",
  "qur_watch",
  "qur_worktree",
+ "raw-window-handle",
  "smallvec",
+]
+
+[[package]]
+name = "qur_browser"
+version = "0.1.0"
+dependencies = [
+ "block2 0.6.2",
+ "futures",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "objc2-web-kit",
+ "serde_json",
 ]
 
 [[package]]

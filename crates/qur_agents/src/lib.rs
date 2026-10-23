@@ -145,6 +145,9 @@ pub struct TaskRecord {
     pub created: u64,
     /// "acp" or "terminal" (New Agent Terminal).
     pub mode: Mode,
+    /// Last address in the task's Browser view (decision 26).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -236,6 +239,7 @@ mod tests {
             session_id: Some("s1".into()),
             created: 1,
             mode: Mode::Acp,
+            browser_url: None,
         });
         let body = toml_edit::ser::to_string_pretty(&s).unwrap();
         let back: TaskStore = toml_edit::de::from_str(&body).unwrap();

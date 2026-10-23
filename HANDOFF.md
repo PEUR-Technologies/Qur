@@ -34,7 +34,16 @@ Summary of the owner decisions so far:
 
 ## Status
 
-**M0–M3 are done.** Commits: "M0: spikes", "M1: editor shell", "M2: agents in worktrees", "M3: Live view + heatmap". The repo lives at https://github.com/PEUR-Technologies/Qur (private). Next is the **Browser + Inspect** milestone (decision 26), then M4.
+**M0–M3 and Browser + Inspect are done.** Commits: "M0: spikes", "M1: editor shell", "M2: agents in worktrees", "M3: Live view + heatmap", "Browser + Inspect". The repo lives at https://github.com/PEUR-Technologies/Qur (private). Next is **M4**.
+
+Browser + Inspect delivered (decision 26):
+- `qur_browser`: a system WKWebView embedded in GPUI's NSView, plus an injected inspector. It reports picks (selector, HTML, styles, rect, React/`data-qur-source` source), page text, SPA navigation and load errors, and takes snapshots.
+- `BrowserPane` per agent task:
+  - URL bar with back, forward and reload; the URL is saved on the task.
+  - Inspect (`Cmd+Shift+C`): picks become prompt chips, sent as context text plus a PNG image block when the agent supports images.
+  - Created when first shown, hidden under Qur overlays, freed after 5 idle minutes.
+  - Reloads after a turn that changed files.
+- In the stage: a "Live | Browser" switch in layouts A/C, a Browser segment in B, and `Cmd+5`.
 
 M3 delivered:
 - **New crates:**
@@ -104,18 +113,21 @@ Env: `QUR_HOME` (settings folder; **always set it to a scratch dir in tests**, s
 
 ## Next
 
-1. **Browser + Inspect** (decision 26). Plan:
-   - A "Browser" tab next to Live in the agent stage: a WKWebView embedded as a child NSView of GPUI's window, through `raw-window-handle` and `objc2-web-kit`.
-   - The URL is remembered per task; the page is freed after a few idle minutes.
-   - Inspect mode: an injected script highlights elements on hover and selects on click. The selection (selector, outerHTML, key computed styles, URL, and a screenshot from `takeSnapshot`) goes into the prompt as a chip and is sent as text plus an image block.
-   - Hide the native view while GPUI overlays are open.
-   - Measure the memory cost (M3 probe: +8 MB in Qur, about +55 MB in WebKit's own processes for a simple page).
-2. **M4: Changes + Merge + Git panel.** It includes Orca's line comments sent back to the agent, the conflict pre-check (`merge-tree`), and +n −m on agent rows.
+1. **M4: Changes + Merge + Git panel** (handoff section 10, with the M0 merge recipe):
+   - Changes diff view (task branch vs base).
+   - Merge via `merge-tree` + `read-tree` (keeps the user's index and stash), conflicts opened in the editor, Discard (already done).
+   - Git panel on the main checkout: status, stage, commit.
+   - Orca items: line comments on the agent's diff sent back as one prompt; a conflict pre-check and +n −m on agent rows; preserved-branch safety net.
+2. Browser follow-ups (known gaps):
+   - Iframes and closed shadow roots can't be inspected; selectors aren't scoped inside shadow roots.
+   - React 19 has no `_debugSource`; `data-qur-source` attributes work everywhere.
+   - Keyboard text selection isn't captured.
+   - Page JavaScript can see `window.__qur`.
 3. Known gaps:
    - IME marked text isn't drawn.
    - End and Cmd+Right go to the line end, not the visual-row end.
    - The watcher honours only the root `.gitignore`.
-   - Deleted files don't appear as rows in the tree; their state shows only in the folder dots.
+   - Deleted files don't appear as tree rows.
 
 ## Open questions for the owner
 

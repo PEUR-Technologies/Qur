@@ -36,3 +36,9 @@ Runtime: `tree-sitter` 0.27.1 (MIT), `tree-sitter-language` 0.1.9 (MIT), `stream
 |---|---|---|
 | GPUI (`gpui`, `gpui_platform`) | Apache-2.0 | Zed, pinned rev `9e84b066` |
 | alacritty_terminal 0.26 | Apache-2.0 | https://github.com/alacritty/alacritty |
+
+## Browser (decision 26)
+
+| Component | License | Notes |
+|---|---|---|
+| objc2-web-kit 0.3.2 (with objc2 0.6, objc2-foundation/app-kit 0.3, block2 0.6) | MIT | Rust bindings to the system WKWebView; WebKit itself ships with macOS (not bundled) |

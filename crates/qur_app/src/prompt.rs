@@ -14,6 +14,7 @@ use gpui::{
 };
 use smallvec::SmallVec;
 
+use crate::browser_view::Attachment;
 use crate::commands::{edit, input};
 use crate::look::Look;
 
@@ -64,6 +65,8 @@ pub struct PromptInput {
     pub mentions: Vec<PathBuf>,
     /// Paths are shown relative to this folder.
     pub base: PathBuf,
+    /// Browser picks (elements, page text) sent with the next message.
+    pub attachments: Vec<Attachment>,
     last_width: Pixels,
 }
 
@@ -79,6 +82,7 @@ impl PromptInput {
             placeholder: placeholder.into(),
             mentions: Vec::new(),
             base,
+            attachments: Vec::new(),
             last_width: px(400.),
         }
     }
@@ -99,6 +103,16 @@ impl PromptInput {
 
     fn rel(&self, p: &std::path::Path) -> String {
         p.strip_prefix(&self.base).unwrap_or(p).to_string_lossy().into_owned()
+    }
+
+    pub fn attach(&mut self, a: Attachment, cx: &mut Context<Self>) {
+        self.attachments.push(a);
+        cx.emit(PromptEvent::Changed);
+        cx.notify();
+    }
+
+    pub fn take_attachments(&mut self) -> Vec<Attachment> {
+        std::mem::take(&mut self.attachments)
     }
 
     /// Replace the whole text (slash command chosen), caret at the end.
@@ -254,7 +268,7 @@ impl PromptInput {
         self.vertical(true, cx)
     }
     fn a_submit(&mut self, _: &input::Confirm, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.text.trim().is_empty() {
+        if !self.text.trim().is_empty() || !self.attachments.is_empty() {
             cx.emit(PromptEvent::Submit)
         }
     }
@@ -422,11 +436,44 @@ impl Element for PromptElement {
 }
 
 impl Render for PromptInput {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let look = Look::of(window, cx);
+        let ui = look.theme.ui.clone();
+        let chips = (!self.attachments.is_empty()).then(|| {
+            div().flex().flex_wrap().gap(look.z(4.)).pb(look.z(6.)).children(self.attachments.iter().enumerate().map(|(i, a)| {
+                div()
+                    .id(("attachment", i))
+                    .flex()
+                    .items_center()
+                    .gap(look.z(4.))
+                    .px(look.z(6.))
+                    .py(look.z(1.))
+                    .rounded(look.z(4.))
+                    .bg(look.c(ui.active_bg))
+                    .text_size(look.text(-2.))
+                    .text_color(look.c(ui.text_secondary))
+                    .child(if a.png.is_some() { "▣" } else { "❝" })
+                    .child(div().max_w(look.z(220.)).truncate().child(a.label.clone()))
+                    .child(
+                        div()
+                            .id(("attachment-x", i))
+                            .cursor_pointer()
+                            .text_color(look.c(ui.text_muted))
+                            .child("×")
+                            .on_click(cx.listener(move |t, _, _, cx| {
+                                if i < t.attachments.len() {
+                                    t.attachments.remove(i);
+                                }
+                                cx.notify();
+                            })),
+                    )
+            }))
+        });
         div()
             .key_context("TextInput")
             .track_focus(&self.focus)
             .w_full()
+            .children(chips)
             .on_action(cx.listener(Self::a_backspace))
             .on_action(cx.listener(Self::a_delete))
             .on_action(cx.listener(Self::a_del_word))

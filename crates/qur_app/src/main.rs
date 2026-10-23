@@ -5,6 +5,7 @@
 
 mod assets;
 mod agent_view;
+mod browser_view;
 mod commands;
 mod editor_view;
 mod input;

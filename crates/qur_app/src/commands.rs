@@ -16,7 +16,7 @@ pub mod qur {
             ZoomReset, Transparency, GoToLine, RevealInFiles, NewTerminal, NewAgentTerminal,
             NextTerminal, PrevTerminal, CloseTerminal, OpenConfig, ThemePicker, NewWindow,
             OpenFolder, QuickOpen, SaveAll, RevertFile, NavBack, NavForward, RecentFile,
-            UseDefaultTheme, ProjectSwitcher,
+            UseDefaultTheme, ProjectSwitcher, PeekBrowser, ToggleInspect,
             // Listed in menus/palette, built in later milestones (shown disabled).
             About, CheckSetup, OpenKeymap, OpenAgents, VimMode, NewAgentTask, FindInProject,
             ReplaceInProject, GitPanel, SearchPanel, PeekLayoutA, PeekLayoutB, PeekLayoutC,
@@ -276,6 +276,8 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::PeekTodo, "View", "To-do", "cmd-2", W, R),
     cmd!(qur::PeekChat, "View", "Chat", "cmd-3", W, R),
     cmd!(qur::PeekChanges, "View", "Changes", "cmd-4", W, R),
+    cmd!(qur::PeekBrowser, "View", "Browser", "cmd-5", W, R),
+    cmd!(qur::ToggleInspect, "View", "Browser: Inspect Element", "cmd-shift-c", NT, R),
     cmd!(qur::FollowAgent, "View", "Follow Agent", "", W, R),
     // Help
     cmd!(qur::KeyboardShortcuts, "Help", "Qur Keyboard Shortcuts", "", W, L("M7")),
@@ -498,7 +500,9 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
                 item(qur::PeekTodo),
                 item(qur::PeekChat),
                 item(qur::PeekChanges),
+                item(qur::PeekBrowser),
             ])),
+            item(qur::ToggleInspect),
             item(qur::FollowAgent).checked(s.follow),
             sep(),
             item(editor::ToggleSoftWrap).checked(s.soft_wrap),

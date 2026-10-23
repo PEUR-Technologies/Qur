@@ -125,6 +125,10 @@ fn tool_call_apply_merges_updates() {
 fn json_shapes_we_send() {
     assert_eq!(PromptBlock::Text("hi".into()).to_json(), json!({ "type": "text", "text": "hi" }));
     assert_eq!(
+        PromptBlock::Image { mime: "image/png".into(), data_base64: "AAAA".into() }.to_json(),
+        json!({ "type": "image", "mimeType": "image/png", "data": "AAAA" })
+    );
+    assert_eq!(
         PromptBlock::ResourceLink { uri: "file:///w/a.ts".into(), name: "a.ts".into() }.to_json(),
         json!({ "type": "resource_link", "uri": "file:///w/a.ts", "name": "a.ts" })
     );

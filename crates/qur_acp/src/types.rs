@@ -24,6 +24,9 @@ pub enum PromptBlock {
     Text(String),
     /// An `@file` mention; `uri` is usually `file:///abs/path`.
     ResourceLink { uri: String, name: String },
+    /// An image (base64), e.g. a screenshot of an inspected element. Only
+    /// send when the agent's `promptCapabilities.image` is true.
+    Image { mime: String, data_base64: String },
 }
 
 impl PromptBlock {
@@ -31,6 +34,7 @@ impl PromptBlock {
         match self {
             PromptBlock::Text(t) => json!({ "type": "text", "text": t }),
             PromptBlock::ResourceLink { uri, name } => json!({ "type": "resource_link", "uri": uri, "name": name }),
+            PromptBlock::Image { mime, data_base64 } => json!({ "type": "image", "mimeType": mime, "data": data_base64 }),
         }
     }
 }

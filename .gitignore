@@ -3,3 +3,4 @@ target/
 /spikes/fixtures/large.ts
 /spikes/**/out/
 .DS_Store
+/spikes/fixtures/web-repo/

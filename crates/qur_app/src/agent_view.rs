@@ -18,6 +18,7 @@ use qur_acp::{
 use qur_agents::{AgentDef, TaskRecord};
 use qur_theme::Rgba;
 
+use crate::browser_view::{BrowserPane, BrowserPaneEvent, base64};
 use crate::live::{LiveEvent, LivePane};
 use crate::look::Look;
 use crate::monitor::{TaskMonitor, heat_kind, heat_status};
@@ -133,6 +134,28 @@ pub enum View {
     Todo,
     Chat,
     Changes,
+    Browser,
+}
+
+/// One message on its way to the agent.
+#[derive(Clone)]
+struct Outgoing {
+    /// What the user typed (shown in the chat).
+    text: String,
+    mentions: Vec<PathBuf>,
+    /// Browser picks: context text for the agent, plus screenshots.
+    context: Vec<String>,
+    labels: Vec<String>,
+    images: Vec<Vec<u8>>,
+}
+
+impl Outgoing {
+    fn plain(text: String, mentions: Vec<PathBuf>) -> Self {
+        Outgoing { text, mentions, context: Vec::new(), labels: Vec::new(), images: Vec::new() }
+    }
+    fn shown(&self) -> String {
+        if self.labels.is_empty() { self.text.clone() } else { format!("{}\n\n＋ {}", self.text, self.labels.join(", ")) }
+    }
 }
 
 pub struct AgentTask {
@@ -155,9 +178,17 @@ pub struct AgentTask {
     permission: Option<Permission>,
     pub prompt: Entity<PromptInput>,
     /// Prompt to send once the session is ready.
-    queued: Option<(String, Vec<PathBuf>)>,
+    queued: Option<Outgoing>,
     /// Messages sent during a turn, sent in order when it ends (decision 22).
-    pending: Vec<(String, Vec<PathBuf>)>,
+    pending: Vec<Outgoing>,
+    /// The agent accepts image blocks (promptCapabilities.image).
+    images_ok: bool,
+    /// Per-task Browser view (decision 26).
+    pub browser: Entity<BrowserPane>,
+    /// Layouts A/C: the middle pane shows the browser instead of Live.
+    pub middle_browser: bool,
+    /// Files changed during the current turn (reload the browser when it ends).
+    turn_wrote: bool,
     /// Slash commands the agent advertised.
     pub commands: Vec<qur_acp::AvailableCommand>,
     /// Setup command still running for a new worktree.
@@ -182,6 +213,31 @@ impl AgentTask {
             LiveEvent::Open(p) => cx.emit(AgentEvent::OpenFile(p.clone(), None)),
         });
         let monitor_sub = cx.observe(&monitor, |_, _, cx| cx.notify());
+        let files_sub = cx.subscribe(&monitor, |this, _, ev: &crate::monitor::MonitorEvent, _| {
+            if let crate::monitor::MonitorEvent::Files(_) = ev
+                && matches!(this.status, Status::Working | Status::NeedsYou)
+            {
+                this.turn_wrote = true;
+            }
+        });
+        let browser = cx.new(|cx| BrowserPane::new(record.browser_url.clone(), accent, window, cx));
+        let browser_sub = cx.subscribe_in(&browser, window, |this, _, ev: &BrowserPaneEvent, window, cx| match ev {
+            BrowserPaneEvent::Attach(a) => {
+                let a = a.clone();
+                this.prompt.update(cx, |p, cx| p.attach(a, cx));
+                let f = this.prompt.read(cx).focus.clone();
+                window.focus(&f, cx);
+                // Dev/test: QUR_DEBUG_SEND="text" sends right after a pick.
+                if let Ok(text) = std::env::var("QUR_DEBUG_SEND") {
+                    this.prompt.update(cx, |p, cx| p.set_text(&text, cx));
+                    this.submit(cx);
+                }
+            }
+            BrowserPaneEvent::Navigated(url) => {
+                this.record.browser_url = Some(url.clone());
+                cx.emit(AgentEvent::Changed);
+            }
+        });
         let prompt = cx.new(|cx| PromptInput::new(format!("Ask {}…  (@ to mention a file)", def.label), wt, cx));
         let sub = cx.subscribe_in(&prompt, window, |this, _, ev: &PromptEvent, _, cx| match ev {
             PromptEvent::Submit => this.submit(cx),
@@ -213,12 +269,16 @@ impl AgentTask {
             prompt,
             queued: None,
             pending: Vec::new(),
+            images_ok: false,
+            browser,
+            middle_browser: false,
+            turn_wrote: false,
             commands: Vec::new(),
             setting_up: false,
             focus: cx.focus_handle(),
             turn_started: None,
             _events: None,
-            _subs: vec![sub, live_sub, monitor_sub],
+            _subs: vec![sub, live_sub, monitor_sub, browser_sub, files_sub],
         }
     }
 
@@ -227,6 +287,7 @@ impl AgentTask {
         self.accent = accent;
         self.monitor.update(cx, |m, _| m.accent = accent);
         self.live.update(cx, |l, _| l.accent = accent);
+        self.browser.update(cx, |b, _| b.accent = accent);
     }
 
     // -- chat list -------------------------------------------------------------
@@ -295,7 +356,12 @@ impl AgentTask {
                 Err(_) => return this.update(cx, |t, cx| t.fail("agent exited during start".into(), cx)).ok(),
             };
             let can_load = init.load_session;
-            this.update(cx, |t, _| t.load_session = can_load).ok();
+            let images = init.raw["agentCapabilities"]["promptCapabilities"]["image"].as_bool().unwrap_or(false);
+            this.update(cx, |t, _| {
+                t.load_session = can_load;
+                t.images_ok = images;
+            })
+            .ok();
             let session = match saved.filter(|_| can_load) {
                 Some(id) => match client.load_session(&id, &cwd).await {
                     Ok(Ok(())) => Some(id),
@@ -315,8 +381,8 @@ impl AgentTask {
                 t.session_id = Some(session.clone());
                 t.record.session_id = Some(session);
                 t.set_status(Status::Idle, cx);
-                if let Some((text, mentions)) = t.queued.take() {
-                    t.send(text, mentions, cx);
+                if let Some(out) = t.queued.take() {
+                    t.send_out(out, cx);
                 } else {
                     t.drain_pending(cx);
                 }
@@ -335,6 +401,13 @@ impl AgentTask {
     }
 
     fn set_status(&mut self, s: Status, cx: &mut Context<Self>) {
+        if s == Status::Working && self.status != Status::NeedsYou {
+            self.turn_wrote = false;
+        }
+        // The turn changed files: refresh the page (dev servers without hot reload).
+        if s == Status::Done && std::mem::take(&mut self.turn_wrote) {
+            self.browser.update(cx, |b, _| b.reload());
+        }
         let active = matches!(s, Status::Working | Status::NeedsYou);
         self.monitor.update(cx, |m, _| m.set_turn_active(active));
         if self.status != s {
@@ -346,23 +419,32 @@ impl AgentTask {
 
     fn submit(&mut self, cx: &mut Context<Self>) {
         let (text, mentions) = self.prompt.update(cx, |p, cx| p.take(cx));
-        if text.trim().is_empty() {
+        let atts = self.prompt.update(cx, |p, _| p.take_attachments());
+        if text.trim().is_empty() && atts.is_empty() {
             return;
+        }
+        let mut out = Outgoing::plain(if text.trim().is_empty() { "Adjust this.".into() } else { text }, mentions);
+        for a in atts {
+            out.labels.push(a.label.to_string());
+            out.context.push(a.context);
+            if let Some(png) = a.png {
+                out.images.push(png);
+            }
         }
         if matches!(self.status, Status::Working | Status::NeedsYou | Status::Starting) || self.setting_up {
             // One turn at a time: queue it and send when the turn ends.
-            self.pending.push((text, mentions));
+            self.pending.push(out);
             cx.notify();
             return;
         }
-        self.send(text, mentions, cx);
+        self.send_out(out, cx);
     }
 
     /// Send the next queued message, if any (turn ended).
     fn drain_pending(&mut self, cx: &mut Context<Self>) {
         if !self.pending.is_empty() && matches!(self.status, Status::Done | Status::Idle) {
-            let (text, mentions) = self.pending.remove(0);
-            self.send(text, mentions, cx);
+            let out = self.pending.remove(0);
+            self.send_out(out, cx);
         }
     }
 
@@ -391,16 +473,30 @@ impl AgentTask {
 
     /// Send a prompt (starting the agent first when needed).
     pub fn send(&mut self, text: String, mentions: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.send_out(Outgoing::plain(text, mentions), cx)
+    }
+
+    fn send_out(&mut self, out: Outgoing, cx: &mut Context<Self>) {
+        let shown = out.shown();
         let (Some(client), Some(session)) = (self.client.clone(), self.session_id.clone()) else {
-            self.queued = Some((text.clone(), mentions));
-            self.push(ChatItem::User(text));
+            self.queued = Some(out);
+            self.push(ChatItem::User(shown));
             self.start(cx);
             return;
         };
-        if self.queued.is_none() && !matches!(self.chat.last(), Some(ChatItem::User(t)) if *t == text) {
-            self.push(ChatItem::User(text.clone()));
+        if self.queued.is_none() && !matches!(self.chat.last(), Some(ChatItem::User(t)) if *t == shown) {
+            self.push(ChatItem::User(shown));
         }
+        let Outgoing { text, mentions, context, images, .. } = out;
         let mut blocks = vec![PromptBlock::Text(text)];
+        for c in context {
+            blocks.push(PromptBlock::Text(c));
+        }
+        if self.images_ok {
+            for png in images {
+                blocks.push(PromptBlock::Image { mime: "image/png".into(), data_base64: base64(&png) });
+            }
+        }
         for m in mentions {
             let name = m.strip_prefix(&self.record.worktree).unwrap_or(&m).to_string_lossy().into_owned();
             blocks.push(PromptBlock::ResourceLink { uri: format!("file://{}", m.display()), name });
@@ -903,6 +999,7 @@ impl AgentTask {
                     .child(segment("To-do", View::Todo, "seg-todo", "⌘2"))
                     .child(segment("Chat", View::Chat, "seg-chat", "⌘3"))
                     .child(segment("Changes", View::Changes, "seg-changes", "⌘4"))
+                    .child(segment("Browser", View::Browser, "seg-browser", "⌘5"))
             })
             .when(self.layout != Layout::B, |d| d.child(div().flex_none().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(self.record.branch.clone())))
             .when(working, |d| {
@@ -921,6 +1018,31 @@ impl AgentTask {
                         .on_click(cx.listener(|t, _, _, cx| t.stop(cx))),
                 )
             })
+    }
+
+    /// Layout B's Browser segment: the page plus the prompt (to ask about picks).
+    fn notes_compact(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = look.theme.ui.clone();
+        div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .border_t_1()
+            .border_color(look.c(ui.border))
+            .pt(look.z(8.))
+            .children(self.permission_bar(look, cx))
+            .child(
+                div()
+                    .mx(look.z(12.))
+                    .mb(look.z(12.))
+                    .px(look.z(12.))
+                    .py(look.z(8.))
+                    .rounded(look.z(6.))
+                    .border_1()
+                    .border_color(look.c(ui.border_strong))
+                    .bg(look.c(ui.editor_bg))
+                    .child(self.prompt.clone()),
+            )
     }
 
     pub fn set_view(&mut self, v: View, cx: &mut Context<Self>) {
@@ -966,6 +1088,61 @@ impl Render for TipText {
     }
 }
 
+impl AgentTask {
+    /// Does the stage show this task's browser right now (layout + tab)?
+    pub fn shows_browser(&self) -> bool {
+        match self.layout {
+            Layout::B => self.view == View::Browser,
+            _ => self.middle_browser,
+        }
+    }
+
+    pub fn show_browser(&mut self, on: bool, cx: &mut Context<Self>) {
+        match self.layout {
+            Layout::B => self.view = if on { View::Browser } else { View::Live },
+            _ => self.middle_browser = on,
+        }
+        cx.notify();
+    }
+
+    /// Layouts A/C: Live or Browser, with a small switch above.
+    fn middle(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = look.theme.ui.clone();
+        let tab = |label: &'static str, on: bool, id: &'static str, browser: bool| {
+            div()
+                .id(id)
+                .px(look.z(8.))
+                .py(look.z(1.))
+                .rounded(look.z(4.))
+                .cursor_pointer()
+                .text_size(look.text(-2.))
+                .text_color(look.c(if on { ui.text } else { ui.text_muted }))
+                .when(on, |d| d.bg(look.c(ui.active_bg)))
+                .child(label)
+                .on_click(cx.listener(move |t, _, _, cx| t.show_browser(browser, cx)))
+        };
+        let browser = self.middle_browser;
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_none()
+                    .h(look.z(26.))
+                    .px(look.z(8.))
+                    .flex()
+                    .items_center()
+                    .gap(look.z(2.))
+                    .border_b_1()
+                    .border_color(look.c(ui.border))
+                    .child(tab("Live", !browser, "mid-live", false))
+                    .child(tab("Browser", browser, "mid-browser", true)),
+            )
+            .child(div().flex_1().min_h(px(0.)).child(if browser { self.browser.clone().into_any_element() } else { self.live.clone().into_any_element() }))
+    }
+}
+
 impl Render for AgentTask {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
@@ -976,7 +1153,7 @@ impl Render for AgentTask {
                 .flex_1()
                 .min_h(px(0.))
                 .flex()
-                .child(div().flex_1().min_w(px(0.)).child(self.live.clone()))
+                .child(div().flex_1().min_w(px(0.)).child(self.middle(&look, cx)))
                 .child(div().w(look.z(400.)).flex_none().h_full().border_l_1().border_color(look.c(ui.border)).child(self.notes(true, &look, cx)))
                 .into_any_element(),
             Layout::B => match self.view {
@@ -1001,6 +1178,14 @@ impl Render for AgentTask {
                     .children(self.permission_bar(&look, cx))
                     .into_any_element(),
                 View::Chat => div().flex_1().min_h(px(0.)).child(self.notes(false, &look, cx)).into_any_element(),
+                View::Browser => div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .flex()
+                    .flex_col()
+                    .child(div().flex_1().min_h(px(0.)).child(self.browser.clone()))
+                    .child(self.notes_compact(&look, cx))
+                    .into_any_element(),
                 View::Changes => div()
                     .flex_1()
                     .flex()
@@ -1043,7 +1228,7 @@ impl Render for AgentTask {
                     .min_h(px(0.))
                     .flex()
                     .flex_col()
-                    .child(div().flex_1().min_h(px(0.)).child(self.live.clone()))
+                    .child(div().flex_1().min_h(px(0.)).child(self.middle(&look, cx)))
                     .child(drawer)
                     .when(open, |d| {
                         d.child(

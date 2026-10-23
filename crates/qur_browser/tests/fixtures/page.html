@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Qur browser fixture</title>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 16px; background: #fafafa; }
+  .card { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid #ccc;
+          border-radius: 8px; background: #fff; margin-bottom: 12px; }
+  .card h2 { margin: 0; font-size: 18px; }
+  .row { display: flex; justify-content: space-between; align-items: center; }
+  .btn { background: #2563eb; color: #fff; border: 0; border-radius: 6px; padding: 6px 12px; }
+</style>
+</head>
+<body>
+  <main id="main">
+    <section class="card intro">
+      <h2>Welcome</h2>
+      <p class="lead" id="lead">Qur watches your agents. Select this sentence to send it.</p>
+    </section>
+    <section class="card actions" data-qur-source="src/Actions.tsx:42">
+      <div class="row">
+        <span class="label">Deploy</span>
+        <button class="btn primary" onclick="document.title='clicked'">Ship it</button>
+      </div>
+      <div class="row">
+        <span class="label">Other</span>
+        <button class="btn">Later</button>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 qur_acp.workspace = true
 qur_agents.workspace = true
+qur_browser.workspace = true
 qur_config.workspace = true
 qur_editor.workspace = true
 qur_heat.workspace = true
@@ -26,4 +27,5 @@ gpui.workspace = true
 gpui_platform.workspace = true
 libc.workspace = true
 nucleo-matcher.workspace = true
+raw-window-handle = "0.6"
 smallvec = "1"

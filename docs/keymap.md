@@ -117,8 +117,10 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `@` / `/` in the prompt | Mention a file / pick an agent slash command | M2 ✅ |
 | Agent menu | Permission: Allow Once / Allow for This Task / Deny | M2 ✅ |
 | Agent menu | Discard Task…, Reveal Worktree in Finder, Open Task Worktree in Terminal | M2 ✅ |
-| `Cmd+K Cmd+L` | Cycle peek layout | M3 |
-| `Cmd+1..4` | Live / To-do / Chat / Changes (layout B) | M3 |
+| `Cmd+K Cmd+L` | Cycle peek layout | M3 ✅ |
+| `Cmd+1..4` | Live / To-do / Chat / Changes (layout B) | M3 ✅ |
+| `Cmd+5` | Browser: show the selected agent's browser (any layout) | Browser ✅ |
+| `Cmd+Shift+C` | Browser: Inspect Element (highlight, click to attach to the prompt; select text to attach it) | Browser ✅ |
 | `Cmd+Shift+Enter` (Changes view) | Merge | M4 |
 
 The code modal closes with `Esc`: first the find bar, then extra cursors, then the modal (decision 18).

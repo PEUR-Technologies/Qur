@@ -66,7 +66,8 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Go to Terminal ``Ctrl+` `` · Git `Ctrl+Shift+G` · Search `Cmd+Shift+F`  (no bottom panel since decision 19)
 - ---
 - Peek Layout ▸ A Watch + side notes · B One view at a time · C Watch + drawer (radio) · Cycle `Cmd+K Cmd+L`
-- Peek ▸ Live `Cmd+1` · To-do `Cmd+2` · Chat `Cmd+3` · Changes `Cmd+4`
+- Peek ▸ Live `Cmd+1` · To-do `Cmd+2` · Chat `Cmd+3` · Changes `Cmd+4` · Browser `Cmd+5`
+- Browser: Inspect Element `Cmd+Shift+C`
 - Follow Agent (checkmark)
 - ---
 - Soft Wrap `Opt+Z` (checkmark)

@@ -71,3 +71,18 @@ Notes:
 - Bugs found and fixed:
   - A tree rebuild on every heat update when the agent's focus file didn't exist yet.
   - A 5 ms repaint timer while a recompute was overdue. Heat timers now repaint at most every 33 ms, and an edit tool's completion schedules its recompute.
+
+## Browser + Inspect (2026-10-23, decision 26, MacBook Air M5, AC power)
+
+| Metric | Result |
+|---|---|
+| Binary | 24.9 MB incl. grammars (`qur_browser` + objc2-web-kit ≈ +0.14 MB; links the system WebKit.framework) |
+| Qur footprint, one agent + Browser open on a small page | 77 MB (idle without the browser: ~70 MB) |
+| WebKit processes while the page is open | GPU 14 MB, WebContent 17 MB, Networking (small). They are WebKit's own processes and not counted in Qur's budget. |
+| After closing the page (idle release 5 min) or quitting | the page's WebContent exits on release; every helper is gone after quit |
+
+End-to-end check, with a tiny prompt:
+1. The task's Browser opened `index.html`.
+2. Inspect picked `#ship`; the chip "button#ship 'Ship it'" went to Claude with the element's context and a screenshot, plus "Change this button's text to Deploy."
+3. Claude edited `index.html` in its worktree (permission allowed once).
+4. The Browser reloaded at the end of the turn and showed "Deploy". No agent process was left after quit.

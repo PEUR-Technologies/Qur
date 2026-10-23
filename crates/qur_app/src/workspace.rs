@@ -639,10 +639,16 @@ impl Workspace {
                         session_id: None,
                         created: qur_agents::now_secs(),
                         mode: def.mode,
+                        // Dev/test: QUR_DEBUG_BROWSER_URL="http://localhost:8765/{slug}/index.html".
+                        browser_url: std::env::var("QUR_DEBUG_BROWSER_URL").ok().map(|u| u.replace("{slug}", &c.slug)),
                     };
+                    let debug_browser = std::env::var_os("QUR_DEBUG_BROWSER_URL").is_some();
                     match def.mode {
                         Mode::Acp => {
                             let a = this.add_agent(record, def, window, cx);
+                            if debug_browser {
+                                a.update(cx, |a, cx| a.show_browser(true, cx));
+                            }
                             // Mentions were picked in the main checkout; point
                             // them at the same files in the worktree.
                             let wt = a.read(cx).record.worktree.clone();
@@ -730,6 +736,7 @@ impl Workspace {
                         session_id: None,
                         created: qur_agents::now_secs(),
                         mode: Mode::Terminal,
+                        browser_url: None,
                     };
                     this.add_term_task(record, window, cx);
                     this.apply_look(window, cx);
@@ -924,6 +931,26 @@ impl Workspace {
     }
     fn peek_changes(&mut self, _: &qur::PeekChanges, _: &mut Window, cx: &mut Context<Self>) {
         self.peek(View::Changes, cx)
+    }
+    /// Cmd+5: the selected agent's Browser (any layout).
+    fn peek_browser(&mut self, _: &qur::PeekBrowser, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(a) = self.selected_agent() {
+            a.update(cx, |a, cx| {
+                let on = !a.shows_browser();
+                a.show_browser(on, cx)
+            });
+        }
+    }
+    /// Cmd+Shift+C: open the Browser if needed and toggle Inspect.
+    fn toggle_inspect(&mut self, _: &qur::ToggleInspect, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(a) = self.selected_agent() {
+            a.update(cx, |a, cx| {
+                if !a.shows_browser() {
+                    a.show_browser(true, cx);
+                }
+                a.browser.update(cx, |b, cx| b.toggle_inspect(cx));
+            });
+        }
     }
     fn selected_live(&self, cx: &App) -> Option<Entity<LivePane>> {
         match &self.selected {
@@ -1759,6 +1786,7 @@ impl Workspace {
                     session_id: None,
                     created: 0,
                     mode: Mode::Terminal,
+                    browser_url: None,
                 };
                 this.add_term_task(record, window, cx);
                 // Show the tree without starting a terminal process.
@@ -2510,6 +2538,17 @@ impl Render for Workspace {
                 window.on_next_frame(move |window, cx| me.update(cx, |ws, cx| ws.bench_theme_step(0, Vec::new(), window, cx)));
             }
         }
+        // Native web views draw above GPUI: only the selected task's browser
+        // shows, and never under a modal, picker or popover (decision 26).
+        let covered = self.overlay.is_some() || self.code.is_some();
+        for a in self.agents.clone() {
+            let (id, wants, browser) = {
+                let t = a.read(cx);
+                (t.record.id.clone(), t.shows_browser(), t.browser.clone())
+            };
+            let show = wants && !covered && self.selected == Some(Selected::Agent(id));
+            browser.update(cx, |b, cx| b.set_shown(show, window, cx));
+        }
         let body = div()
             .flex_1()
             .min_h(px(0.))
@@ -2591,6 +2630,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::peek_todo))
             .on_action(cx.listener(Self::peek_chat))
             .on_action(cx.listener(Self::peek_changes))
+            .on_action(cx.listener(Self::peek_browser))
+            .on_action(cx.listener(Self::toggle_inspect))
             .on_action(cx.listener(Self::follow_agent))
             .on_action(cx.listener(Self::take_over))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
