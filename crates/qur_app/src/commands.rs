@@ -24,7 +24,7 @@ pub mod qur {
             FocusPrompt, StopAgent, TakeOver, NextAgent, PrevAgent, ReviewChanges, Merge,
             KeepWorking, DiscardTask, OpenWorktreeInTerminal, RevealWorktree, KeyboardShortcuts,
             RunDoctor, ShowLogs, ReportProblem, ExpandSelection, ShrinkSelection,
-            RunChecks, RunProject, RenameAgent, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge,
+            RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge,
         ]
     );
 
@@ -146,6 +146,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::OpenKeymap, "Qur", "Open keymap.toml", "", W, L("a later version")),
     cmd!(qur::OpenAgents, "Qur", "Agents (agents.toml)", "", W, R),
     cmd!(qur::ThemePicker, "Qur", "Theme…", "cmd-k cmd-t", NT, R),
+    cmd!(qur::AccentColor, "Qur", "Accent Color…", "", W, R),
     cmd!(qur::UseDefaultTheme, "Qur", "Use Default Theme for This Project", "", W, R),
     cmd!(qur::Transparency, "Qur", "Transparency…", "", W, R),
     cmd!(qur::VimMode, "Qur", "Vim Mode", "", W, R),
@@ -289,6 +290,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::OpenWorktreeInTerminal, "Agent", "Open Task Worktree in Terminal", "", W, R),
     cmd!(qur::RevealWorktree, "Agent", "Reveal Worktree in Finder", "", W, R),
     cmd!(qur::CyclePeekLayout, "View", "Cycle Peek Layout", "cmd-k cmd-l", NT, R),
+    cmd!(qur::ChooseLayout, "View", "Choose Stage Layout…", "", W, R),
     cmd!(qur::PeekLayoutA, "View", "A Watch + Side Notes", "", W, R),
     cmd!(qur::PeekLayoutB, "View", "B One View at a Time", "", W, R),
     cmd!(qur::PeekLayoutC, "View", "C Watch + Drawer", "", W, R),
@@ -434,6 +436,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             sep(),
             M::submenu(Menu::new("Settings").items([item(qur::OpenConfig), item(qur::OpenKeymap), item(qur::OpenAgents)])),
             item(qur::ThemePicker),
+            item(qur::AccentColor),
             item(qur::UseDefaultTheme),
             item(qur::Transparency),
             item(qur::VimMode).checked(s.vim),
@@ -520,6 +523,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
                 item(qur::PeekLayoutB).checked(s.layout == "B"),
                 item(qur::PeekLayoutC).checked(s.layout == "C"),
                 item(qur::CyclePeekLayout),
+                item(qur::ChooseLayout),
             ])),
             M::submenu(Menu::new("Peek").items([
                 item(qur::PeekLive),

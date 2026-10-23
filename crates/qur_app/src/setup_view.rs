@@ -40,11 +40,13 @@ pub struct Choices {
     pub layout: String,
     pub vim: bool,
     pub theme: String,
+    pub accent: usize,
 }
 
 pub enum SetupEvent {
     /// Live preview while choosing.
     PreviewTheme(String),
+    PreviewAccent(usize),
     Done(Choices),
     Cancel,
 }
@@ -55,6 +57,7 @@ pub struct SetupView {
     layout: String,
     vim: bool,
     theme: String,
+    accent: usize,
 }
 
 impl EventEmitter<SetupEvent> for SetupView {}
@@ -82,7 +85,12 @@ impl SetupView {
                 }
             })
             .collect();
-        SetupView { focus: cx.focus_handle(), agents, layout: config.peek_layout.clone(), vim: config.keys.vim, theme: config.theme.clone() }
+        // A stage arranged by hand shows as "Yours".
+        let preset = config.peek_layout.as_str();
+        let custom = crate::dock::Docks::get(cx, crate::dock::Kind::Acp) != crate::dock::Dock::preset(crate::dock::Kind::Acp, preset)
+            || crate::dock::Docks::get(cx, crate::dock::Kind::Terminal) != crate::dock::Dock::preset(crate::dock::Kind::Terminal, preset);
+        let layout = if custom { "yours".to_string() } else { config.peek_layout.clone() };
+        SetupView { focus: cx.focus_handle(), agents, layout, vim: config.keys.vim, theme: config.theme.clone(), accent: config.ui.accent % 6 }
     }
 
     /// ACP agents: start them and run `initialize` on the user's own login.
@@ -112,7 +120,7 @@ impl SetupView {
 
     pub fn done(&mut self, cx: &mut Context<Self>) {
         let agents = self.agents.iter().filter(|f| f.enabled).map(|f| f.def.clone()).collect();
-        cx.emit(SetupEvent::Done(Choices { agents, layout: self.layout.clone(), vim: self.vim, theme: self.theme.clone() }));
+        cx.emit(SetupEvent::Done(Choices { agents, layout: self.layout.clone(), vim: self.vim, theme: self.theme.clone(), accent: self.accent }));
     }
 }
 
@@ -226,17 +234,12 @@ impl Render for SetupView {
                 .when(f.path.is_some(), |d| {
                     d.child(pill(("agent-check", i), "Check".into(), false).on_click(cx.listener(move |this, _, _, cx| this.check(i, cx))))
                 })
+        }).collect::<Vec<_>>();
+        // 3. Layout: drawn as the panes they give you.
+        let layout_row = crate::dock::layout_cards(&self.layout, &look, cx, |this: &mut SetupView, key, cx| {
+            this.layout = key.to_string();
+            cx.notify();
         });
-        // 3. Layout
-        let layouts = [("A", "Watch + side notes"), ("B", "One view at a time"), ("C", "Watch + drawer")];
-        let layout_row = div().flex().gap(look.z(8.)).children(layouts.iter().enumerate().map(|(i, (key, label))| {
-            let on = self.layout == *key;
-            let k = key.to_string();
-            pill(("layout", i), format!("{key}  {label}"), on).on_click(cx.listener(move |this, _, _, cx| {
-                this.layout = k.clone();
-                cx.notify();
-            }))
-        }));
         // 4. Keys
         let keys_row = div()
             .flex()
@@ -249,6 +252,26 @@ impl Render for SetupView {
                 this.vim = true;
                 cx.notify();
             })));
+        // 4b. Accent: the theme's palette in its own order (the look shown is
+        // rotated by the accent being previewed).
+        let mut palette = look.theme.accents;
+        palette.rotate_right(self.accent);
+        let accent_row = div().flex().gap(look.z(10.)).children(palette.iter().enumerate().map(|(i, a)| {
+            let on = i == self.accent;
+            div()
+                .id(("setup-accent", i))
+                .size(look.z(24.))
+                .rounded_full()
+                .cursor_pointer()
+                .bg(look.c(a.base))
+                .border_2()
+                .border_color(look.c(if on { ui.text } else { ui.overlay_bg }))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.accent = i;
+                    cx.emit(SetupEvent::PreviewAccent(i));
+                    cx.notify();
+                }))
+        }));
         // 5. Theme
         let themes: Vec<Arc<Theme>> = Registry::global().all().to_vec();
         let auto_on = self.theme == qur_config::THEME_AUTO;
@@ -337,6 +360,8 @@ impl Render for SetupView {
             .child(layout_row)
             .child(heading("Keys"))
             .child(keys_row)
+            .child(heading("Accent color"))
+            .child(accent_row)
             .child(heading("Theme"))
             .child(div().flex().flex_wrap().gap(look.z(12.)).children(grid))
             .child(

@@ -679,6 +679,96 @@ fn drop_zones(kind: Kind, path: Path, look: &Look) -> Div {
         .children([Edge::Left, Edge::Right, Edge::Top, Edge::Bottom, Edge::Center].map(|e| zone(e, path.clone())))
 }
 
+/// A miniature of an arrangement: panes, their tab strips (the active tab
+/// highlighted) and a hint of each pane's content. For choosing a layout.
+pub fn diagram(dock: &Dock, kind: Kind, look: &Look, w: f32, h: f32) -> Div {
+    fn go(n: &Node, kind: Kind, look: &Look) -> Div {
+        let ui = &look.theme.ui;
+        match n {
+            Node::Split { vertical, ratio, a, b } => div()
+                .size_full()
+                .flex()
+                .gap(px(2.))
+                .when(*vertical, |d| d.flex_col())
+                .child(div().flex_none().when(*vertical, |d| d.w_full().h(gpui::relative(*ratio))).when(!*vertical, |d| d.h_full().w(gpui::relative(*ratio))).child(go(a, kind, look)))
+                .child(div().flex_1().min_w(px(0.)).min_h(px(0.)).child(go(b, kind, look))),
+            Node::Pane { tabs, active } => {
+                let current = tabs.get(*active).copied().unwrap_or(Panel::Session);
+                let mut accent = look.c(look.theme.accents[0].base);
+                let tab = move |on: bool| {
+                    let mut c = if on { accent } else { look.c(ui.text_muted) };
+                    c.a = if on { 0.9 } else { 0.35 };
+                    div().flex_none().h(px(3.)).w(px(9.)).rounded(px(1.)).bg(c)
+                };
+                accent.a = 0.55;
+                let line = |w: f32, c: gpui::Hsla| div().flex_none().h(px(2.)).w(gpui::relative(w)).rounded(px(1.)).bg(c);
+                let mut faint = look.c(ui.text_muted);
+                faint.a = 0.45;
+                let mut added = look.c(look.theme.diff.added_text);
+                added.a = 0.7;
+                let mut removed = look.c(look.theme.diff.removed_text);
+                removed.a = 0.7;
+                // A hint of what the active tab shows.
+                let body = div().flex_1().min_h(px(0.)).p(px(3.)).flex().flex_col().gap(px(2.)).overflow_hidden();
+                let body = match current {
+                    Panel::Session if kind == Kind::Terminal => body.child(line(0.5, faint)).child(line(0.3, faint)).child(div().flex_none().h(px(4.)).w(px(4.)).bg(accent)),
+                    Panel::Session => body.child(div().flex_1()).child(line(0.7, faint)).child(line(0.55, faint)).child(div().flex_none().h(px(5.)).w_full().rounded(px(1.)).border_1().border_color(faint)),
+                    Panel::Live => body.child(line(0.6, faint)).child(line(0.8, accent)).child(line(0.5, faint)).child(line(0.7, faint)),
+                    Panel::Browser => body.child(div().flex_1().rounded(px(1.)).bg(faint)),
+                    Panel::Changes => body.child(line(0.7, added)).child(line(0.5, removed)).child(line(0.6, added)),
+                    Panel::Todo => body.child(line(0.6, accent)).child(line(0.5, faint)).child(line(0.4, faint)),
+                };
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .rounded(px(2.))
+                    .border_1()
+                    .border_color(look.c(ui.border_strong))
+                    .bg(look.c(ui.editor_bg))
+                    .child(div().flex_none().px(px(2.)).py(px(2.)).flex().gap(px(2.)).children(tabs.iter().enumerate().map(|(i, _)| tab(i == *active))))
+                    .child(body)
+            }
+        }
+    }
+    div().w(look.z(w)).h(look.z(h)).flex_none().child(go(&dock.root, kind, look))
+}
+
+/// The layout choices as cards (presets A/B/C, plus "Yours" when the saved
+/// arrangement differs from them): each shows a structured agent's stage and
+/// an Agent Terminal's. `on_pick` gets "A", "B", "C" or "yours".
+pub fn layout_cards<V: 'static>(selected: &str, look: &Look, cx: &mut Context<V>, on_pick: impl Fn(&mut V, &str, &mut Context<V>) + Clone + 'static) -> Div {
+    let ui = &look.theme.ui;
+    let mut choices: Vec<(String, String, Dock, Dock)> = [("A", "Watch + side notes"), ("B", "One view at a time"), ("C", "Watch + drawer")]
+        .iter()
+        .map(|(k, label)| (k.to_string(), format!("{k} · {label}"), Dock::preset(Kind::Acp, k), Dock::preset(Kind::Terminal, k)))
+        .collect();
+    let (acp, term) = (Docks::get(cx, Kind::Acp), Docks::get(cx, Kind::Terminal));
+    if !choices.iter().any(|(_, _, a, t)| *a == acp && *t == term) {
+        choices.push(("yours".into(), "Yours (as you arranged it)".into(), acp, term));
+    }
+    div().flex().flex_wrap().gap(look.z(12.)).children(choices.into_iter().enumerate().map(|(i, (key, label, a, t))| {
+        let on = selected == key;
+        let pick = on_pick.clone();
+        div()
+            .id(("layout-card", i))
+            .p(look.z(8.))
+            .flex()
+            .flex_col()
+            .gap(look.z(5.))
+            .rounded(look.z(6.))
+            .border_1()
+            .border_color(look.c(if on { ui.focus_ring } else { ui.border }))
+            .when(on, |d| d.bg(look.c(ui.active_bg)))
+            .hover(|d| d.bg(look.c(ui.hover_bg)))
+            .cursor_pointer()
+            .child(diagram(&a, Kind::Acp, look, 150., 88.))
+            .child(div().flex().items_center().gap(look.z(6.)).child(diagram(&t, Kind::Terminal, look, 64., 36.)).child(div().text_size(look.text(-3.)).text_color(look.c(ui.text_muted)).child("Agent Terminal")))
+            .child(div().text_size(look.text(-2.)).text_color(look.c(if on { ui.text } else { ui.text_secondary })).child(label))
+            .on_click(cx.listener(move |this, _, _, cx| pick(this, &key, cx)))
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

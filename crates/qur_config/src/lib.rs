@@ -102,6 +102,9 @@ pub struct EditorConfig {
 pub struct UiConfig {
     pub font_size: f32,
     pub zoom: f32,
+    /// Which of the theme's six accents comes first (agents take them in
+    /// order from here): 0 = the theme's own first (Qur's orange).
+    pub accent: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -148,7 +151,7 @@ impl Default for EditorConfig {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        UiConfig { font_size: 13.0, zoom: 1.0 }
+        UiConfig { font_size: 13.0, zoom: 1.0, accent: 0 }
     }
 }
 
@@ -178,6 +181,7 @@ impl Config {
 
     fn sanitized(mut self) -> Config {
         self.ui.zoom = self.ui.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        self.ui.accent %= 6;
         self.editor.font_size = self.editor.font_size.clamp(6.0, 72.0);
         self.editor.line_height = self.editor.line_height.clamp(1.0, 3.0);
         self.editor.tab_width = self.editor.tab_width.clamp(1, 16);
@@ -198,6 +202,7 @@ pub enum Value {
     Str(String),
     Float(f64),
     Bool(bool),
+    Int(i64),
 }
 
 impl From<&str> for Value {
@@ -248,6 +253,7 @@ pub fn write_key(path: &Path, key: &str, value: Option<Value>) -> std::io::Resul
                 Value::Str(s) => toml_edit::value(s),
                 Value::Float(f) => toml_edit::value(f),
                 Value::Bool(b) => toml_edit::value(b),
+                Value::Int(i) => toml_edit::value(i),
             };
             // Keep any comment/decor attached to an existing value.
             match table.get_mut(last).and_then(|i| i.as_value_mut()) {

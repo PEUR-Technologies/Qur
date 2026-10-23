@@ -119,6 +119,10 @@ enum Overlay {
     Rename(Entity<TextInput>),
     /// The first-run picker (M6), also Qur > Setup….
     Setup(Entity<SetupView>),
+    /// Qur > Accent Color….
+    Accent,
+    /// View > Choose Stage Layout….
+    Layouts,
     /// About Qur (M7).
     About,
     Transparency { project_scope: bool },
@@ -134,6 +138,8 @@ pub struct Workspace {
     system_dark: bool,
     /// Theme being previewed in the picker (not saved yet).
     preview_theme: Option<String>,
+    /// Accent being previewed in the Accent Color popover (not saved yet).
+    preview_accent: Option<usize>,
     roster: Roster,
     agents: Vec<Entity<AgentTask>>,
     term_tasks: Vec<TermTask>,
@@ -247,6 +253,7 @@ impl Workspace {
             project,
             system_dark: is_dark(window.appearance()),
             preview_theme: None,
+            preview_accent: None,
             roster,
             agents: Vec::new(),
             term_tasks: Vec::new(),
@@ -317,7 +324,14 @@ impl Workspace {
         let eff = self.effective();
         let name = self.preview_theme.clone().unwrap_or(eff.theme);
         let choice = if name == qur_config::THEME_AUTO { ThemeChoice::Auto } else { ThemeChoice::Named(name) };
-        let theme = Registry::global().resolve(&choice, self.system_dark);
+        let mut theme = Registry::global().resolve(&choice, self.system_dark);
+        // Your accent first ([ui] accent): agents take the palette in order.
+        let k = self.preview_accent.unwrap_or(self.config.ui.accent) % 6;
+        if k != 0 {
+            let mut t = (*theme).clone();
+            t.accents.rotate_left(k);
+            theme = std::sync::Arc::new(t);
+        }
         let min = theme.min_opacity().max(qur_theme::MIN_OPACITY);
         let code_font = if self.config.editor.font_family.is_empty() { default_code_font(cx) } else { self.config.editor.font_family.clone() };
         let look = Look {
@@ -2644,6 +2658,106 @@ impl Workspace {
         }
     }
 
+    /// Qur > Accent Color…: pick which of the theme's accents leads (hover to
+    /// preview, click to keep).
+    fn accent_color(&mut self, _: &qur::AccentColor, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_overlays(window, cx);
+        self.prev_focus = window.focused(cx);
+        window.focus(&self.focus, cx);
+        self.overlay = Some(Overlay::Accent);
+        cx.notify();
+    }
+
+    fn set_accent(&mut self, k: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.preview_accent = None;
+        self.write_setting(false, "ui.accent", Some(Value::Int(k as i64)), cx);
+        self.reload_settings(window, cx);
+        self.broadcast_reload(cx);
+    }
+
+    fn accent_box(&self, look: &Look, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let ui = &look.theme.ui;
+        // The theme's own order: undo the rotation the look carries.
+        let shown = self.preview_accent.unwrap_or(self.config.ui.accent) % 6;
+        let saved = self.config.ui.accent % 6;
+        let mut base = look.theme.accents;
+        base.rotate_right(shown);
+        div()
+            .id("accent")
+            .occlude()
+            .p(look.z(16.))
+            .flex()
+            .flex_col()
+            .gap(look.z(10.))
+            .bg(look.c(ui.overlay_bg))
+            .border_1()
+            .border_color(look.c(ui.border_strong))
+            .rounded(look.z(10.))
+            .child(div().text_size(look.text(-1.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(look.c(ui.text)).child("Accent color"))
+            .child(div().flex().gap(look.z(10.)).children(base.iter().enumerate().map(|(i, a)| {
+                let on = i == saved;
+                div()
+                    .id(("accent-swatch", i))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(look.z(4.))
+                    .cursor_pointer()
+                    .child(div().size(look.z(30.)).rounded_full().bg(look.c(a.base)).border_2().border_color(look.c(if on { ui.text } else { ui.overlay_bg })))
+                    .child(div().text_size(look.text(-3.)).text_color(look.c(if on { ui.text } else { ui.text_muted })).child(hue_name(a.base)))
+                    .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                        let want = if *hovered { Some(i) } else { None };
+                        if this.preview_accent != want {
+                            this.preview_accent = want;
+                            this.apply_look(window, cx);
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_accent(i, window, cx);
+                        this.close_overlays(window, cx);
+                    }))
+            })))
+            .child(div().text_size(look.text(-3.)).text_color(look.c(ui.text_muted)).child("Agents take the theme's colors in order, starting here. Saved as [ui] accent."))
+            .into_any_element()
+    }
+
+    /// View > Choose Stage Layout…: the presets (and yours) as diagrams.
+    fn choose_layout(&mut self, _: &qur::ChooseLayout, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_overlays(window, cx);
+        self.prev_focus = window.focused(cx);
+        window.focus(&self.focus, cx);
+        self.overlay = Some(Overlay::Layouts);
+        cx.notify();
+    }
+
+    fn layouts_box(&self, look: &Look, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let ui = &look.theme.ui;
+        let preset = self.layout.as_str();
+        let custom = Docks::get(cx, dock::Kind::Acp) != dock::Dock::preset(dock::Kind::Acp, preset) || Docks::get(cx, dock::Kind::Terminal) != dock::Dock::preset(dock::Kind::Terminal, preset);
+        let selected = if custom { "yours" } else { preset };
+        div()
+            .id("layouts")
+            .occlude()
+            .p(look.z(16.))
+            .flex()
+            .flex_col()
+            .gap(look.z(10.))
+            .bg(look.c(ui.overlay_bg))
+            .border_1()
+            .border_color(look.c(ui.border_strong))
+            .rounded(look.z(10.))
+            .child(div().text_size(look.text(-1.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(look.c(ui.text)).child("Stage layout"))
+            .child(dock::layout_cards(selected, look, cx, |this: &mut Workspace, key, cx| {
+                if matches!(key, "A" | "B" | "C") {
+                    this.set_layout(Layout::parse(key), cx);
+                }
+                this.overlay = None;
+                cx.notify();
+            }))
+            .child(div().text_size(look.text(-3.)).text_color(look.c(ui.text_muted)).child("Then drag tabs and dividers to make it yours; it's saved as you go."))
+            .into_any_element()
+    }
+
     fn about(&mut self, _: &qur::About, window: &mut Window, cx: &mut Context<Self>) {
         self.close_overlays(window, cx);
         self.prev_focus = window.focused(cx);
@@ -2718,12 +2832,21 @@ impl Workspace {
                 this.preview_theme = Some(name.clone());
                 this.apply_look(window, cx);
             }
+            SetupEvent::PreviewAccent(k) => {
+                this.preview_accent = Some(*k);
+                this.apply_look(window, cx);
+            }
             SetupEvent::Cancel => this.close_overlays(window, cx),
             SetupEvent::Done(c) => {
                 this.preview_theme = None;
                 this.write_setting(false, "theme", Some(c.theme.as_str().into()), cx);
-                this.write_setting(false, "peek_layout", Some(c.layout.as_str().into()), cx);
+                let preset = matches!(c.layout.as_str(), "A" | "B" | "C");
+                if preset {
+                    this.write_setting(false, "peek_layout", Some(c.layout.as_str().into()), cx);
+                }
                 this.write_setting(false, "keys.vim", Some(Value::Bool(c.vim)), cx);
+                this.write_setting(false, "ui.accent", Some(Value::Int(c.accent as i64)), cx);
+                this.preview_accent = None;
                 if !c.agents.is_empty() {
                     // Keep agents added by hand; replace the ones the picker knows.
                     let mut roster = qur_agents::Roster::load().0;
@@ -2738,7 +2861,10 @@ impl Workspace {
                 }
                 this.overlay = None;
                 this.reload_settings(window, cx);
-                this.set_layout(Layout::parse(&c.layout), cx);
+                // "Yours" keeps the arrangement as it is.
+                if preset {
+                    this.set_layout(Layout::parse(&c.layout), cx);
+                }
                 this.broadcast_reload(cx);
                 this.restore_focus(window, cx);
                 this.flash("Setup saved", cx);
@@ -2821,6 +2947,9 @@ impl Workspace {
     }
 
     fn close_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.preview_accent.take().is_some() {
+            self.apply_look(window, cx);
+        }
         if matches!(&self.overlay, Some(Overlay::Picker(_, PickKind::Themes { .. })) | Some(Overlay::Setup(_)))
             && self.preview_theme.take().is_some()
         {
@@ -3459,6 +3588,8 @@ impl Workspace {
             Overlay::Picker(p, _) => Some(centered(p.clone().into_any_element())),
             Overlay::Setup(s) => Some(centered(s.clone().into_any_element())),
             Overlay::About => Some(centered(self.about_box(look, cx))),
+            Overlay::Accent => Some(centered(self.accent_box(look, cx))),
+            Overlay::Layouts => Some(centered(self.layouts_box(look, cx))),
             Overlay::GoTo(g) | Overlay::Rename(g) => Some(centered(
                 div()
                     .w(look.z(360.))
@@ -3865,6 +3996,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_logs))
             .on_action(cx.listener(Self::report_problem))
             .on_action(cx.listener(Self::about))
+            .on_action(cx.listener(Self::accent_color))
+            .on_action(cx.listener(Self::choose_layout))
             // Scripted runs may reach here before the picker is drawn.
             .on_action(cx.listener(|this, _: &commands::setup::Done, _, cx| {
                 if let Some(Overlay::Setup(v)) = &this.overlay {
@@ -3992,4 +4125,27 @@ mod tests {
 /// Notification tag for an agent: `qur:<window>:<task id>` (main.rs parses it).
 fn alert_tag(window: &Window, id: &str) -> String {
     format!("qur:{}:{id}", window.window_handle().window_id().as_u64())
+}
+
+/// A plain name for an accent swatch, from its hue.
+fn hue_name(c: Rgba) -> &'static str {
+    let [r, g, b, _] = c.to_f32();
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    if max - min < 0.08 {
+        return "gray";
+    }
+    let d = max - min;
+    let h = if max == r { 60. * (((g - b) / d) % 6.) } else if max == g { 60. * ((b - r) / d + 2.) } else { 60. * ((r - g) / d + 4.) };
+    let h = if h < 0. { h + 360. } else { h };
+    match h as u32 {
+        0..=14 | 345..=360 => "red",
+        15..=39 => "orange",
+        40..=69 => "yellow",
+        70..=164 => "green",
+        165..=199 => "teal",
+        200..=254 => "blue",
+        255..=289 => "purple",
+        _ => "pink",
+    }
 }
