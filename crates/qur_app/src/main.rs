@@ -16,6 +16,7 @@ mod look;
 mod monitor;
 mod picker;
 mod prompt;
+mod search_view;
 mod terminal;
 mod tree_view;
 mod workspace;

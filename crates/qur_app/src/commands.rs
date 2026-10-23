@@ -238,8 +238,8 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(editor::ToggleCase, "Edit", "Find: Match Case", "cmd-alt-c", W, R),
     cmd!(editor::ToggleWholeWord, "Edit", "Find: Whole Word", "cmd-alt-w", W, R),
     cmd!(editor::ToggleRegex, "Edit", "Find: Regular Expression", "cmd-alt-r", W, R),
-    cmd!(qur::FindInProject, "Edit", "Find in Project", "cmd-shift-f", W, L("M6")),
-    cmd!(qur::ReplaceInProject, "Edit", "Replace in Project", "cmd-shift-h", W, L("M6")),
+    cmd!(qur::FindInProject, "Edit", "Find in Project", "cmd-shift-f", W, R),
+    cmd!(qur::ReplaceInProject, "Edit", "Replace in Project", "cmd-shift-h", W, R),
     // Terminal
     cmd!(qur::NewTerminal, "Terminal", "New Terminal", "cmd-t", W, R),
     cmd!(qur::NewAgentTerminal, "Terminal", "New Agent Terminal", "cmd-shift-t", W, R),
@@ -257,7 +257,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::GitStageAll, "Git", "Stage All Changes", "", W, R),
     cmd!(qur::GitUnstageAll, "Git", "Unstage All Changes", "", W, R),
     cmd!(qur::GitCommit, "Git", "Commit Staged…", "", W, R),
-    cmd!(qur::SearchPanel, "View", "Search", "", W, L("M6")),
+    cmd!(qur::SearchPanel, "View", "Search", "", W, R),
     // Agents and peek
     cmd!(qur::FocusPrompt, "Agent", "Focus Prompt", "cmd-i", W, R),
     cmd!(qur::StopAgent, "Agent", "Stop", "cmd-.", W, R),

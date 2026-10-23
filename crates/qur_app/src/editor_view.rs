@@ -241,6 +241,11 @@ impl EditorView {
         Some(range)
     }
 
+    /// The primary selection's text, if any (Find in Project seeds from it).
+    pub fn selected_text(&self) -> Option<String> {
+        Some(self.model.selected_text()).filter(|t| !t.is_empty())
+    }
+
     /// Conflict markers in the buffer (cached per text version).
     pub fn conflicts(&mut self) -> Vec<qur_git::Conflict> {
         let v = self.model.version();

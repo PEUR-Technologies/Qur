@@ -3683,6 +3683,7 @@ dependencies = [
  "qur_editor",
  "qur_git",
  "qur_heat",
+ "qur_search",
  "qur_syntax",
  "qur_theme",
  "qur_tree",
@@ -3730,6 +3731,14 @@ version = "0.1.0"
 [[package]]
 name = "qur_heat"
 version = "0.1.0"
+
+[[package]]
+name = "qur_search"
+version = "0.1.0"
+dependencies = [
+ "ignore",
+ "regex",
+]
 
 [[package]]
 name = "qur_syntax"

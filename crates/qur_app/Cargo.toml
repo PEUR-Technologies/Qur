@@ -22,6 +22,7 @@ qur_theme.workspace = true
 qur_tree.workspace = true
 qur_watch.workspace = true
 qur_worktree.workspace = true
+qur_search.workspace = true
 alacritty_terminal.workspace = true
 futures.workspace = true
 gpui.workspace = true

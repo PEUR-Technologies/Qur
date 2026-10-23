@@ -32,6 +32,7 @@ use crate::input::{InputEvent, TextInput};
 use crate::look::Look;
 use crate::picker::{PickItem, Picker, PickerEvent};
 use crate::prompt::{PromptEvent, PromptInput};
+use crate::search_view::{SearchEvent, SearchPanel};
 use crate::terminal::{Kind, PanelEvent, TerminalPanel};
 use crate::tree_view::{TreeEvent, TreeView};
 
@@ -94,6 +95,8 @@ enum Selected {
     Shell(usize),
     /// The Git panel for the main checkout.
     Git,
+    /// Project search (M6) over `search`'s root.
+    Search,
 }
 
 enum PickKind {
@@ -162,6 +165,7 @@ pub struct Workspace {
     layout: Layout,
     _root_watcher: Option<qur_watch::Watcher>,
     git: Option<Entity<GitPanel>>,
+    search: Option<Entity<SearchPanel>>,
     merge: Option<MergeState>,
     slider: Rc<Cell<Bounds<Pixels>>>,
     sliding: bool,
@@ -253,6 +257,7 @@ impl Workspace {
             layout: Layout::A,
             _root_watcher: None,
             git: None,
+            search: None,
             merge: None,
             slider: Rc::new(Cell::new(Bounds::default())),
             sliding: false,
@@ -446,6 +451,7 @@ impl Workspace {
         match &self.selected {
             Some(Selected::Agent(id)) => self.agent(id).map(|a| a.read(cx).record.worktree.clone()).unwrap_or(self.root.clone()),
             Some(Selected::TermTask(id)) => self.term_task(id).map(|t| t.record.worktree.clone()).unwrap_or(self.root.clone()),
+            Some(Selected::Search) => self.search.as_ref().map(|s| s.read(cx).root.clone()).unwrap_or(self.root.clone()),
             _ => self.root.clone(),
         }
     }
@@ -514,6 +520,11 @@ impl Workspace {
             Some(Selected::Git) => {
                 self.git_panel(window, cx);
                 window.focus(&self.focus, cx);
+            }
+            Some(Selected::Search) => {
+                if let Some(s) = &self.search {
+                    s.update(cx, |s, cx| s.focus_query(window, cx));
+                }
             }
             None => window.focus(&self.focus, cx),
         }
@@ -1476,6 +1487,76 @@ impl Workspace {
         .detach();
     }
 
+    /// Find in Project (Cmd+Shift+F), Replace in Project (Cmd+Shift+H), View >
+    /// Search: the Search view over the tree you're looking at (the selected
+    /// agent's worktree, or the main checkout).
+    fn show_search(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.current_root(cx);
+        // Seed the query with a one-line selection in the code modal.
+        let seed = self
+            .code
+            .as_ref()
+            .and_then(|c| c.read(cx).selected_text())
+            .filter(|t| !t.is_empty() && !t.contains('\n'))
+            // Dev/test: QUR_DEBUG_SEARCH=<query> fills the field.
+            .or_else(|| std::env::var("QUR_DEBUG_SEARCH").ok());
+        let panel = match &self.search {
+            Some(s) => s.clone(),
+            None => {
+                let s = cx.new(|cx| SearchPanel::new(root.clone(), window, cx));
+                let sub = cx.subscribe_in(&s, window, |this, panel, ev: &SearchEvent, window, cx| match ev {
+                    SearchEvent::Open(path, line, col) => {
+                        let path = path.clone();
+                        this.open_path_at(&path, Some(Point { line: *line, col: *col }), window, cx);
+                    }
+                    SearchEvent::Message(m) => this.flash(m.clone(), cx),
+                    SearchEvent::ConfirmReplace { files, matches } => {
+                        let detail = format!(
+                            "Replace {matches} match{} in {files} file{} under {}? Open files reload from disk.",
+                            if *matches == 1 { "" } else { "es" },
+                            if *files == 1 { "" } else { "s" },
+                            panel.read(cx).root.display()
+                        );
+                        let answer = ask(window, PromptLevel::Warning, "Replace All", Some(&detail), &["Replace", "Cancel"], cx);
+                        let panel = panel.clone();
+                        cx.spawn_in(window, async move |_, cx| {
+                            if answer.await.ok() == Some(0) {
+                                panel.update(cx, |p, cx| p.replace_all(cx));
+                            }
+                        })
+                        .detach();
+                    }
+                });
+                self._subs.push(sub);
+                self.search = Some(s.clone());
+                s
+            }
+        };
+        panel.update(cx, |p, cx| {
+            if let Some(seed) = seed {
+                p.query.update(cx, |q, cx| q.set_text(&seed, cx));
+                p.run(cx);
+            }
+            p.set_root(root, cx);
+        });
+        self.select(Some(Selected::Search), window, cx);
+        if replace {
+            panel.update(cx, |p, cx| p.focus_replace(window, cx));
+        }
+    }
+
+    fn find_in_project(&mut self, _: &qur::FindInProject, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_search(false, window, cx);
+    }
+
+    fn replace_in_project(&mut self, _: &qur::ReplaceInProject, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_search(true, window, cx);
+    }
+
+    fn search_panel(&mut self, _: &qur::SearchPanel, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_search(false, window, cx);
+    }
+
     fn git_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<GitPanel> {
         if let Some(g) = &self.git {
             return g.clone();
@@ -1875,6 +1956,12 @@ impl Workspace {
             Some(Selected::Shell(_)) | Some(Selected::TermTask(_)) => {
                 let f = self.terms.read(cx).focus.clone();
                 window.focus(&f, cx);
+            }
+            Some(Selected::Search) => {
+                if let Some(s) = &self.search {
+                    let f = s.read(cx).query.read(cx).focus.clone();
+                    window.focus(&f, cx);
+                }
             }
             Some(Selected::Git) | None => window.focus(&self.focus, cx),
         }
@@ -2620,6 +2707,7 @@ impl Workspace {
             Some(Selected::TermTask(id)) => self.term_task(id).map(|t| t.record.title.clone()),
             Some(Selected::Shell(s)) => self.terms.read(cx).session_by_id(*s).map(|s| s.label.clone()),
             Some(Selected::Git) => Some("Source control".into()),
+            Some(Selected::Search) => Some("Search".into()),
             None => None,
         }
     }
@@ -2997,6 +3085,11 @@ impl Workspace {
             Some(Selected::Git) => {
                 if let Some(g) = &self.git {
                     return g.clone().into_any_element();
+                }
+            }
+            Some(Selected::Search) => {
+                if let Some(s) = &self.search {
+                    return s.clone().into_any_element();
                 }
             }
             None => {}
@@ -3508,6 +3601,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::run_checks_action))
             .on_action(cx.listener(Self::run_project))
             .on_action(cx.listener(Self::rename_agent))
+            .on_action(cx.listener(Self::find_in_project))
+            .on_action(cx.listener(Self::replace_in_project))
+            .on_action(cx.listener(Self::search_panel))
             .on_action(cx.listener(Self::git_stage_all))
             .on_action(cx.listener(Self::git_unstage_all))
             .on_action(cx.listener(Self::git_commit))
