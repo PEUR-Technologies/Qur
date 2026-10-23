@@ -20,6 +20,7 @@ use qur_theme::Rgba;
 
 use crate::browser_view::{BrowserPane, BrowserPaneEvent, base64};
 use crate::changes_view::{ChangesEvent, ChangesView};
+use crate::dock::{self, Docks, Kind, Panel};
 use crate::live::{LiveEvent, LivePane};
 use crate::look::Look;
 use crate::monitor::{TaskMonitor, heat_kind, heat_status};
@@ -82,14 +83,6 @@ pub enum AgentEvent {
     TurnChangedFiles,
 }
 
-/// What the middle pane shows in layouts A/C.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Middle {
-    Live,
-    Browser,
-    Changes,
-}
-
 #[derive(Clone)]
 enum ChatItem {
     User(String),
@@ -149,7 +142,17 @@ pub enum View {
     Todo,
     Chat,
     Changes,
-    Browser,
+}
+
+impl View {
+    pub fn panel(self) -> Panel {
+        match self {
+            View::Live => Panel::Live,
+            View::Todo => Panel::Todo,
+            View::Chat => Panel::Session,
+            View::Changes => Panel::Changes,
+        }
+    }
 }
 
 /// One message on its way to the agent.
@@ -178,8 +181,6 @@ pub struct AgentTask {
     pub monitor: Entity<TaskMonitor>,
     pub live: Entity<LivePane>,
     pub layout: Layout,
-    pub view: View,
-    drawer_open: bool,
     pub def: AgentDef,
     pub accent: Rgba,
     pub status: Status,
@@ -201,7 +202,6 @@ pub struct AgentTask {
     /// Per-task Browser view (decision 26).
     pub browser: Entity<BrowserPane>,
     /// Layouts A/C: what the middle pane shows.
-    pub middle: Middle,
     /// The task's diff, Merge, review comments (M4).
     pub changes: Entity<ChangesView>,
     /// Files changed during the current turn (reload the browser when it ends).
@@ -285,8 +285,6 @@ impl AgentTask {
             monitor,
             live,
             layout,
-            view: View::Chat,
-            drawer_open: false,
             def,
             accent,
             status: Status::Stopped,
@@ -303,7 +301,6 @@ impl AgentTask {
             pending: Vec::new(),
             images_ok: false,
             browser,
-            middle: Middle::Live,
             changes,
             turn_wrote: false,
             commands: Vec::new(),
@@ -1007,21 +1004,6 @@ impl AgentTask {
         let ui = look.theme.ui.clone();
         let working = matches!(self.status, Status::Working | Status::NeedsYou);
         let elapsed = self.turn_started.filter(|_| working).map(|t| format!("  {}s", t.elapsed().as_secs())).unwrap_or_default();
-        let segment = |label: &'static str, view: View, id: &'static str, keys: &'static str| {
-            let on = self.view == view;
-            div()
-                .id(id)
-                .px(look.z(8.))
-                .py(look.z(2.))
-                .rounded(look.z(4.))
-                .cursor_pointer()
-                .text_size(look.text(-1.))
-                .text_color(look.c(if on { ui.text } else { ui.text_muted }))
-                .when(on, |d| d.bg(look.c(ui.active_bg)))
-                .child(label)
-                .tooltip(move |_, cx| cx.new(|_| TipText(keys)).into())
-                .on_click(cx.listener(move |t, _, _, cx| t.set_view(view, cx)))
-        };
         div()
             .flex_none()
             .h(look.z(36.))
@@ -1041,14 +1023,7 @@ impl AgentTask {
                     .child(format!("{}{elapsed}", self.status.label())),
             )
             .child(div().flex_1())
-            .when(self.layout == Layout::B, |d| {
-                d.child(segment("Live", View::Live, "seg-live", "⌘1"))
-                    .child(segment("To-do", View::Todo, "seg-todo", "⌘2"))
-                    .child(segment("Chat", View::Chat, "seg-chat", "⌘3"))
-                    .child(segment("Changes", View::Changes, "seg-changes", "⌘4"))
-                    .child(segment("Browser", View::Browser, "seg-browser", "⌘5"))
-            })
-            .when(self.layout != Layout::B, |d| d.child(div().flex_none().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(self.record.branch.clone())))
+            .child(div().flex_none().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(self.record.branch.clone()))
             .when(working, |d| {
                 d.child(
                     div()
@@ -1067,36 +1042,12 @@ impl AgentTask {
             })
     }
 
-    /// Layout B's Browser segment: the page plus the prompt (to ask about picks).
-    fn notes_compact(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
-        let ui = look.theme.ui.clone();
-        div()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .border_t_1()
-            .border_color(look.c(ui.border))
-            .pt(look.z(8.))
-            .children(self.permission_bar(look, cx))
-            .child(
-                div()
-                    .mx(look.z(12.))
-                    .mb(look.z(12.))
-                    .px(look.z(12.))
-                    .py(look.z(8.))
-                    .rounded(look.z(6.))
-                    .border_1()
-                    .border_color(look.c(ui.border_strong))
-                    .bg(look.c(ui.editor_bg))
-                    .child(self.prompt.clone()),
-            )
-    }
-
+    /// Cmd+1..5: bring a panel to the front of its pane.
     pub fn set_view(&mut self, v: View, cx: &mut Context<Self>) {
         if v == View::Changes {
             self.changes.update(cx, |c, cx| c.refresh(cx));
         }
-        self.view = v;
+        Docks::update(cx, Kind::Acp, |d| d.activate(v.panel()));
         cx.notify();
     }
 
@@ -1105,119 +1056,24 @@ impl AgentTask {
         cx.notify();
     }
 
-    /// One line for layout C's closed drawer: current step, then latest words.
-    fn drawer_line(&self) -> String {
-        let step = self.plan.iter().find(|p| p.status == PlanStatus::InProgress).map(|p| p.content.clone());
-        match (step, self.last_line()) {
-            (Some(s), Some(l)) => format!("{s}  ·  {l}"),
-            (Some(s), None) => s,
-            (None, Some(l)) => l,
-            (None, None) => self.status.label(),
-        }
-    }
-}
-
-/// Minimal tooltip view (segment shortcuts).
-struct TipText(&'static str);
-
-impl Render for TipText {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let look = Look::of(window, cx);
-        let ui = &look.theme.ui;
-        div()
-            .px(look.z(6.))
-            .py(look.z(2.))
-            .rounded(look.z(4.))
-            .bg(look.c(ui.overlay_bg))
-            .border_1()
-            .border_color(look.c(ui.border_strong))
-            .text_size(look.text(-2.))
-            .text_color(look.c(ui.text))
-            .font_family(look.ui_font.clone())
-            .child(self.0)
-    }
 }
 
 impl AgentTask {
-    /// Does the stage show this task's browser right now (layout + tab)?
-    pub fn shows_browser(&self) -> bool {
-        match self.layout {
-            Layout::B => self.view == View::Browser,
-            _ => self.middle == Middle::Browser,
-        }
+    /// Does the stage show this task's browser right now?
+    pub fn shows_browser(&self, cx: &App) -> bool {
+        Docks::get(cx, Kind::Acp).is_visible(Panel::Browser)
     }
 
     pub fn show_browser(&mut self, on: bool, cx: &mut Context<Self>) {
-        match self.layout {
-            Layout::B => self.view = if on { View::Browser } else { View::Live },
-            _ => self.middle = if on { Middle::Browser } else { Middle::Live },
-        }
+        Docks::update(cx, Kind::Acp, |d| d.activate(if on { Panel::Browser } else { Panel::Live }));
         cx.notify();
     }
 
     /// Review Changes (Cmd+4 / Agent menu): show the diff, freshly computed.
     pub fn show_changes(&mut self, cx: &mut Context<Self>) {
-        match self.layout {
-            Layout::B => self.view = View::Changes,
-            _ => self.middle = Middle::Changes,
-        }
+        Docks::update(cx, Kind::Acp, |d| d.activate(Panel::Changes));
         self.changes.update(cx, |c, cx| c.refresh(cx));
         cx.notify();
-    }
-
-    fn set_middle(&mut self, m: Middle, cx: &mut Context<Self>) {
-        self.middle = m;
-        if m == Middle::Changes {
-            self.changes.update(cx, |c, cx| c.refresh(cx));
-        }
-        cx.notify();
-    }
-
-    /// Layouts A/C: Live, Browser or Changes, with a small switch above.
-    fn middle(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
-        let ui = look.theme.ui.clone();
-        let tab = |label: &'static str, on: bool, id: &'static str, m: Middle| {
-            div()
-                .id(id)
-                .px(look.z(8.))
-                .py(look.z(1.))
-                .rounded(look.z(4.))
-                .cursor_pointer()
-                .text_size(look.text(-2.))
-                .text_color(look.c(if on { ui.text } else { ui.text_muted }))
-                .when(on, |d| d.bg(look.c(ui.active_bg)))
-                .child(label)
-                .on_click(cx.listener(move |t, _, _, cx| t.set_middle(m, cx)))
-        };
-        let m = self.middle;
-        let totals = self.changes.read(cx).totals;
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .flex_none()
-                    .h(look.z(26.))
-                    .px(look.z(8.))
-                    .flex()
-                    .items_center()
-                    .gap(look.z(2.))
-                    .border_b_1()
-                    .border_color(look.c(ui.border))
-                    .child(tab("Live", m == Middle::Live, "mid-live", Middle::Live))
-                    .child(tab("Browser", m == Middle::Browser, "mid-browser", Middle::Browser))
-                    .child(tab("Changes", m == Middle::Changes, "mid-changes", Middle::Changes))
-                    .when(totals.0 + totals.1 > 0, |d| {
-                        d.child(div().text_size(look.text(-3.)).text_color(look.c(look.theme.diff.added_text)).child(format!("+{}", totals.0)))
-                            .child(div().text_size(look.text(-3.)).text_color(look.c(look.theme.diff.removed_text)).child(format!("−{}", totals.1)))
-                    }),
-            )
-            .child(div().flex_1().min_h(px(0.)).child(match m {
-                Middle::Live => self.live.clone().into_any_element(),
-                Middle::Browser => self.browser.clone().into_any_element(),
-                Middle::Changes => self.changes.clone().into_any_element(),
-            }))
     }
 }
 
@@ -1226,103 +1082,21 @@ impl Render for AgentTask {
         let look = Look::of(window, cx);
         let ui = look.theme.ui.clone();
         let header = self.header(&look, cx);
-        let body: gpui::AnyElement = match self.layout {
-            Layout::A => div()
-                .flex_1()
-                .min_h(px(0.))
+        // The stage is a dock you can rearrange (dock.rs).
+        let todo_shown = Docks::get(cx, Kind::Acp).is_visible(Panel::Todo);
+        let body = div().flex_1().min_h(px(0.)).child(dock::render(Kind::Acp, &look, cx, &mut |p, cx| match p {
+            Panel::Session => self.notes(!todo_shown, &look, cx).size_full().into_any_element(),
+            Panel::Live => div().size_full().flex().flex_col().child(div().flex_1().min_h(px(0.)).child(self.live.clone())).into_any_element(),
+            Panel::Browser => div().size_full().child(self.browser.clone()).into_any_element(),
+            Panel::Changes => div().size_full().child(self.changes.clone()).into_any_element(),
+            Panel::Todo => div()
+                .size_full()
                 .flex()
-                .child(div().flex_1().min_w(px(0.)).child(self.middle(&look, cx)))
-                .child(div().w(look.z(400.)).flex_none().h_full().border_l_1().border_color(look.c(ui.border)).child(self.notes(true, &look, cx)))
+                .flex_col()
+                .children(self.plan_strip(&look))
+                .when(self.plan.is_empty(), |d| d.child(div().flex_1().flex().items_center().justify_center().text_color(look.c(look.theme.ui.text_muted)).child("No plan yet.")))
                 .into_any_element(),
-            Layout::B => match self.view {
-                View::Live => div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .flex()
-                    .flex_col()
-                    .child(div().flex_1().min_h(px(0.)).child(self.live.clone()))
-                    .children(self.permission_bar(&look, cx))
-                    .into_any_element(),
-                View::Todo => div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .flex()
-                    .flex_col()
-                    .children(self.plan_strip(&look))
-                    .when(self.plan.is_empty(), |d| {
-                        d.child(div().flex_1().flex().items_center().justify_center().text_color(look.c(ui.text_muted)).child("No plan yet."))
-                    })
-                    .child(div().flex_1())
-                    .children(self.permission_bar(&look, cx))
-                    .into_any_element(),
-                View::Chat => div().flex_1().min_h(px(0.)).child(self.notes(false, &look, cx)).into_any_element(),
-                View::Browser => div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .flex()
-                    .flex_col()
-                    .child(div().flex_1().min_h(px(0.)).child(self.browser.clone()))
-                    .child(self.notes_compact(&look, cx))
-                    .into_any_element(),
-                View::Changes => div().flex_1().min_h(px(0.)).child(self.changes.clone()).into_any_element(),
-            },
-            Layout::C => {
-                let open = self.drawer_open;
-                let drawer = div()
-                    .flex_none()
-                    .border_t_1()
-                    .border_color(look.c(ui.border))
-                    .when(open, |d| d.h(gpui::relative(0.55)).child(self.notes(true, &look, cx)))
-                    .when(!open, |d| {
-                        d.child(
-                            div()
-                                .id("drawer")
-                                .h(look.z(30.))
-                                .px(look.z(16.))
-                                .flex()
-                                .items_center()
-                                .gap(look.z(8.))
-                                .cursor_pointer()
-                                .text_size(look.text(-1.))
-                                .text_color(look.c(ui.text_secondary))
-                                .child(div().flex_none().text_color(look.c(ui.text_muted)).child("▴"))
-                                .child(div().min_w(px(0.)).truncate().child(self.drawer_line()))
-                                .on_click(cx.listener(|t, _, _, cx| {
-                                    t.drawer_open = true;
-                                    cx.notify();
-                                })),
-                        )
-                        .children(self.permission_bar(&look, cx))
-                    });
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .flex()
-                    .flex_col()
-                    .child(div().flex_1().min_h(px(0.)).child(self.middle(&look, cx)))
-                    .child(drawer)
-                    .when(open, |d| {
-                        d.child(
-                            div()
-                                .id("drawer-close")
-                                .absolute()
-                                .right(look.z(12.))
-                                .bottom(gpui::relative(0.55))
-                                .px(look.z(8.))
-                                .cursor_pointer()
-                                .text_size(look.text(-2.))
-                                .text_color(look.c(ui.text_muted))
-                                .child("▾ close")
-                                .on_click(cx.listener(|t, _, _, cx| {
-                                    t.drawer_open = false;
-                                    cx.notify();
-                                })),
-                        )
-                    })
-                    .relative()
-                    .into_any_element()
-            }
-        };
+        }));
         div()
             .key_context("AgentView")
             .track_focus(&self.focus)

@@ -2,7 +2,7 @@
 
 Read this first when picking the project up (person or Claude session). It says where things stand, what was decided, and what to do next. Keep it current: update the **Status** and **Next** sections at the end of every work session.
 
-Last updated: 2026-10-23 (M6 done)
+Last updated: 2026-10-23 (M7 done)
 
 ## What Qur is
 
@@ -37,6 +37,8 @@ Summary of the owner decisions so far:
 **M0–M3 and Browser + Inspect are done** and on `main`. Commits: "M0: spikes", "M1: editor shell", "M2: agents in worktrees", "M3: Live view + heatmap", "Browser + Inspect", "Add README". The repo lives at https://github.com/PEUR-Technologies/Qur (private).
 
 **M4 (Changes + Merge + Git panel) is done** and merged into `main` (2026-10-23). All 144 workspace tests pass (qur_git: 16 passed, 1 timing test ignored). Merge, conflicts (Finish and Abort), Discard, and the Git panel's Stage All / Unstage All were verified end to end with scripted runs; see `docs/budget.md` (M4). Still to check by hand: per-file stage/unstage, the file diff and a typed commit in the Git panel.
+
+**M7 (packaging) is done, so all milestones M0–M7 are in** (decisions 32–34, `docs/budget.md` M7): Qur.app via `scripts/bundle.sh`, `qur doctor`, the Help menu and About, the release README, and both acceptance checks (`budget.sh` with real agents; no sockets in Qur's process). Also new: the rearrangeable stage (dock, decision 32) and no logo in the top bar (decision 33). Still to check by hand: dragging tabs and dividers, About, Run Doctor's sheet, plus the earlier lists. For people outside this Mac, a Developer ID signature and notarization (`docs/signing.md`).
 
 **M6 (search, alerts, first-run picker, Vim) is done** (decision 31, `docs/budget.md` M6). Still to check by hand: the Search view and picker on screen, typing Vim keys, the picker's Check button, the chime, and no alert while you're on that agent. Notifications need the M7 `.app`.
 

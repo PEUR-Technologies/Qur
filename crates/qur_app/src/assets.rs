@@ -46,17 +46,6 @@ impl AssetSource for Assets {
     }
 }
 
-/// The flat symbol in black or white (never tinted). The small-size cut is
-/// used below 48 px, per the brand README.
-pub fn symbol(white: bool, size_px: f32) -> &'static str {
-    match (white, size_px < 48.0) {
-        (true, true) => "brand/svg/qur-symbol-small-white.svg",
-        (false, true) => "brand/svg/qur-symbol-small-black.svg",
-        (true, false) => "brand/svg/qur-symbol-white.svg",
-        (false, false) => "brand/svg/qur-symbol-black.svg",
-    }
-}
-
 pub mod icon {
     pub const CHEVRON_RIGHT: &str = "icons/chevron-right.svg";
     pub const CHEVRON_DOWN: &str = "icons/chevron-down.svg";

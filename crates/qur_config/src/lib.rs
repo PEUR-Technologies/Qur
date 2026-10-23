@@ -47,6 +47,16 @@ pub struct Config {
     pub panels: PanelsConfig,
     pub keys: KeysConfig,
     pub alerts: AlertsConfig,
+    pub layout: LayoutConfig,
+}
+
+/// The agent stage's arrangement (dock.rs), written by Qur as you drag tabs
+/// and dividers. Empty = the `peek_layout` preset.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LayoutConfig {
+    pub acp: Option<String>,
+    pub terminal: Option<String>,
 }
 
 /// When an agent finishes, errors or needs you while you're elsewhere
@@ -119,6 +129,7 @@ impl Default for Config {
             panels: PanelsConfig::default(),
             keys: KeysConfig::default(),
             alerts: AlertsConfig::default(),
+            layout: LayoutConfig::default(),
         }
     }
 }
