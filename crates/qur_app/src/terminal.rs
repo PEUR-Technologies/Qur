@@ -572,7 +572,16 @@ impl TerminalPanel {
         }
     }
     fn paste(&mut self, _: &edit::Paste, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(t) = cx.read_from_clipboard().and_then(|c| c.text()) else { return };
+        let Some(clip) = cx.read_from_clipboard() else { return };
+        match clip.entries().first() {
+            // An image (a screenshot, say): send Ctrl+V, which is how Claude Code
+            // reads an image from the clipboard (Zed does the same).
+            Some(gpui::ClipboardEntry::Image(img)) if !img.bytes().is_empty() => return self.write_active(vec![0x16], cx),
+            // Files copied in Finder: their paths.
+            Some(gpui::ClipboardEntry::ExternalPaths(paths)) => return self.paste_paths(paths.paths(), cx),
+            _ => {}
+        }
+        let Some(t) = clip.text() else { return };
         let bracketed = self
             .active_session()
             .map(|s| s.term.lock().mode().contains(TermMode::BRACKETED_PASTE))
@@ -581,6 +590,19 @@ impl TerminalPanel {
         let bytes = if bracketed { format!("\x1b[200~{t}\x1b[201~") } else { t };
         self.write_active(bytes.into_bytes(), cx);
     }
+    /// Shell-quoted paths, space-separated (pasted or dropped files). Claude
+    /// Code attaches image files given as paths.
+    fn paste_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let quoted: Vec<String> = paths.iter().map(|p| shell_quote(&p.to_string_lossy())).collect();
+        if quoted.is_empty() {
+            return;
+        }
+        let text = format!(" {} ", quoted.join(" "));
+        let bracketed = self.active_session().map(|s| s.term.lock().mode().contains(TermMode::BRACKETED_PASTE)).unwrap_or(false);
+        let bytes = if bracketed { format!("\x1b[200~{text}\x1b[201~") } else { text };
+        self.write_active(bytes.into_bytes(), cx);
+    }
+
     fn select_all(&mut self, _: &edit::SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(s) = self.active_session() {
             let mut t = s.term.lock();
@@ -858,6 +880,8 @@ struct GridRow {
     y: Pixels,
     text: ShapedLine,
     bgs: Vec<(usize, usize, u32)>,
+    /// Block and box-drawing characters, drawn as shapes (column, shape, color).
+    shapes: Vec<(usize, Shape, u32)>,
 }
 
 struct GridPrepaint {
@@ -928,6 +952,7 @@ impl Element for GridElement {
         let mut text: Vec<String> = vec![String::new(); n_lines];
         let mut runs: Vec<Vec<TextRun>> = vec![Vec::new(); n_lines];
         let mut bgs: Vec<Vec<(usize, usize, u32)>> = vec![Vec::new(); n_lines];
+        let mut shapes: Vec<Vec<(usize, Shape, u32)>> = vec![Vec::new(); n_lines];
         let mk = |len: usize, color: u32, bold: bool| TextRun {
             len,
             font: if bold { gpui::Font { weight: gpui::FontWeight::BOLD, ..f.clone() } } else { f.clone() },
@@ -964,7 +989,14 @@ impl Element for GridElement {
                     _ => bgs[row].push((col, col + 1, b)),
                 }
             }
-            let ch = if cell.flags.contains(Flags::HIDDEN) { ' ' } else { cell.c };
+            let mut ch = if cell.flags.contains(Flags::HIDDEN) { ' ' } else { cell.c };
+            // Drawn edge to edge instead of with the font, whose glyphs don't
+            // fill the taller line (so logos and boxes had gaps).
+            if let Some(shape) = shape_of(ch) {
+                shapes[row].push((col, shape, fg));
+                ch = ' ';
+                out.has_content = true;
+            }
             if ch != ' ' {
                 out.has_content = true;
             }
@@ -987,7 +1019,7 @@ impl Element for GridElement {
         drop(term);
         for (i, (t, r)) in text.into_iter().zip(runs).enumerate() {
             let shaped = ts.shape_line(SharedString::from(t), fs, &r, None);
-            out.rows.push(GridRow { y: bounds.top() + lh * i as f32, text: shaped, bgs: std::mem::take(&mut bgs[i]) });
+            out.rows.push(GridRow { y: bounds.top() + lh * i as f32, text: shaped, bgs: std::mem::take(&mut bgs[i]), shapes: std::mem::take(&mut shapes[i]) });
         }
         out
     }
@@ -1006,6 +1038,14 @@ impl Element for GridElement {
                         Bounds::new(point(bounds.left() + cw * a as f32, row.y), size(cw * (b - a) as f32, lh)),
                         hex(c),
                     ));
+                }
+                for &(col, shape, c) in &row.shapes {
+                    let cell = Bounds::new(point(bounds.left() + cw * col as f32, row.y), size(cw, lh));
+                    for (r, alpha) in shape.rects(cell) {
+                        let mut color = hex(c);
+                        color.a *= alpha;
+                        window.paint_quad(fill(r, color));
+                    }
                 }
                 row.text.paint(point(bounds.left(), row.y), lh, gpui::TextAlign::Left, None, window, cx).ok();
             }
@@ -1076,6 +1116,17 @@ impl Render for TerminalPanel {
                     .min_h(px(0.))
                     .px(look.z(8.))
                     .py(look.z(4.))
+                    // Files dragged in from Finder become their paths, as in Terminal.
+                    .drag_over::<gpui::ExternalPaths>(|s, _, window, cx| {
+                        let l = Look::of(window, cx);
+                        let mut c = l.c(l.theme.ui.focus_ring);
+                        c.a = 0.12;
+                        s.bg(c)
+                    })
+                    .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
+                        window.focus(&this.focus, cx);
+                        this.paste_paths(paths.paths(), cx);
+                    }))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
                     .on_scroll(cx.listener(Self::on_scroll))
@@ -1100,6 +1151,129 @@ fn search_from<T: EventListener>(t: &Term<T>, regex: &mut RegexSearch, last: Opt
         return t.search_next(regex, next, dir, side, None);
     }
     Some(m)
+}
+
+/// A block element or box-drawing character, drawn as rectangles.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Shape {
+    /// Filled parts of the cell, in cell fractions (x0, y0, x1, y1), and alpha.
+    Block(&'static [(f32, f32, f32, f32)], f32),
+    /// Lines from the center to the left, right, top and bottom edges
+    /// (0 none, 1 light, 2 heavy).
+    Lines { left: u8, right: u8, up: u8, down: u8 },
+}
+
+impl Shape {
+    fn rects(self, cell: Bounds<Pixels>) -> Vec<(Bounds<Pixels>, f32)> {
+        let (x, y, w, h) = (cell.left(), cell.top(), cell.size.width, cell.size.height);
+        match self {
+            Shape::Block(parts, alpha) => parts
+                .iter()
+                .map(|&(x0, y0, x1, y1)| {
+                    // Round to whole pixels so neighbours meet without seams.
+                    let l = (x + w * x0).round();
+                    let t = (y + h * y0).round();
+                    let r = (x + w * x1).round();
+                    let b = (y + h * y1).round();
+                    (Bounds::new(point(l, t), size(r - l, b - t)), alpha)
+                })
+                .collect(),
+            Shape::Lines { left, right, up, down } => {
+                let thick = |weight: u8| if weight == 2 { (w * 0.22).max(px(2.)).round() } else { (w * 0.11).max(px(1.)).round() };
+                let cx = (x + w / 2.).round();
+                let cy = (y + h / 2.).round();
+                let mut out = Vec::new();
+                let horiz = left.max(right).max(1);
+                let vert = up.max(down).max(1);
+                let (th, tv) = (thick(horiz), thick(vert));
+                // Arms overlap the center by half a line so corners close.
+                if left > 0 {
+                    out.push((Bounds::new(point(x, cy - th / 2.), size(cx - x + tv / 2., th)), 1.0));
+                }
+                if right > 0 {
+                    out.push((Bounds::new(point(cx - tv / 2., cy - th / 2.), size(x + w - cx + tv / 2., th)), 1.0));
+                }
+                if up > 0 {
+                    out.push((Bounds::new(point(cx - tv / 2., y), size(tv, cy - y + th / 2.)), 1.0));
+                }
+                if down > 0 {
+                    out.push((Bounds::new(point(cx - tv / 2., cy - th / 2.), size(tv, y + h - cy + th / 2.)), 1.0));
+                }
+                out
+            }
+        }
+    }
+}
+
+fn shape_of(c: char) -> Option<Shape> {
+    const H: f32 = 0.5;
+    const UL: (f32, f32, f32, f32) = (0., 0., H, H);
+    const UR: (f32, f32, f32, f32) = (H, 0., 1., H);
+    const LL: (f32, f32, f32, f32) = (0., H, H, 1.);
+    const LR: (f32, f32, f32, f32) = (H, H, 1., 1.);
+    let b = |parts: &'static [(f32, f32, f32, f32)]| Some(Shape::Block(parts, 1.0));
+    let l = |left: u8, right: u8, up: u8, down: u8| Some(Shape::Lines { left, right, up, down });
+    match c {
+        '▀' => b(&[(0., 0., 1., H)]),
+        '▁' => b(&[(0., 0.875, 1., 1.)]),
+        '▂' => b(&[(0., 0.75, 1., 1.)]),
+        '▃' => b(&[(0., 0.625, 1., 1.)]),
+        '▄' => b(&[(0., H, 1., 1.)]),
+        '▅' => b(&[(0., 0.375, 1., 1.)]),
+        '▆' => b(&[(0., 0.25, 1., 1.)]),
+        '▇' => b(&[(0., 0.125, 1., 1.)]),
+        '█' => b(&[(0., 0., 1., 1.)]),
+        '▉' => b(&[(0., 0., 0.875, 1.)]),
+        '▊' => b(&[(0., 0., 0.75, 1.)]),
+        '▋' => b(&[(0., 0., 0.625, 1.)]),
+        '▌' => b(&[(0., 0., H, 1.)]),
+        '▍' => b(&[(0., 0., 0.375, 1.)]),
+        '▎' => b(&[(0., 0., 0.25, 1.)]),
+        '▏' => b(&[(0., 0., 0.125, 1.)]),
+        '▐' => b(&[(H, 0., 1., 1.)]),
+        '░' => Some(Shape::Block(&[(0., 0., 1., 1.)], 0.25)),
+        '▒' => Some(Shape::Block(&[(0., 0., 1., 1.)], 0.5)),
+        '▓' => Some(Shape::Block(&[(0., 0., 1., 1.)], 0.75)),
+        '▔' => b(&[(0., 0., 1., 0.125)]),
+        '▕' => b(&[(0.875, 0., 1., 1.)]),
+        '▖' => b(&[LL]),
+        '▗' => b(&[LR]),
+        '▘' => b(&[UL]),
+        '▙' => b(&[UL, LL, LR]),
+        '▚' => b(&[UL, LR]),
+        '▛' => b(&[UL, UR, LL]),
+        '▜' => b(&[UL, UR, LR]),
+        '▝' => b(&[UR]),
+        '▞' => b(&[UR, LL]),
+        '▟' => b(&[UR, LL, LR]),
+        '─' => l(1, 1, 0, 0),
+        '━' => l(2, 2, 0, 0),
+        '│' => l(0, 0, 1, 1),
+        '┃' => l(0, 0, 2, 2),
+        '┌' | '╭' => l(0, 1, 0, 1),
+        '┐' | '╮' => l(1, 0, 0, 1),
+        '└' | '╰' => l(0, 1, 1, 0),
+        '┘' | '╯' => l(1, 0, 1, 0),
+        '├' => l(0, 1, 1, 1),
+        '┤' => l(1, 0, 1, 1),
+        '┬' => l(1, 1, 0, 1),
+        '┴' => l(1, 1, 1, 0),
+        '┼' => l(1, 1, 1, 1),
+        '┏' => l(0, 2, 0, 2),
+        '┓' => l(2, 0, 0, 2),
+        '┗' => l(0, 2, 2, 0),
+        '┛' => l(2, 0, 2, 0),
+        '┣' => l(0, 2, 2, 2),
+        '┫' => l(2, 0, 2, 2),
+        '┳' => l(2, 2, 0, 2),
+        '┻' => l(2, 2, 2, 0),
+        '╋' => l(2, 2, 2, 2),
+        '╴' => l(1, 0, 0, 0),
+        '╶' => l(0, 1, 0, 0),
+        '╵' => l(0, 0, 1, 0),
+        '╷' => l(0, 0, 0, 1),
+        _ => None,
+    }
 }
 
 /// A terminal title as a task name: without spinner/status glyphs, and None
@@ -1203,6 +1377,25 @@ mod tests {
     }
 
     #[test]
+    fn block_and_box_shapes_fill_the_cell() {
+        let cell = Bounds::new(point(px(10.), px(20.)), size(px(8.), px(17.)));
+        // Full block: the whole cell, so rows and columns meet.
+        assert_eq!(shape_of('█').unwrap().rects(cell), vec![(cell, 1.0)]);
+        // ▛ = three quadrants that tile without gaps.
+        let r = shape_of('▛').unwrap().rects(cell);
+        assert_eq!(r.len(), 3);
+        let area: f32 = r.iter().map(|(b, _)| f32::from(b.size.width) * f32::from(b.size.height)).sum();
+        assert!((area - 8. * 17. * 0.75).abs() < 9., "{area}");
+        // A vertical line runs the full cell height.
+        let v = shape_of('│').unwrap().rects(cell);
+        let top = v.iter().map(|(b, _)| b.top()).fold(px(1e9), |a, t| a.min(t));
+        let bottom = v.iter().map(|(b, _)| b.bottom()).fold(px(0.), |a, t| a.max(t));
+        assert_eq!((top, bottom), (cell.top(), cell.bottom()));
+        assert_eq!(shape_of('a'), None);
+        assert_eq!(shape_of('░').map(|s| s.rects(cell)[0].1), Some(0.25));
+    }
+
+    #[test]
     fn cmd_click_links() {
         let line = "  --> src/main.rs:12:5 (see https://example.com/x).";
         let at = |needle: &str| line.find(needle).unwrap();
@@ -1216,5 +1409,13 @@ mod tests {
         assert_eq!(classify_link("hello"), None);
         assert_eq!(classify_link("-->"), None);
         assert_eq!(link_at("error: 'lib/a.py', line 3", 9).as_deref(), Some("lib/a.py"));
+    }
+}
+
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:@+%,".contains(c)) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
     }
 }

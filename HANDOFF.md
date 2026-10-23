@@ -47,6 +47,7 @@ Latest numbers (`docs/budget.md`, M7 table, measured on battery): app 25 MB, fir
 Scripted tests can't type into Qur, click inside it, or drag, so these were only unit-tested or checked through logs. Ask the owner to try them, or do it with computer use:
 - **Dock:** dragging a tab to split or join panes, dragging a divider, × and +, and the right-click agent menu.
 - **Editor:** typing Vim keys in the code modal, and typing in Find in Terminal.
+- **Terminal paste:** an image (Cmd+V sends Ctrl+V to Claude), copied files, and files dragged onto a terminal (scripted runs would overwrite the clipboard).
 - **Other interactions:** Cmd-click links, the Rename box, the first-run picker's Check button.
 - **Git panel:** per-file stage and unstage, the file diff, a typed commit.
 - **Alerts:** the chime being audible, and no alert while you're looking at that agent.
@@ -92,7 +93,7 @@ Where things are stored on the owner's Mac:
 - **ACP:** both adapters speak ACP v1. Claude's `tool_call` has an empty `locations`; the path comes 0.5–0.9 s later in a `tool_call_update`. Spawn agents in their own process group (`process_group(0)`) and signal the group, so none are left orphaned.
 - **Merge** uses `merge-tree --write-tree`, then `commit-tree`, `read-tree -m -u` and `update-ref`, so the user's index and stash are never touched. It needs git 2.38 or newer.
 - **GPUI** is pinned to Zed rev `9e84b066`. It needs `gpui_platform`'s `font-kit` feature, or no text renders at all. GPUI already provides notifications (`App::show_system_notification`, a no-op without a bundle) and compiles `objc2-app-kit` and `objc2-user-notifications`. Zed source for reference: `~/src-ref/zed`.
-- **Claude Code's light/dark look is its own setting** (`/theme`; the owner's is `dark`). A dark setting on a light Qur theme draws black bars around the mascot. Qur now answers terminal color queries anyway.
+- **Block and box characters are drawn as shapes** (decision 37). The font's glyphs don't fill Qur's 1.3× line height, which left gaps in Claude Code's mascot and boxes. Qur also answers terminal color queries.
 - **Measuring:** memory is budgeted as physical footprint (`footprint <pid>`). On battery the 60 Hz panel paces frames at about 16.7 ms.
 - **Shell safety:** the Bash tool refuses `rm` on variable paths that could expand to `/`. Use literal paths or `"${D:?}"`.
 
