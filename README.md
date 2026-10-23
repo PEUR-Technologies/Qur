@@ -27,8 +27,6 @@ Rust + GPUI · no Electron · runs locally · uses your Claude Code login, not a
 - **Any CLI agent.** Claude Code, Aider, …
 - **Editor.** 13 languages, multi-cursor, Vim, 17 themes.
 
-![Browser + Inspect: pick an element, ask the agent](docs/images/browser-inspect.png)
-
 ## Light
 
 ![25 MB app vs 254 MB and 431 MB; 113 ms launch, 73 MB idle, 81 ms write to glow, no network connections](docs/images/numbers.svg)

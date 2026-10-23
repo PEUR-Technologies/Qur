@@ -59,7 +59,7 @@ impl Kind {
     pub fn panels(self) -> &'static [Panel] {
         match self {
             Kind::Acp => &[Panel::Session, Panel::Live, Panel::Browser, Panel::Changes, Panel::Todo],
-            Kind::Terminal => &[Panel::Session, Panel::Live, Panel::Changes],
+            Kind::Terminal => &[Panel::Session, Panel::Live, Panel::Browser, Panel::Changes],
         }
     }
 
@@ -120,8 +120,8 @@ impl Dock {
     pub fn preset(kind: Kind, layout: &str) -> Dock {
         use Panel::*;
         let root = match (kind, layout) {
-            (Kind::Terminal, "B") => pane(&[Session, Live, Changes]),
-            (Kind::Terminal, "C") => split(true, 0.6, pane(&[Live, Changes]), pane(&[Session])),
+            (Kind::Terminal, "B") => pane(&[Session, Live, Changes, Browser]),
+            (Kind::Terminal, "C") => split(true, 0.6, pane(&[Live, Browser, Changes]), pane(&[Session])),
             // Decision 27: an Agent Terminal is a real terminal, the whole stage.
             (Kind::Terminal, _) => pane(&[Session]),
             (Kind::Acp, "B") => pane(&[Live, Todo, Session, Changes, Browser]),
@@ -786,8 +786,9 @@ mod tests {
         assert_eq!(Dock::preset(Kind::Acp, "A").serialize(), "h0.660(live,browser,changes|session,todo)");
         assert_eq!(Dock::parse(Kind::Acp, "garbage("), None);
         // Unknown or foreign panels drop out; the agent itself is always kept.
-        let t = Dock::parse(Kind::Terminal, "browser,todo").unwrap();
+        let t = Dock::parse(Kind::Terminal, "todo").unwrap();
         assert_eq!(t.root, pane(&[Session]));
+        assert!(Dock::parse(Kind::Terminal, "session,browser").unwrap().contains(Browser));
     }
 
     #[test]

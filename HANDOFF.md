@@ -32,7 +32,7 @@ All milestones are on `main`. There are 161 tests (`cargo test --release --works
 | M1 | Editor shell: themes (17 + Auto, contrast-tested), project switcher, code modal, tree-sitter (13 languages), VS Code keymap, palette | 1–4, 7–9, 13, 16–18 |
 | M2 | Agents in worktrees: ACP chat, permissions, Agent Terminals, `.worktreeinclude`, setup command, unread markers | 12, 19–24 |
 | M3 | Live view and file-tree heatmap (FSEvents watcher) | 24–25 |
-| Browser | WKWebView Browser with Inspect, per agent | 26 |
+| Browser | WKWebView Browser with Inspect, per agent (chat agents and Agent Terminals) | 26 |
 | M4 | Changes view, Merge (index- and stash-safe), conflicts, Git panel, Discard | 28 |
 | Research | Turn-end checks, Run Project in Worktree (ideas from OpenADE and PandaCode) | 29 |
 | M5 | Terminal agents: any CLI via `agents.toml`, task text and setup, "busy then quiet" turns, agent-named tasks, Rename, Find in Terminal, Cmd-click links | 30 |
