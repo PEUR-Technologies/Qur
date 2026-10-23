@@ -1,0 +1,5 @@
+target/
+/spikes/fixtures/big-repo/
+/spikes/fixtures/large.ts
+/spikes/**/out/
+.DS_Store

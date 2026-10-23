@@ -1,0 +1,17 @@
+[package]
+name = "toolkit_iced"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alacritty_terminal = "0.26.0"
+iced = { version = "0.14.0", default-features = false, features = ["wgpu", "advanced", "thread-pool", "crisp"] }
+libc = "0.2"
+muda = { version = "0.21.2", default-features = false }
+spike_common = { path = "../spike_common" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

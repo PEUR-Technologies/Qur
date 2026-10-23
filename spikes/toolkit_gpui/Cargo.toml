@@ -1,0 +1,26 @@
+[package]
+name = "toolkit_gpui"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+
+[workspace]
+
+[features]
+default = ["terminal"]
+terminal = ["dep:alacritty_terminal"]
+
+[dependencies]
+spike_common = { path = "../spike_common" }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "9e84b066b55bc3609a30dd965075c12255b38b45", default-features = false }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "9e84b066b55bc3609a30dd965075c12255b38b45", default-features = false }
+alacritty_terminal = { version = "0.26.0", default-features = false, optional = true }
+futures = "0.3"
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
