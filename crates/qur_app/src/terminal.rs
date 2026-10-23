@@ -26,7 +26,7 @@ use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyDownEvent,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, ScrollEvent, ShapedLine,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, ScrollEvent, ShapedLine, TouchPhase,
     SharedString, Style, Task, TextRun, UTF16Selection, Window, div, fill, font, point,
     prelude::*, px, relative, size,
 };
@@ -188,6 +188,12 @@ pub struct Session {
     in_escape: bool,
     pub first_line: Option<String>,
     title: TitleCell,
+    /// The selection you made, with the scrollback size at the time. Programs
+    /// that redraw (Claude Code's spinner and prompt box) erase lines, which
+    /// drops the terminal's selection; it's put back from here.
+    kept: Option<(Selection, usize)>,
+    /// What that selection said when you made it (what Cmd+C copies).
+    selected_text: Option<String>,
     _reader: Task<()>,
 }
 
@@ -230,6 +236,23 @@ fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize, title: TitleCell) -> std:
     *reply.lock().unwrap_or_else(|e| e.into_inner()) = Some(sender.clone());
     ev.spawn();
     Ok((term, sender, pid, rx))
+}
+
+/// `kept` (a selection and the scrollback size when it was taken) as the
+/// terminal's selection again if output erased it, moved up by the lines
+/// that scrolled since. Returns what to keep from now on.
+fn restore_selection<T: EventListener>(t: &mut Term<T>, (sel, hist): (Selection, usize)) -> Option<(Selection, usize)> {
+    let now = t.history_size();
+    let sel = match &t.selection {
+        Some(s) => Some(s.clone()),
+        None => {
+            let range = Line(-(now as i32))..Line(t.screen_lines() as i32);
+            let moved = sel.rotate(&*t, &range, now as i32 - hist as i32);
+            t.selection = moved.clone();
+            moved
+        }
+    };
+    sel.map(|s| (s, now))
 }
 
 /// Every process in the session the PTY child leads (setsid: sid == child pid).
@@ -290,6 +313,30 @@ impl Session {
     pub fn is_busy(&self) -> bool {
         self.last_output.is_some_and(|t| t.elapsed() < Duration::from_secs(2))
     }
+
+    /// Note the selection just made (see `kept`).
+    fn remember_selection(&mut self) {
+        let t = self.term.lock();
+        let kept = t.selection.clone().map(|s| (s, t.history_size()));
+        let text = t.selection_to_string().filter(|s| !s.is_empty());
+        drop(t);
+        self.kept = kept;
+        self.selected_text = text;
+    }
+
+    /// Put back a selection that output erased, moved along with any lines
+    /// that scrolled into the scrollback since.
+    fn restore_selection(&mut self) {
+        let Some(kept) = self.kept.take() else { return };
+        let mut t = self.term.lock();
+        self.kept = restore_selection(&mut t, kept);
+    }
+
+    fn forget_selection(&mut self) {
+        self.term.lock().selection = None;
+        self.kept = None;
+        self.selected_text = None;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -324,6 +371,8 @@ pub struct TerminalPanel {
     cell: (Pixels, Pixels),
     last_bounds: Option<Bounds<Pixels>>,
     selecting: bool,
+    /// Scroll not yet turned into whole lines (see `on_scroll`).
+    scroll_px: Pixels,
     find: Option<Find>,
     idle_check: Option<Task<()>>,
 }
@@ -341,6 +390,7 @@ impl TerminalPanel {
             cell: (px(8.), px(16.)),
             last_bounds: None,
             selecting: false,
+            scroll_px: px(0.),
             find: None,
             idle_check: None,
         }
@@ -399,6 +449,8 @@ impl TerminalPanel {
             in_escape: false,
             first_line: None,
             title,
+            kept: None,
+            selected_text: None,
             _reader: reader,
         });
         self.active = self.sessions.len() - 1;
@@ -551,7 +603,8 @@ impl TerminalPanel {
     }
 
     fn clear(&mut self, _: &ta::Clear, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(s) = self.active_session() {
+        if let Some(s) = self.sessions.get_mut(self.active) {
+            s.forget_selection();
             s.term.lock().clear_screen(ClearMode::Saved);
             s.write(&b"\x0c"[..]);
         }
@@ -566,8 +619,15 @@ impl TerminalPanel {
     fn kill_line(&mut self, _: &ta::SendKillLine, _: &mut Window, cx: &mut Context<Self>) {
         self.write_active(vec![0x15], cx)
     }
+    /// Shift+Tab (Claude Code cycles its modes with it). Bound as an action so
+    /// it can't be lost on its way through the macOS text input system.
+    fn back_tab(&mut self, _: &ta::SendBackTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.write_active(b"\x1b[Z".to_vec(), cx)
+    }
     fn copy(&mut self, _: &edit::Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(t) = self.active_session().and_then(|s| s.term.lock().selection_to_string()) {
+        let Some(s) = self.active_session() else { return };
+        let text = s.selected_text.clone().or_else(|| s.term.lock().selection_to_string()).filter(|t| !t.is_empty());
+        if let Some(t) = text {
             cx.write_to_clipboard(ClipboardItem::new_string(t));
         }
     }
@@ -604,7 +664,7 @@ impl TerminalPanel {
     }
 
     fn select_all(&mut self, _: &edit::SelectAll, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(s) = self.active_session() {
+        if let Some(s) = self.sessions.get_mut(self.active) {
             let mut t = s.term.lock();
             let top = t.topmost_line();
             let bottom = t.bottommost_line();
@@ -612,6 +672,8 @@ impl TerminalPanel {
             let mut sel = Selection::new(SelectionType::Simple, TPoint::new(top, Column(0)), Side::Left);
             sel.update(TPoint::new(bottom, last), Side::Right);
             t.selection = Some(sel);
+            drop(t);
+            s.remember_selection();
         }
         cx.notify();
     }
@@ -639,8 +701,17 @@ impl TerminalPanel {
             let off = t.grid().display_offset();
             let (p, side) = self.grid_point(ev.position, off);
             let p = TPoint::new(p.line, p.column.min(t.last_column()));
-            t.selection = Some(Selection::new(SelectionType::Simple, p, side));
+            // Double-click selects a word, triple-click a line.
+            let kind = match ev.click_count {
+                2 => SelectionType::Semantic,
+                3 => SelectionType::Lines,
+                _ => SelectionType::Simple,
+            };
+            t.selection = Some(Selection::new(kind, p, side));
+            drop(t);
             self.selecting = true;
+            let ix = self.active;
+            self.sessions[ix].remember_selection();
         }
         cx.notify();
     }
@@ -693,8 +764,8 @@ impl TerminalPanel {
             }
             InputEvent::Cancel => {
                 this.find = None;
-                if let Some(s) = this.sessions.get(this.active) {
-                    s.term.lock().selection = None;
+                if let Some(s) = this.sessions.get_mut(this.active) {
+                    s.forget_selection();
                 }
                 window.focus(&this.focus, cx);
                 cx.notify();
@@ -711,10 +782,10 @@ impl TerminalPanel {
     /// select it and scroll it into view.
     fn find_step(&mut self, query: &str, dir: Direction, cx: &mut Context<Self>) {
         let Some(f) = self.find.as_mut() else { return };
-        let Some(s) = self.sessions.get(self.active) else { return };
+        let Some(s) = self.sessions.get_mut(self.active) else { return };
         if query.is_empty() {
             f.error = false;
-            s.term.lock().selection = None;
+            s.forget_selection();
             return cx.notify();
         }
         let Ok(mut regex) = RegexSearch::new(query) else {
@@ -739,6 +810,7 @@ impl TerminalPanel {
             f.last = Some(m);
         }
         drop(t);
+        s.remember_selection();
         cx.notify();
     }
 
@@ -747,7 +819,11 @@ impl TerminalPanel {
             self.selecting = false;
             return;
         }
-        if let Some(s) = self.sessions.get(self.active) {
+        let ix = self.active;
+        if let Some(s) = self.sessions.get_mut(ix) {
+            // Output may have erased the selection mid-drag.
+            s.restore_selection();
+            let s = &self.sessions[ix];
             let mut t = s.term.lock();
             let off = t.grid().display_offset();
             let (p, side) = self.grid_point(ev.position, off);
@@ -755,22 +831,55 @@ impl TerminalPanel {
             if let Some(sel) = t.selection.as_mut() {
                 sel.update(p, side);
             }
+            drop(t);
+            self.sessions[ix].remember_selection();
         }
         cx.notify();
     }
 
+    /// Trackpads send a few pixels per event, so whole lines are taken from a
+    /// running total. Programs that ask for the mouse get wheel reports,
+    /// full-screen ones (alt screen) get arrow keys, else the scrollback moves.
+    /// Shift always scrolls the scrollback.
     fn on_scroll(&mut self, ev: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
         let lh = self.cell.1;
-        if let Some(s) = self.active_session() {
-            let mut t = s.term.lock();
-            if !t.mode().contains(TermMode::ALT_SCREEN) {
-                let lines = (ev.delta.pixel_delta(lh).y / lh).round() as i32;
-                if lines != 0 {
-                    t.scroll_display(Scroll::Delta(lines));
-                }
-            }
+        match ev.touch_phase {
+            TouchPhase::Started => self.scroll_px = px(0.),
+            TouchPhase::Moved => {}
+            TouchPhase::Ended | TouchPhase::Cancelled => return,
         }
-        cx.notify();
+        let before = (self.scroll_px / lh) as i32;
+        self.scroll_px += ev.delta.pixel_delta(lh).y;
+        let lines = (self.scroll_px / lh) as i32 - before;
+        // Keep the remainder small so a change of direction answers at once.
+        self.scroll_px %= lh;
+        if lines == 0 {
+            return;
+        }
+        let Some(s) = self.active_session() else { return };
+        let mut t = s.term.lock();
+        let mode = *t.mode();
+        let bytes = if mode.intersects(TermMode::MOUSE_MODE) && !ev.modifiers.shift {
+            let (p, _) = self.grid_point(ev.position, 0);
+            let (col, row) = (p.column.0.min(t.columns().saturating_sub(1)) + 1, (p.line.0.max(0) as usize).min(t.screen_lines().saturating_sub(1)) + 1);
+            let button = if lines > 0 { 64 } else { 65 };
+            let report = if mode.contains(TermMode::SGR_MOUSE) {
+                format!("\x1b[<{button};{col};{row}M").into_bytes()
+            } else {
+                let enc = |v: usize| (32 + v).min(255) as u8;
+                vec![0x1b, b'[', b'M', 32 + button, enc(col), enc(row)]
+            };
+            report.repeat(lines.unsigned_abs() as usize)
+        } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) && !ev.modifiers.shift {
+            let key: &[u8] = if lines > 0 { b"\x1bOA" } else { b"\x1bOB" };
+            key.repeat(lines.unsigned_abs() as usize)
+        } else {
+            t.scroll_display(Scroll::Delta(lines));
+            drop(t);
+            return cx.notify();
+        };
+        drop(t);
+        s.write(bytes);
     }
 }
 
@@ -852,10 +961,12 @@ impl EntityInputHandler for TerminalPanel {
     }
     fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {}
     fn replace_text_in_range(&mut self, _: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(s) = self.sessions.get(self.active) {
-            s.term.lock().selection = None;
+        if let Some(s) = self.sessions.get_mut(self.active) {
+            s.forget_selection();
         }
-        self.write_active(text.as_bytes().to_vec(), cx);
+        // macOS can deliver Shift+Tab as its raw character (U+0019).
+        let bytes = if text == "\u{19}" { b"\x1b[Z".to_vec() } else { text.as_bytes().to_vec() };
+        self.write_active(bytes, cx);
     }
     fn replace_and_mark_text_in_range(&mut self, _: Option<Range<usize>>, _: &str, _: Option<Range<usize>>, _: &mut Window, _: &mut Context<Self>) {
         // IME composition isn't shown; the committed text arrives via replace_text_in_range.
@@ -929,9 +1040,13 @@ impl Element for GridElement {
         self.panel.update(cx, |p, _| {
             p.cell = (cw, lh);
             p.last_bounds = Some(bounds);
-            if let Some(s) = p.sessions.get_mut(p.active)
-                && s.size != (cols, lines)
-            {
+            let Some(s) = p.sessions.get_mut(p.active) else { return };
+            s.restore_selection();
+            if s.size != (cols, lines) {
+                // New columns rewrap the lines: the old selection means nothing.
+                if s.size.0 != cols {
+                    s.kept = None;
+                }
                 s.size = (cols, lines);
                 s.term.lock().resize(Dims { cols, lines });
                 let _ = s.sender.send(Msg::Resize(WindowSize {
@@ -1086,6 +1201,7 @@ impl Render for TerminalPanel {
             .on_action(cx.listener(Self::line_start))
             .on_action(cx.listener(Self::line_end))
             .on_action(cx.listener(Self::kill_line))
+            .on_action(cx.listener(Self::back_tab))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::select_all))
@@ -1344,6 +1460,29 @@ fn classify_link(tok: &str) -> Option<Link> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_survives_redraws_and_scrolling() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::term::test::TermSize;
+        let mut t = Term::new(TermConfig::default(), &TermSize::new(20, 4), VoidListener);
+        let mut parser: alacritty_terminal::vte::ansi::Processor = alacritty_terminal::vte::ansi::Processor::new();
+        parser.advance(&mut t, b"alpha\r\nbeta\r\n> prompt");
+        let mut sel = Selection::new(SelectionType::Simple, TPoint::new(Line(1), Column(0)), Side::Left);
+        sel.update(TPoint::new(Line(2), Column(7)), Side::Right);
+        t.selection = Some(sel);
+        let kept = (t.selection.clone().unwrap(), t.history_size());
+        // A redraw like Claude Code's: back up and erase below, then repaint.
+        parser.advance(&mut t, b"\x1b[1A\r\x1b[Jbeta\r\n> prompt");
+        assert!(t.selection.is_none(), "the terminal drops it");
+        let kept = restore_selection(&mut t, kept).unwrap();
+        assert_eq!(t.selection_to_string().as_deref(), Some("beta\n> prompt"));
+        // Two lines scroll into the scrollback; the selection moves with them.
+        parser.advance(&mut t, b"\r\nmore\r\nmore");
+        t.selection = None;
+        restore_selection(&mut t, kept).unwrap();
+        assert_eq!(t.selection_to_string().as_deref(), Some("beta\n> prompt"));
+    }
 
     #[test]
     fn find_in_terminal_walks_matches() {

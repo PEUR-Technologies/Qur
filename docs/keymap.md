@@ -95,6 +95,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Opt+Left/Right` | Word jump (sends `ESC b` / `ESC f`) | S |
 | `Cmd+Left/Right` | Line start/end (sends `Ctrl+A` / `Ctrl+E`) | S |
 | `Cmd+Backspace` | Kill line (`Ctrl+U`) | S |
+| `Shift+Tab` | Back tab (`ESC [ Z`): Claude Code cycles its modes (default / accept edits / plan) | S |
 
 ## Panels (handoff section 7)
 
