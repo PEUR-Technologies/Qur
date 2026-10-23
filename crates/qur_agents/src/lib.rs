@@ -214,6 +214,23 @@ pub struct TaskRecord {
     /// Terminal, like a normal terminal). Nothing to merge or delete.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_root: bool,
+    /// Messages sent while the agent was busy, not yet delivered: kept so a
+    /// quit or a crash doesn't lose them (sent when the task next starts).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued: Vec<QueuedMessage>,
+}
+
+/// A queued chat message as saved (browser screenshots aren't kept).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct QueuedMessage {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentions: Vec<PathBuf>,
+    /// Browser picks: context for the agent, and their chip labels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -308,10 +325,14 @@ mod tests {
             browser_url: None,
             renamed: false,
             in_root: false,
+            queued: vec![
+                QueuedMessage { text: "then run the tests\nand fix them".into(), ..Default::default() },
+                QueuedMessage { text: "look".into(), mentions: vec![wt.join("a.rs")], context: vec!["<div>".into()], labels: vec!["div.nav".into()] },
+            ],
         });
         let body = toml_edit::ser::to_string_pretty(&s).unwrap();
         let back: TaskStore = toml_edit::de::from_str(&body).unwrap();
-        assert_eq!(back, s);
+        assert_eq!(back, s, "queued messages survive a save");
     }
 
     #[test]

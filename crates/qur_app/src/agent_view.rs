@@ -15,7 +15,7 @@ use qur_acp::{
     AgentCommand, Client, ConfigOption, Event, PermissionKind, PermissionOption, PermissionOutcome, PlanEntry, PlanStatus,
     PromptBlock, RequestId, SessionUpdate, StopReason, ToolCall, ToolCallUpdate, ToolContent, ToolKind, ToolStatus,
 };
-use qur_agents::{AgentDef, TaskRecord};
+use qur_agents::{AgentDef, QueuedMessage, TaskRecord};
 use qur_theme::Rgba;
 
 use crate::browser_view::{BrowserPane, BrowserPaneEvent, base64};
@@ -287,6 +287,11 @@ impl AgentTask {
         });
         let list = ListState::new(0, ListAlignment::Bottom, px(400.));
         list.set_follow_mode(gpui::FollowMode::Tail);
+        let record_queue = record
+            .queued
+            .iter()
+            .map(|q| Outgoing { text: q.text.clone(), mentions: q.mentions.clone(), context: q.context.clone(), labels: q.labels.clone(), images: Vec::new() })
+            .collect();
         AgentTask {
             record,
             monitor,
@@ -305,7 +310,8 @@ impl AgentTask {
             permission: None,
             prompt,
             queued: None,
-            pending: Vec::new(),
+            // Saved by an earlier run (see `save_queue`).
+            pending: record_queue,
             images_ok: false,
             browser,
             changes,
@@ -478,6 +484,7 @@ impl AgentTask {
         if matches!(self.status, Status::Working | Status::NeedsYou | Status::Starting) || self.setting_up {
             // One turn at a time: queue it and send when the turn ends.
             self.pending.push(out);
+            self.save_queue(cx);
             cx.notify();
             return;
         }
@@ -488,8 +495,20 @@ impl AgentTask {
     fn drain_pending(&mut self, cx: &mut Context<Self>) {
         if !self.pending.is_empty() && matches!(self.status, Status::Done | Status::Idle) {
             let out = self.pending.remove(0);
+            self.save_queue(cx);
             self.send_out(out, cx);
         }
+    }
+
+    /// Mirror the queue into the task record, which the workspace saves on
+    /// `Changed`: queued messages survive a quit or a crash.
+    fn save_queue(&mut self, cx: &mut Context<Self>) {
+        self.record.queued = self
+            .pending
+            .iter()
+            .map(|o| QueuedMessage { text: o.text.clone(), mentions: o.mentions.clone(), context: o.context.clone(), labels: o.labels.clone() })
+            .collect();
+        cx.emit(AgentEvent::Changed);
     }
 
     pub fn output(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
@@ -722,16 +741,7 @@ impl AgentTask {
                     match self.tools.get_mut(&id) {
                         Some(t) => t.apply(&u),
                         None => {
-                            let mut t = ToolCall {
-                                id: id.clone(),
-                                title: String::new(),
-                                kind: ToolKind::Other,
-                                status: ToolStatus::Pending,
-                                locations: Vec::new(),
-                                content: Vec::new(),
-                                raw_input: None,
-                            };
-                            t.apply(&u);
+                            let t = u.to_tool_call();
                             self.tools.insert(id.clone(), t);
                             self.push(ChatItem::Tool(id.clone()));
                         }

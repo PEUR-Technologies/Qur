@@ -761,6 +761,12 @@ impl Workspace {
         let (layout, wrap, tab) = (self.layout, self.config.editor.soft_wrap, self.config.editor.tab_width);
         let root = self.root.clone();
         let a = cx.new(|cx| AgentTask::new(root, record, def, accent, layout, wrap, tab, window, cx));
+        // Messages still queued when Qur last quit: start the agent so they go out.
+        a.update(cx, |a, cx| {
+            if !a.record.queued.is_empty() && a.status == Status::Stopped {
+                a.start(cx);
+            }
+        });
         AGENT_IDS.with(|m| m.borrow_mut().insert(a.entity_id(), id));
         let monitor = a.read(cx).monitor.clone();
         self.watch_monitor(&monitor, window, cx);
@@ -895,6 +901,7 @@ impl Workspace {
                         browser_url: std::env::var("QUR_DEBUG_BROWSER_URL").ok().map(|u| u.replace("{slug}", &c.slug)),
                         renamed: false,
                         in_root: false,
+                        queued: Vec::new(),
                     };
                     let debug_browser = std::env::var_os("QUR_DEBUG_BROWSER_URL").is_some();
                     match def.mode {
@@ -987,6 +994,7 @@ impl Workspace {
                 browser_url: None,
                 renamed: false,
                 in_root: true,
+                queued: Vec::new(),
             };
             let id = record.id.clone();
             self.add_term_task(record, window, cx);
@@ -1024,6 +1032,7 @@ impl Workspace {
                         browser_url: None,
                         renamed: false,
                         in_root: false,
+                        queued: Vec::new(),
                     };
                     this.add_term_task(record, window, cx);
                     this.apply_look(window, cx);
@@ -3259,6 +3268,7 @@ impl Workspace {
                     browser_url: None,
                     renamed: false,
                     in_root: false,
+                    queued: Vec::new(),
                 };
                 this.add_term_task(record, window, cx);
                 // Show the tree without starting a terminal process.
