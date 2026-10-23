@@ -14,6 +14,21 @@ Rust + GPUI · no Electron · runs locally · uses your Claude Code login, not a
 
 ![Sidebar with agents, terminals, git and the file heatmap; the stage shows the agent's session and the file it's editing](docs/images/window.svg)
 
+## Features
+
+| | |
+|---|---|
+| **Browser + Inspect** | Your dev server opens beside the agent, so you see its changes live. Click an element and ask the agent to change it. |
+| **Run in Worktree** | Each agent's app runs on its own port, so parallel agents never collide. |
+| **Parallel agents** | Each agent works in its own git worktree, so your checkout stays untouched. |
+| **File heatmap** | Files glow while the agent reads or edits them, with `+n −m` on each changed file. |
+| **Live view** | Watch the file the agent is typing in, and **Take over** whenever you want. |
+| **Review & Merge** | Comment on diff lines to send them back to the agent, then merge without touching your staged changes or stash. |
+| **Turn-end checks** | Your checks run after each agent turn, and failures go back to the agent. |
+| **Alerts** | A notification, Dock badge and chime when an agent finishes or needs you. |
+| **Any CLI agent** | Claude Code by default; Aider and other CLI agents through `agents.toml`. |
+| **Editor** | Tree-sitter highlighting for 13 languages, multi-cursor, optional Vim mode, and 17 themes. |
+
 ![Browser + Inspect: pick an element, ask the agent](docs/images/browser-inspect.png)
 
 ## Light
