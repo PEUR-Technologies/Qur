@@ -66,7 +66,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Go to Terminal ``Ctrl+` `` · Git `Ctrl+Shift+G` · Search `Cmd+Shift+F` (a view in the stage, decision 31)
 - Git ▸ Stage All Changes · Unstage All Changes · Commit Staged…
 - ---
-- Peek Layout ▸ A Watch + side notes · B One view at a time · C Watch + drawer (radio) · Cycle `Cmd+K Cmd+L`
+- Peek Layout ▸ presets A Watch + side notes · B One view at a time · C Watch + drawer · Cycle `Cmd+K Cmd+L` (the stage itself is rearranged by dragging tabs and dividers, decision 32)
 - Peek ▸ Live `Cmd+1` · To-do `Cmd+2` · Chat `Cmd+3` · Changes `Cmd+4` · Browser `Cmd+5`
 - Browser: Inspect Element `Cmd+Shift+C`
 - Follow Agent (checkmark)

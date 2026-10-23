@@ -54,4 +54,18 @@ done
 QUR_BENCH=type guard 120 "$BIN" "$FIX/large.ts" 2>/dev/null | grep '^METRIC type_' | sed 's/^METRIC //' | tr '\n' ' '; echo
 QUR_BENCH=scroll guard 120 "$BIN" "$FIX/large.ts" 2>/dev/null | grep '^METRIC scroll_' | sed 's/^METRIC //' | tr '\n' ' '; echo
 QUR_BENCH=theme guard 120 "$BIN" "$FIX/large.ts" 2>/dev/null | grep '^METRIC theme_' | sed 's/^METRIC //' | tr '\n' ' '; echo
+
+# With real agents (M7). A scratch clone keeps the fixture free of qur/* branches.
+CLONE="$ROOT/spikes/out/budget-repo"
+rm -rf "$CLONE" && git clone -q "$FIX/big-repo" "$CLONE"
+QUR_BENCH=glow guard 120 "$BIN" "$CLONE" 2>/dev/null | grep '^METRIC glow_' | sed 's/^METRIC //' | tr '\n' ' '; echo
+# Three Claude agents with a one-line prompt (decision 20): Qur's own footprint.
+P1="Reply with just the word ok."
+QUR_DEBUG_TASKS="$P1|$P1|$P1" QUR_DEBUG_ACTIONS="wait:40000,qur::Quit" "$BIN" "$CLONE" </dev/null >/dev/null 2>&1 & AP=$!
+sleep 30
+fp=$(footprint "$AP" 2>/dev/null | sed -nE 's/.*Footprint: ([0-9.]+) MB.*/\1/p' | head -1)
+echo "three_agents_footprint_mb=${fp:-?}  agents_running=$(pgrep -f claude-agent-acp | wc -l | tr -d ' ')"
+wait $AP
+echo "orphans_after_quit=$(pgrep -f claude-agent-acp | wc -l | tr -d ' ')"
+rm -rf "$CLONE"
 } | tee "$OUT"

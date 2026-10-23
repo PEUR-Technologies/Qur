@@ -6,13 +6,13 @@ Qur is a lightweight, native macOS code editor for running and steering AI codin
 
 It's written in Rust on [GPUI](https://github.com/zed-industries/zed) (Zed's UI framework): no Electron, everything local, and agents use your existing Claude Code login (never an API key).
 
-> **Status: early development (pre-release), macOS only.** M0–M6 (agents in worktrees, Live + heatmap, Changes + Merge + Git panel, terminal agents, search + alerts + Vim) and Browser + Inspect are done. See [HANDOFF.md](HANDOFF.md) for the current state.
+> **Status: pre-release (0.1), macOS only.** All planned milestones (M0–M7) are in. See [HANDOFF.md](HANDOFF.md) for the current state and what's next.
 
 ![Live heatmap: files glow as the agent writes them; Live follows the file](docs/images/heatmap-live.png)
 
 ## Contents
 
-- [Quick start](#quick-start)
+- [Install](#install)
 - [The window](#the-window)
 - [Features](#features)
 - [Everyday keys](#everyday-keys)
@@ -22,27 +22,39 @@ It's written in Rust on [GPUI](https://github.com/zed-industries/zed) (Zed's UI 
 - [Development](#development)
 - [License and credits](#license-and-credits)
 
-## Quick start
+## Install
 
 ### Requirements
 
-- macOS (Apple Silicon tested; macOS 27).
-- **Rust** stable, via [rustup](https://rustup.rs).
-- **Xcode** with the Metal toolchain (GPUI compiles Metal shaders). If the build complains, run `xcodebuild -downloadComponent MetalToolchain` once.
+- macOS 13 or newer (developed on macOS 27, Apple Silicon).
 - **git** 2.38 or newer (Merge uses `git merge-tree --write-tree`).
-- For agents:
-  - [Claude Code](https://claude.com/claude-code), logged in with your subscription (`claude` CLI).
-  - The ACP adapter, pinned: `npm i -g @agentclientprotocol/claude-agent-acp@0.94.0` (don't use `npx` at runtime).
+- For agents, on your own logins (Qur never sets an API key):
+  - [Claude Code](https://claude.com/claude-code), logged in with your subscription (`claude` CLI). That's all Agent Terminals need.
+  - For structured (ACP) agents, the adapter, pinned: `npm i -g @agentclientprotocol/claude-agent-acp@0.94.0` (don't use `npx` at runtime).
+  - Any other CLI agent (Aider, for example) as a terminal agent in `agents.toml`.
 
-### Build and run
+### The app
 
 ```sh
 git clone https://github.com/PEUR-Technologies/Qur.git && cd Qur
+scripts/bundle.sh                      # -> target/release/Qur.app (~25 MB, ad-hoc signed for this Mac)
+cp -R target/release/Qur.app /Applications/
+ln -sf /Applications/Qur.app/Contents/MacOS/qur /usr/local/bin/qur   # optional: `qur <folder>` from a terminal
+qur doctor                             # checks git, the agents and their adapters, then a real ACP initialize
+```
+
+Building needs **Rust** stable ([rustup](https://rustup.rs)) and **Xcode** with the Metal toolchain (`xcodebuild -downloadComponent MetalToolchain` once if the build asks). Release signing and notarization: [docs/signing.md](docs/signing.md). Notifications need the app bundle; everything else also runs straight from `target/release/qur`.
+
+On first launch a short picker asks which agents to use, the stage layout, the keys (VS Code, optionally with Vim) and the theme; Qur > Setup… reopens it.
+
+Then open a project (File > Open Folder, or `qur ~/path/to/repo`) and press `Cmd+Shift+T` for an Agent Terminal (Claude in its own worktree), or `Cmd+Shift+N` for a structured agent task. Describe the task and watch.
+
+### From source, without bundling
+
+```sh
 cargo build --release -p qur_app
 target/release/qur ~/path/to/your/repo   # a folder or a file; no argument reopens the last project
 ```
-
-Press `Cmd+Shift+T` for an Agent Terminal (Claude in its own worktree), or `Cmd+Shift+N` for a structured agent task. Describe the task and watch.
 
 ## The window
 
@@ -53,9 +65,10 @@ One window is one project. There's no permanent editor area: the window is for a
   - **TERMINALS**: plain shells, shown only when you have some.
   - **SOURCE CONTROL**: branch and change count; opens the Git panel.
   - **FILES**: the file tree, and the only collapsible section. It shows the selected agent's worktree, or your checkout when no agent is selected.
-- **Stage** (the rest of the window): the selected session.
-  - An Agent Terminal or a shell fills the stage as a real terminal.
-  - A structured (ACP) agent shows Live, its to-do plan, chat, a permission bar and the prompt.
+- **Stage** (the rest of the window): the selected session, in panes you arrange like VS Code.
+  - An Agent Terminal fills the stage as a real terminal; add Live or Changes beside it with the pane's **+**.
+  - A structured (ACP) agent shows Live, Browser and Changes next to its Chat (with the permission bar and the prompt) and To-do.
+  - Drag a tab onto a pane's edge to split, onto its middle to join; drag the dividers to resize; × tucks a tab away. Your arrangement is saved.
 - **Code modal**: opening a file shows it in a modal with full editing. `Esc` closes it.
 
 ## Features
@@ -82,7 +95,7 @@ One window is one project. There's no permanent editor area: the window is for a
 - **Browser with Inspect.** Open your dev server next to the agent, pick elements or text, and ask the agent to adjust them. It gets the selector, HTML, key CSS, the source location when available, and a screenshot. Uses the system WebKit, freed when idle.
 - **Run Project in Worktree.** Starts your dev server in the agent's worktree on its own port and opens it in that agent's Browser, so parallel agents never collide. Localhost only; stopped on Discard, Merge cleanup or quit.
 
-![Browser + Inspect: pick an element, ask the agent, see the change](docs/images/browser-inspect.png)
+![Browser + Inspect on peur.ph: pick an element, ask the agent](docs/images/browser-inspect.jpg)
 
 ### Review and merge
 
@@ -139,33 +152,37 @@ Measured on a MacBook Air M5 with `scripts/budget.sh` ([docs/budget.md](docs/bud
 
 | | Target | Qur |
 |---|---|---|
-| App binary | < 40 MB | ~25 MB, including 13 tree-sitter grammars (~11 MB) |
-| Idle memory, project + small file (physical footprint) | < 80 MB | ~71 MB |
-| Memory with 3 Claude agents active (Qur's process) | < 150 MB | 81 MB |
-| Start to first frame | < 250 ms | ~110–130 ms |
-| Open a 10,000-line file, fully highlighted | < 100 ms | ~86 ms |
-| Agent write → glow on screen (Qur unfocused) | < 100 ms | 81–84 ms |
-| Keystroke handled and drawn (CPU side, p99) | ≤ 8.3 ms | ~3.5 ms |
+| App | < 40 MB | 25 MB (`Qur.app`), including 13 tree-sitter grammars (~11 MB) |
+| Idle memory, project + small file (physical footprint) | < 80 MB | 73 MB |
+| Memory with 3 Claude agents active (Qur's process) | < 150 MB | 129 MB |
+| Start to first frame | < 250 ms | 113 ms |
+| Open a 10,000-line file, fully highlighted | < 100 ms | 84 ms |
+| Agent write → glow on screen (Qur unfocused) | < 100 ms | 81 ms (max 84.5) |
+| Keystroke handled and drawn (CPU side, p99) | ≤ 8.3 ms | 2.0 ms |
+| Project search, 5,000 files | < 300 ms | 51 ms |
+| Network connections from Qur itself | none | none (`lsof`) |
 
 ## How Qur compares
 
 **Zed.** Qur shares Zed's GPUI and native feel, but it isn't a general-purpose editor with an agent panel. In Qur the agents are the main view; code appears in the heatmap, Live, the code modal and the review diff.
 
-**Orca** ([stablyai/orca](https://github.com/stablyai/orca)) is the closest peer. We studied it ([docs/research/orca.md](docs/research/orca.md)) and adopted several ideas: worktree setup commands, `.worktreeinclude`, review comments sent back to the agent, and Design-Mode-style inspect.
+**Orca** ([stablyai/orca](https://github.com/stablyai/orca)) and **Superset** ([superset-sh/superset](https://github.com/superset-sh/superset)) are the closest peers: desktop apps that run several coding agents side by side in worktrees. We studied Orca closely ([docs/research/orca.md](docs/research/orca.md)) and adopted several ideas: worktree setup commands, `.worktreeinclude`, review comments sent back to the agent, and Design-Mode-style inspect.
 
-| | Qur | Orca |
-|---|---|---|
-| Tech | Rust + GPUI, native; ~25 MB | Electron + React; ~254 MB app |
-| Agents in isolated worktrees | Always, outside the repo | Yes |
-| Agent link | Terminal or ACP (structured) | Terminal by default; structured chat experimental |
-| Live view of the agent's current file, with Take over | Yes | — |
-| File-tree heatmap of agent activity | Yes | — |
-| Permissions | Asked in a permission bar by default | Permission-bypass flags by default |
-| Shipping changes | Local Merge into your branch (index- and stash-safe) | Push and pull request |
-| Browser + element inspect | System WebKit, freed when idle | Bundled Chromium |
-| Telemetry / background daemon | None / none | Opt-out telemetry / keeps terminals alive after quit |
+| | Qur | Orca | Superset |
+|---|---|---|---|
+| Tech | Rust + GPUI, native; ~25 MB app | Electron + React; ~254 MB app | Electron + React; ~431 MB download (arm64 .dmg) |
+| License | GPL-3.0-or-later | MIT | Elastic License 2.0 (source-available) |
+| Account | None | None | Sign-in (GitHub or Google) |
+| Agents in isolated worktrees | Always, outside the repo | Yes | Yes, outside the repo |
+| Agent link | Terminal or ACP (structured) | Terminal by default; structured chat experimental | Terminal by default; optional ACP chat |
+| Live view of the agent's current file, with Take over | Yes | — | — |
+| File-tree heatmap of agent activity | Yes | — | — |
+| Permissions | Asked in a permission bar by default | Permission-bypass flags by default | Bypass flags by default for Claude Code and Codex |
+| Shipping changes | Local Merge into your branch (index- and stash-safe) | Push and pull request | Commit, push and pull request |
+| Browser + element inspect | System WebKit, freed when idle | Bundled Chromium | Bundled Chromium (Electron webview) |
+| Telemetry / background daemon | None / none (`lsof` shows no sockets in Qur's process) | Opt-out telemetry / keeps terminals alive after quit | PostHog and Sentry / agents keep running after ⌘Q |
 
-Based on our reading of Orca's repository and docs in October 2026; corrections welcome.
+Superset also has cloud workspaces, a mobile app and Slack/Linear integrations; Qur stays local by design. Based on our reading of each project's repository and docs in October 2026; corrections welcome.
 
 ## Development
 
@@ -185,7 +202,7 @@ House rules:
 
 ```
 crates/
-  qur_app       the app (binary `qur`): window, sidebar, stage, Live, Browser, Changes, Git panel, menus
+  qur_app       the app (binary `qur`, also `qur doctor`): window, sidebar, stage, Live, Browser, Changes, Git panel, Search, alerts, menus
   qur_acp       hand-rolled ACP v1 client (JSON-RPC over stdio, no async runtime)
   qur_agents    agent roster (agents.toml) and task store
   qur_worktree  task worktrees, .worktreeinclude, setup command
@@ -198,7 +215,9 @@ crates/
   qur_theme     17 themes + contrast tests
   qur_config    settings files
   qur_tree      lazy, gitignore-aware file tree
-docs/           spec (QUR_HANDOFF.md), owner decisions, keymap, menus, budget, research
+  qur_search    project search and replace (ignore + regex)
+docs/           spec (QUR_HANDOFF.md), owner decisions, keymap, menus, budget, signing, research
+scripts/        bundle.sh (Qur.app), make_icns.swift, budget.sh, shot.sh
 spikes/         M0 spikes and test fixtures
 ```
 

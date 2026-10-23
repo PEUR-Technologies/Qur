@@ -138,3 +138,24 @@ M6 acceptance:
 - **First-run picker writes config:** Enter in the picker saved `theme`, `peek_layout`, `keys.vim` to config.toml, the found agents to agents.toml, and `setup_done` to state.toml.
 - **Alerts only when appropriate:** with Qur in the background, two real agents (one-line prompts) gave exactly one alert per new state (finished; needs approval, then finished) and the badge counted 1 then 2. Selecting an agent clears it. Notifications are skipped in the unbundled dev build (GPUI's guard); they need the M7 `.app`.
 - Not yet checked by hand (the screen was locked): the Search view and picker on screen, typing Vim keys, the Check button, the chime being audible, and "no alert while you're on that agent".
+
+## M7 (2026-10-23, packaging and acceptance, MacBook Air M5, battery)
+
+`scripts/budget.sh 3` with real agents (spikes/out/budget-20261023-2333.txt):
+
+| Metric | Target | M7 | |
+|---|---|---|---|
+| Release binary | < 40 MB | 24.8 MB; Qur.app 25 MB (icon 207 KB) | ✅ |
+| Cold start to first frame | < 250 ms | 113 ms (109–123) | ✅ |
+| Open 10k-line file, fully highlighted | < 100 ms | 84 ms | ✅ |
+| Idle footprint, project + small file | < 80 MB | 73 MB (project only 70, large file 86) | ✅ |
+| Keystroke (CPU side) p50 / p99 | ≤ 8.3 ms | 1.4 / 2.0 ms | ✅ |
+| Agent write → glow (Qur not focused) | < 100 ms | p50 81 ms, max 84.5 ms, 0 missed | ✅ |
+| Footprint with 3 Claude agents (Qur's process) | < 150 MB | 129 MB (2 of the 3 adapters were still alive at the sample) | ✅ |
+| Agent processes left after quit | 0 | 0 | ✅ |
+
+On battery the display runs at 60 Hz, so scroll and theme frames pace at ~16.7 ms (scroll max 309 ms was a single first-frame outlier).
+
+**No outbound connections from Qur itself:** `lsof -nP -a -i -p <qur pid>` listed no sockets at 5, 12 and 19 s, with an ACP agent working, an Agent Terminal open and project search running. Agents and the Browser's WebKit are separate processes.
+
+**`qur doctor`** on the owner's Mac: macOS 27.0, git 2.54, settings folder writable, config.toml and agents.toml fine, Claude Code over ACP (`@agentclientprotocol/claude-agent-acp 0.94.0`, ACP v1, adapter pinned 0.94.0); exit 0 in 1.4 s.

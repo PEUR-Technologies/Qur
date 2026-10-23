@@ -23,6 +23,7 @@ use qur_theme::{Registry, Rgba, ThemeChoice};
 use crate::agent_view::{AgentEvent, AgentTask, Layout, Status, View};
 use crate::alerts;
 use crate::changes_view::{ChangesEvent, ChangesView};
+use crate::dock::{self, Docks};
 use crate::git_panel::{GitEvent, GitPanel};
 use crate::live::{LiveEvent, LivePane};
 use crate::monitor::{MonitorEvent, TaskMonitor};
@@ -54,11 +55,7 @@ struct TermTask {
     accent: Rgba,
     monitor: Entity<TaskMonitor>,
     live: Entity<LivePane>,
-    /// Layout B: show Live instead of the terminal.
-    show_live: bool,
     changes: Entity<ChangesView>,
-    /// The left pane shows Changes instead of Live.
-    show_changes: bool,
     /// New Agent Task text and setup command, used on the first start only.
     first_run: Option<FirstRun>,
     /// Task text to type once the agent first goes quiet (`prompt = "type"`).
@@ -122,6 +119,8 @@ enum Overlay {
     Rename(Entity<TextInput>),
     /// The first-run picker (M6), also Qur > Setup….
     Setup(Entity<SetupView>),
+    /// About Qur (M7).
+    About,
     Transparency { project_scope: bool },
     NewTask { input: Entity<PromptInput>, agent: usize },
 }
@@ -186,6 +185,9 @@ impl Workspace {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         crate::mark("ws_new");
         let (config, err) = Config::load();
+        if !cx.has_global::<Docks>() {
+            Docks::load(&config, cx);
+        }
         let project_id = qur_config::project_id(&root);
         crate::mark("project_id");
         let project = ProjectSettings::load(&project_id);
@@ -356,6 +358,7 @@ impl Workspace {
     pub fn reload_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (config, err) = Config::load();
         self.config = config;
+        Docks::load(&self.config, cx);
         self.project = ProjectSettings::load(&self.project_id);
         if let Some(e) = err {
             self.flash(e, cx);
@@ -600,9 +603,7 @@ impl Workspace {
             accent,
             monitor,
             live,
-            show_live: false,
             changes,
-            show_changes: false,
             first_run: None,
             pending_type: None,
             was_busy: false,
@@ -1169,8 +1170,11 @@ impl Workspace {
         }
     }
 
+    /// View > Peek Layout A/B/C: reset both docks to that preset.
     fn set_layout(&mut self, l: Layout, cx: &mut Context<Self>) {
         self.layout = l;
+        Docks::update(cx, dock::Kind::Acp, |d| *d = dock::Dock::preset(dock::Kind::Acp, l.as_str()));
+        Docks::update(cx, dock::Kind::Terminal, |d| *d = dock::Dock::preset(dock::Kind::Terminal, l.as_str()));
         for a in &self.agents {
             a.update(cx, |a, cx| a.set_layout(l, cx));
         }
@@ -1199,10 +1203,8 @@ impl Workspace {
         self.set_layout(Layout::C, cx)
     }
     /// Cmd+1..4 (layout B): switches the selected agent's view; Live/terminal for terminal tasks.
+    /// Cmd+1..5: bring that panel to the front, wherever it's docked.
     fn peek(&mut self, v: View, cx: &mut Context<Self>) {
-        if self.layout != Layout::B {
-            self.set_layout(Layout::B, cx);
-        }
         match self.selected.clone() {
             Some(Selected::Agent(id)) => {
                 if let Some(a) = self.agent(&id).cloned() {
@@ -1210,8 +1212,8 @@ impl Workspace {
                 }
             }
             Some(Selected::TermTask(id)) => {
-                if let Some(t) = self.term_tasks.iter_mut().find(|t| t.record.id == id) {
-                    t.show_live = v == View::Live;
+                if self.term_task(&id).is_some() && dock::Kind::Terminal.panels().contains(&v.panel()) {
+                    Docks::update(cx, dock::Kind::Terminal, |d| d.activate(v.panel()));
                 }
             }
             _ => {}
@@ -1234,7 +1236,7 @@ impl Workspace {
     fn peek_browser(&mut self, _: &qur::PeekBrowser, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(a) = self.selected_agent() {
             a.update(cx, |a, cx| {
-                let on = !a.shows_browser();
+                let on = !a.shows_browser(cx);
                 a.show_browser(on, cx)
             });
         }
@@ -1243,7 +1245,7 @@ impl Workspace {
     fn toggle_inspect(&mut self, _: &qur::ToggleInspect, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(a) = self.selected_agent() {
             a.update(cx, |a, cx| {
-                if !a.shows_browser() {
+                if !a.shows_browser(cx) {
                     a.show_browser(true, cx);
                 }
                 a.browser.update(cx, |b, cx| b.toggle_inspect(cx));
@@ -1279,7 +1281,10 @@ impl Workspace {
                 self.select(Some(Selected::TermTask(id.to_string())), window, cx);
                 self.discard_task(&qur::DiscardTask, window, cx);
             }
-            ChangesEvent::KeepWorking => self.select(Some(Selected::TermTask(id.to_string())), window, cx),
+            ChangesEvent::KeepWorking => {
+                Docks::update(cx, dock::Kind::Terminal, |d| d.activate(dock::Panel::Session));
+                self.select(Some(Selected::TermTask(id.to_string())), window, cx)
+            }
             ChangesEvent::SendComments(text) => {
                 // Terminal agents: type the review into the terminal (no Enter).
                 if let Some(tid) = self.term_task(id).and_then(|t| t.term_id) {
@@ -1716,7 +1721,7 @@ impl Workspace {
             }
             Some(Selected::TermTask(id)) => {
                 if let Some(t) = self.term_tasks.iter_mut().find(|t| t.record.id == id) {
-                    t.show_changes = true;
+                    Docks::update(cx, dock::Kind::Terminal, |d| d.activate(dock::Panel::Changes));
                     t.changes.update(cx, |c, cx| c.refresh(cx));
                 }
                 cx.notify();
@@ -1726,6 +1731,9 @@ impl Workspace {
     }
 
     fn keep_working(&mut self, _: &qur::KeepWorking, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.selected, Some(Selected::TermTask(_))) {
+            Docks::update(cx, dock::Kind::Terminal, |d| d.activate(dock::Panel::Session));
+        }
         self.focus_prompt(&qur::FocusPrompt, window, cx);
     }
 
@@ -2596,6 +2604,101 @@ impl Workspace {
     }
 
     /// Qur > Setup… (and the first launch): the first-run picker.
+    /// Help > Run Doctor: `qur doctor`'s checks, in a sheet.
+    fn run_doctor(&mut self, _: &qur::RunDoctor, window: &mut Window, cx: &mut Context<Self>) {
+        self.flash("Running the doctor…", cx);
+        let bg = cx.background_executor().clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let checks = bg.spawn(async move { crate::doctor::run() }).await;
+            this.update_in(cx, |this, window, cx| {
+                let fails = checks.iter().filter(|c| c.level == crate::doctor::Level::Fail).count();
+                let text = crate::doctor::render(&checks);
+                crate::log(&format!("doctor:\n{text}"));
+                let title = if fails == 0 { "Qur Doctor: all good".to_string() } else { format!("Qur Doctor: {fails} problem(s)") };
+                let _ = ask(window, if fails == 0 { PromptLevel::Info } else { PromptLevel::Warning }, &title, Some(&text), &["OK"], cx);
+                this.message = None;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn keyboard_shortcuts(&mut self, _: &qur::KeyboardShortcuts, window: &mut Window, cx: &mut Context<Self>) {
+        // The palette lists every command with its keys.
+        self.palette(&qur::CommandPalette, window, cx);
+    }
+
+    fn show_logs(&mut self, _: &qur::ShowLogs, _: &mut Window, cx: &mut Context<Self>) {
+        let dir = crate::log_dir();
+        std::fs::create_dir_all(&dir).ok();
+        if let Err(e) = std::process::Command::new("/usr/bin/open").arg(&dir).spawn() {
+            self.flash(format!("Couldn't open {}: {e}", dir.display()), cx);
+        }
+    }
+
+    fn report_problem(&mut self, _: &qur::ReportProblem, _: &mut Window, cx: &mut Context<Self>) {
+        // Opens the browser; Qur itself makes no network call.
+        if let Err(e) = std::process::Command::new("/usr/bin/open").arg("https://github.com/PEUR-Technologies/Qur/issues/new").spawn() {
+            self.flash(format!("Couldn't open the browser: {e}"), cx);
+        }
+    }
+
+    fn about(&mut self, _: &qur::About, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_overlays(window, cx);
+        self.prev_focus = window.focused(cx);
+        window.focus(&self.focus, cx);
+        self.overlay = Some(Overlay::About);
+        cx.notify();
+    }
+
+    fn about_box(&self, look: &Look, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let ui = &look.theme.ui;
+        let credit = look.theme.credit.as_ref().map(|c| format!("Theme “{}” by {} ({})", look.theme.name, c.author, c.license));
+        let line = |s: String| div().text_size(look.text(-1.)).text_color(look.c(ui.text_secondary)).child(s);
+        div()
+            .id("about")
+            .occlude()
+            .w(look.z(380.))
+            .p(look.z(22.))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(look.z(6.))
+            .bg(look.c(ui.overlay_bg))
+            .border_1()
+            .border_color(look.c(ui.border_strong))
+            .rounded(look.z(10.))
+            .child(
+                svg()
+                    .path(if look.logo_white() { "brand/svg/qur-horizontal-white.svg" } else { "brand/svg/qur-horizontal-black.svg" })
+                    .w(look.z(132.))
+                    .h(look.z(44.))
+                    // Pure black or white only: the logo is never tinted.
+                    .text_color(if look.logo_white() { gpui::white() } else { gpui::black() }),
+            )
+            .child(div().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child("by PEUR Technologies"))
+            .child(div().h(look.z(8.)))
+            .child(line(format!("Version {}", env!("CARGO_PKG_VERSION"))))
+            .child(line("GPL-3.0-or-later · Inter (SIL OFL)".into()))
+            .children(credit.map(line))
+            .child(
+                div()
+                    .id("about-ok")
+                    .mt(look.z(12.))
+                    .px(look.z(16.))
+                    .py(look.z(4.))
+                    .rounded(look.z(5.))
+                    .cursor_pointer()
+                    .bg(look.c(ui.button_bg))
+                    .text_color(look.c(ui.button_text))
+                    .text_size(look.text(-1.))
+                    .child("OK")
+                    .on_click(cx.listener(|this, _, window, cx| this.close_overlays(window, cx))),
+            )
+            .into_any_element()
+    }
+
     /// Qur > Vim Mode: on/off for every editor, saved as `[keys] vim`.
     fn toggle_vim(&mut self, _: &qur::VimMode, window: &mut Window, cx: &mut Context<Self>) {
         let on = !self.config.keys.vim;
@@ -2895,14 +2998,6 @@ impl Workspace {
                     window.titlebar_double_click();
                 }
             })
-            .child(
-                svg()
-                    .path(assets::symbol(look.logo_white(), 16. * look.zoom))
-                    .size(look.z(16.))
-                    .flex_none()
-                    // Pure black or white only: the logo is never tinted.
-                    .text_color(if look.logo_white() { gpui::white() } else { gpui::black() }),
-            )
             .child(
                 div()
                     .id("project")
@@ -3213,7 +3308,7 @@ impl Workspace {
             )
     }
 
-    fn stage(&self, look: &Look) -> gpui::AnyElement {
+    fn stage(&self, look: &Look, cx: &mut Context<Self>) -> gpui::AnyElement {
         let ui = &look.theme.ui;
         match &self.selected {
             Some(Selected::Agent(id)) => {
@@ -3226,7 +3321,15 @@ impl Workspace {
                     let term = div().size_full().bg(look.bg(ui.panel_bg)).pt(look.z(6.)).child(self.terms.clone());
                     // The agent's terminal is the whole stage (decision 27). Review
                     // Changes still swaps it for the diff until Keep Working.
-                    return if t.show_changes { t.changes.clone().into_any_element() } else { term.into_any_element() };
+                    // An arrangeable dock too (dock.rs); by default the
+                    // terminal fills it (decision 27).
+                    let mut term = Some(term);
+                    return dock::render(dock::Kind::Terminal, look, cx, &mut |p, _| match p {
+                        dock::Panel::Session => term.take().map(|t| t.into_any_element()).unwrap_or_else(|| div().into_any_element()),
+                        dock::Panel::Live => div().size_full().child(t.live.clone()).into_any_element(),
+                        dock::Panel::Changes => div().size_full().child(t.changes.clone()).into_any_element(),
+                        _ => div().into_any_element(),
+                    });
                 }
             }
             Some(Selected::Shell(_)) => {
@@ -3355,6 +3458,7 @@ impl Workspace {
         match self.overlay.as_ref()? {
             Overlay::Picker(p, _) => Some(centered(p.clone().into_any_element())),
             Overlay::Setup(s) => Some(centered(s.clone().into_any_element())),
+            Overlay::About => Some(centered(self.about_box(look, cx))),
             Overlay::GoTo(g) | Overlay::Rename(g) => Some(centered(
                 div()
                     .w(look.z(360.))
@@ -3671,7 +3775,7 @@ impl Render for Workspace {
         for a in self.agents.clone() {
             let (id, wants, browser) = {
                 let t = a.read(cx);
-                (t.record.id.clone(), t.shows_browser(), t.browser.clone())
+                (t.record.id.clone(), t.shows_browser(cx), t.browser.clone())
             };
             let show = wants && !covered && self.selected == Some(Selected::Agent(id));
             browser.update(cx, |b, cx| b.set_shown(show, window, cx));
@@ -3681,7 +3785,7 @@ impl Render for Workspace {
             .min_h(px(0.))
             .flex()
             .when(self.sidebar, |d| d.child(self.sidebar(&look, cx)))
-            .child(div().flex_1().min_w(px(0.)).h_full().child(self.stage(&look)));
+            .child(div().flex_1().min_w(px(0.)).h_full().child(self.stage(&look, cx)));
         let any_overlay = self.overlay.is_some();
         div()
             .key_context("Workspace")
@@ -3756,6 +3860,11 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::rename_agent))
             .on_action(cx.listener(Self::open_setup))
             .on_action(cx.listener(Self::toggle_vim))
+            .on_action(cx.listener(Self::run_doctor))
+            .on_action(cx.listener(Self::keyboard_shortcuts))
+            .on_action(cx.listener(Self::show_logs))
+            .on_action(cx.listener(Self::report_problem))
+            .on_action(cx.listener(Self::about))
             // Scripted runs may reach here before the picker is drawn.
             .on_action(cx.listener(|this, _: &commands::setup::Done, _, cx| {
                 if let Some(Overlay::Setup(v)) = &this.overlay {

@@ -4,7 +4,6 @@
 //! install; Qur > Setup… reopens it.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use gpui::{Context, EventEmitter, FocusHandle, Window, div, prelude::*, px, svg};
 use qur_agents::{AgentDef, Mode};
@@ -92,45 +91,10 @@ impl SetupView {
         let Some(f) = self.agents.get_mut(ix) else { return };
         let Some(program) = f.path.clone() else { return };
         f.check = Check::Running;
-        let (mode, args) = (f.def.mode, f.def.args.clone());
+        let def = f.def.clone();
         let bg = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
-            let result = bg
-                .spawn(async move {
-                    let path = qur_agents::login_path().to_string();
-                    match mode {
-                        Mode::Acp => {
-                            let cmd = qur_acp::AgentCommand { program: program.to_string_lossy().into_owned(), args, env: vec![("PATH".into(), path)] };
-                            let home = std::env::var("HOME").map(std::path::PathBuf::from).unwrap_or_else(|_| "/".into());
-                            let (client, _events) = qur_acp::Client::spawn(&cmd, &home).map_err(|e| e.to_string())?;
-                            let pending = client.initialize();
-                            let (tx, rx) = std::sync::mpsc::channel();
-                            std::thread::spawn(move || {
-                                tx.send(futures::executor::block_on(pending)).ok();
-                            });
-                            let init = match rx.recv_timeout(Duration::from_secs(15)) {
-                                Ok(Ok(Ok(i))) => Ok(i),
-                                Ok(Ok(Err(e))) => Err(e.to_string()),
-                                Ok(Err(_)) => Err("the agent exited".to_string()),
-                                Err(_) => Err("no answer in 15 s".to_string()),
-                            };
-                            client.shutdown(Duration::from_secs(2));
-                            let i = init?;
-                            let info = &i.raw["agentInfo"];
-                            Ok(match (info["name"].as_str(), info["version"].as_str()) {
-                                (Some(n), Some(v)) => format!("{n} {v}, ACP v{}", i.raw["protocolVersion"]),
-                                _ => format!("ACP v{}", i.raw["protocolVersion"]),
-                            })
-                        }
-                        Mode::Terminal => {
-                            let out = std::process::Command::new(&program).arg("--version").env("PATH", path).output().map_err(|e| e.to_string())?;
-                            let text = String::from_utf8_lossy(&out.stdout);
-                            let line = text.lines().next().unwrap_or("").trim().to_string();
-                            if out.status.success() { Ok(if line.is_empty() { "runs".into() } else { line }) } else { Err(format!("exited with {}", out.status)) }
-                        }
-                    }
-                })
-                .await;
+            let result = bg.spawn(async move { crate::doctor::check_agent(&def, &program) }).await;
             this.update(cx, |this, cx| {
                 if let Some(f) = this.agents.get_mut(ix) {
                     f.check = match result {

@@ -9,6 +9,8 @@ mod alerts;
 mod browser_view;
 mod changes_view;
 mod commands;
+mod dock;
+mod doctor;
 mod editor_view;
 mod git_panel;
 mod input;
@@ -193,7 +195,19 @@ fn open_window(root: PathBuf, cx: &mut App) -> WindowHandle<Workspace> {
 
 fn main() {
     START.get_or_init(Instant::now);
+    // Crashes go to ~/Library/Logs/Qur/qur.log (Help > Show Logs): a bundled
+    // app has no terminal to print to.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log(&format!("panic: {info}\n{}", std::backtrace::Backtrace::force_capture()));
+        default_hook(info);
+    }));
+    // `qur doctor`: check the setup in the terminal, no window.
+    if std::env::args().nth(1).as_deref() == Some("doctor") {
+        std::process::exit(doctor::cli());
+    }
     let arg = std::env::args_os().nth(1).map(PathBuf::from);
+    log(&format!("start: Qur {} {}", env!("CARGO_PKG_VERSION"), arg.as_ref().map(|a| a.display().to_string()).unwrap_or_default()));
     gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
         mark("app_run");
         cx.text_system()
@@ -249,4 +263,25 @@ fn main() {
         })
         .detach();
     });
+}
+
+pub fn log_dir() -> PathBuf {
+    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join("Library/Logs/Qur")
+}
+
+/// Append a line to qur.log (kept under 1 MB: it starts over when bigger).
+pub fn log(line: &str) {
+    use std::io::Write;
+    let dir = log_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join("qur.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1 << 20) {
+        std::fs::rename(&path, dir.join("qur.old.log")).ok();
+    }
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "[{secs}] {line}");
+    }
 }
