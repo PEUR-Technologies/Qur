@@ -77,7 +77,7 @@ pub mod agent {
 }
 
 pub mod terminal {
-    gpui::actions!(terminal, [Clear, SendLineStart, SendLineEnd, SendKillLine, Find]);
+    gpui::actions!(terminal, [Clear, SendLineStart, SendLineEnd, SendKillLine, SendBackTab, Find]);
 }
 
 /// Single-line text fields (find, replace, go to line, pickers).
@@ -258,6 +258,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(terminal::SendLineStart, "Terminal", "Line Start", "cmd-left", T, R),
     cmd!(terminal::SendLineEnd, "Terminal", "Line End", "cmd-right", T, R),
     cmd!(terminal::SendKillLine, "Terminal", "Kill Line", "cmd-backspace", T, R),
+    cmd!(terminal::SendBackTab, "Terminal", "Back Tab (Claude Code: cycle mode)", "shift-tab", T, R),
     // Panels
     cmd!(qur::GitPanel, "View", "Source Control", "ctrl-shift-g", NT, R),
     cmd!(qur::GitStageAll, "Git", "Stage All Changes", "", W, R),

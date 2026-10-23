@@ -8,7 +8,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
+    App, Bounds, ClipboardItem, ContentMask, Context, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
     FocusHandle, Focusable, GlobalElementId, LayoutId, Pixels, SharedString, Style, TextRun, UTF16Selection, Window,
     WrappedLine, div, fill, font, point, prelude::*, px, relative, size,
 };
@@ -68,6 +68,12 @@ pub struct PromptInput {
     /// Browser picks (elements, page text) sent with the next message.
     pub attachments: Vec<Attachment>,
     last_width: Pixels,
+    /// How far the text is scrolled up inside the field (past MAX_LINES).
+    scroll_y: Pixels,
+    max_scroll: Pixels,
+    /// Caret and text length at the last paint: when they change, the
+    /// field scrolls to show the caret; wheel scrolling leaves them alone.
+    painted: (usize, usize),
 }
 
 impl EventEmitter<PromptEvent> for PromptInput {}
@@ -84,6 +90,9 @@ impl PromptInput {
             base,
             attachments: Vec::new(),
             last_width: px(400.),
+            scroll_y: px(0.),
+            max_scroll: px(0.),
+            painted: (0, 0),
         }
     }
 
@@ -295,8 +304,16 @@ impl PromptInput {
         self.replace("", cx);
     }
     fn a_paste(&mut self, _: &edit::Paste, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(t) = cx.read_from_clipboard().and_then(|c| c.text()) {
-            let t = t.replace("\r\n", "\n");
+        let Some(clip) = cx.read_from_clipboard() else { return };
+        // A screenshot or copied image: attach it, like a browser pick.
+        if let Some(gpui::ClipboardEntry::Image(img)) = clip.entries().first()
+            && img.format == gpui::ImageFormat::Png
+            && !img.bytes().is_empty()
+        {
+            return self.attach(Attachment { label: "Pasted image".into(), context: String::new(), png: Some(img.bytes().to_vec()) }, cx);
+        }
+        if let Some(t) = clip.text() {
+            let t = t.replace("\r\n", "\n").replace('\r', "\n");
             self.replace(&t, cx);
         }
     }
@@ -416,22 +433,48 @@ impl Element for PromptElement {
         let focus = inp.focus.clone();
         let caret = inp.caret;
         window.handle_input(&focus, ElementInputHandler::new(bounds, self.input.clone()), cx);
-        let mut y = bounds.top();
+        // Where the caret is, relative to the top of the text.
+        let mut y = px(0.);
         let mut start = 0usize;
         let mut caret_at = None;
         for line in &s.lines {
-            line.paint(point(bounds.left(), y), lh, gpui::TextAlign::Left, None, window, cx).ok();
             let len = line.len();
             if !s.placeholder && caret >= start && caret <= start + len && caret_at.is_none() {
-                caret_at = line.position_for_index(caret - start, lh).map(|p| point(bounds.left() + p.x, y + p.y));
+                caret_at = line.position_for_index(caret - start, lh).map(|p| point(p.x, y + p.y));
             }
             y += lh * (line.wrap_boundaries().len() + 1) as f32;
             start += len + 1; // the '\n'
         }
-        if s.focused {
-            let at = caret_at.unwrap_or(point(bounds.left(), bounds.top()));
-            window.paint_quad(fill(Bounds::new(point(at.x, at.y + px(3.)), size(px(1.5), lh - px(6.))), look.c(look.theme.editor.cursor)));
+        // Past MAX_LINES the text scrolls inside the field (wheel, or to keep
+        // the caret in view after an edit) and is clipped to it rather than
+        // drawn over what's below.
+        let caret_at = caret_at.unwrap_or_default();
+        let max_scroll = (y - bounds.size.height).max(px(0.));
+        let mut scroll = inp.scroll_y;
+        let now = (caret, inp.text.len());
+        if now != inp.painted {
+            scroll = scroll.min(caret_at.y).max(caret_at.y + lh - bounds.size.height);
         }
+        let scroll = scroll.clamp(px(0.), max_scroll);
+        self.input.update(cx, |i, _| {
+            i.scroll_y = scroll;
+            i.max_scroll = max_scroll;
+            i.painted = now;
+        });
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            let mut y = bounds.top() - scroll;
+            for line in &s.lines {
+                let h = lh * (line.wrap_boundaries().len() + 1) as f32;
+                if y + h > bounds.top() && y < bounds.bottom() {
+                    line.paint(point(bounds.left(), y), lh, gpui::TextAlign::Left, None, window, cx).ok();
+                }
+                y += h;
+            }
+            if s.focused {
+                let at = point(bounds.left() + caret_at.x, bounds.top() + caret_at.y - scroll);
+                window.paint_quad(fill(Bounds::new(point(at.x, at.y + px(3.)), size(px(1.5), lh - px(6.))), look.c(look.theme.editor.cursor)));
+            }
+        });
     }
 }
 
@@ -473,6 +516,24 @@ impl Render for PromptInput {
             .key_context("TextInput")
             .track_focus(&self.focus)
             .w_full()
+            .cursor_text()
+            // Clicking the field focuses it (else Cmd+V and typing went to
+            // whatever had focus before: the chat, the browser).
+            .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, window, cx| {
+                window.focus(&this.focus, cx);
+                cx.notify();
+            }))
+            // Long text scrolls inside the field; short text lets the wheel
+            // through to the chat.
+            .on_scroll(cx.listener(|this, ev: &gpui::ScrollEvent, window, cx| {
+                if this.max_scroll <= px(0.) {
+                    return;
+                }
+                let d = ev.delta.pixel_delta(Look::of(window, cx).text(0.) * 1.45).y;
+                this.scroll_y = (this.scroll_y - d).clamp(px(0.), this.max_scroll);
+                cx.stop_propagation();
+                cx.notify();
+            }))
             .children(chips)
             .on_action(cx.listener(Self::a_backspace))
             .on_action(cx.listener(Self::a_delete))

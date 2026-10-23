@@ -459,7 +459,9 @@ impl AgentTask {
         let mut out = Outgoing::plain(if text.trim().is_empty() { "Adjust this.".into() } else { text }, mentions);
         for a in atts {
             out.labels.push(a.label.to_string());
-            out.context.push(a.context);
+            if !a.context.is_empty() {
+                out.context.push(a.context);
+            }
             if let Some(png) = a.png {
                 out.images.push(png);
             }
@@ -876,9 +878,14 @@ impl AgentTask {
                 .flex()
                 .flex_col()
                 .gap(look.z(6.))
+                // A long command or edit as the title scrolls here instead of
+                // growing the bar over the chat (which then couldn't scroll).
                 .child(
                     div()
+                        .id("perm-what")
                         .min_w(px(0.))
+                        .max_h(look.z(140.))
+                        .overflow_y_scroll()
                         .flex()
                         .flex_col()
                         .child(div().text_color(look.c(ui.text)).child(format!("{} wants to {what}", self.def.label)))
@@ -965,14 +972,23 @@ impl AgentTask {
             .border_1()
             .border_color(look.c(ui.border_strong))
             .bg(look.c(ui.editor_bg))
-            .flex()
-            .items_end()
-            .gap(look.z(8.))
-            .child(div().flex_1().min_w(px(0.)).child(self.prompt.clone()))
-            .when(!self.pending.is_empty(), |d| {
-                d.child(div().flex_none().px(look.z(6.)).rounded(look.z(3.)).bg(look.c(ui.active_bg)).text_size(look.text(-2.)).text_color(look.c(ui.text_secondary)).child(format!("{} queued", self.pending.len())))
-            })
-            .child(div().flex_none().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(if working { "↩ queue · esc to stop" } else { "↩ send" }));
+            .child(self.prompt.clone());
+        // Queue and Esc hints sit just above the field, outside it, and only
+        // while there's something to say (inside, they squeezed the field).
+        let hints = (working || !self.pending.is_empty()).then(|| {
+            div()
+                .flex_none()
+                .mx(look.z(14.))
+                .mb(look.z(3.))
+                .flex()
+                .justify_end()
+                .items_center()
+                .gap(look.z(6.))
+                .text_size(look.text(-3.))
+                .text_color(look.c(ui.text_muted))
+                .when(!self.pending.is_empty(), |d| d.child(div().flex_none().text_color(look.c(ui.text_secondary)).child(format!("{} queued", self.pending.len()))))
+                .when(working, |d| d.child(div().min_w(px(0.)).truncate().child("esc to stop")))
+        });
         div()
             .size_full()
             .flex()
@@ -997,6 +1013,7 @@ impl AgentTask {
             })
             .when(!empty, |d| d.child(chat))
             .children(self.permission_bar(look, cx))
+            .children(hints)
             .child(prompt_bar)
     }
 
