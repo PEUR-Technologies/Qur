@@ -78,6 +78,8 @@ pub enum AgentEvent {
     Merge,
     /// Changes view: discard the task.
     Discard,
+    /// A turn ended after changing files: run the project's checks.
+    TurnChangedFiles,
 }
 
 /// What the middle pane shows in layouts A/C.
@@ -440,6 +442,7 @@ impl AgentTask {
         if s == Status::Done && std::mem::take(&mut self.turn_wrote) {
             self.browser.update(cx, |b, _| b.reload());
             self.changes.update(cx, |c, cx| c.refresh(cx));
+            cx.emit(AgentEvent::TurnChangedFiles);
         }
         let active = matches!(s, Status::Working | Status::NeedsYou);
         self.monitor.update(cx, |m, _| m.set_turn_active(active));
@@ -483,6 +486,17 @@ impl AgentTask {
 
     pub fn output(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.push(ChatItem::Output(text.into()));
+        cx.notify();
+    }
+
+    /// Put text in the prompt for the user to review, unless they're already
+    /// typing something.
+    pub fn prefill(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.prompt.update(cx, |p, cx| {
+            if p.text.trim().is_empty() {
+                p.set_text(text, cx);
+            }
+        });
         cx.notify();
     }
 

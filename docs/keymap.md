@@ -122,6 +122,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+5` | Browser: show the selected agent's browser (any layout) | Browser ✅ |
 | `Cmd+Shift+C` | Browser: Inspect Element (highlight, click to attach to the prompt; select text to attach it) | Browser ✅ |
 | Changes view / Agent menu | Merge into My Branch, Keep Working, Discard Task…, Review Changes | M4 ✅ |
+| Agent menu | Run Checks Now (no default keys) | ✅ |
 | Agent > Merge Conflicts | Next / Previous Conflict, Accept Ours / Theirs / Both, Finish Merge, Abort Merge (no default keys) | M4 ✅ |
 | View > Git | Stage All Changes, Unstage All Changes, Commit Staged… (no default keys) | M4 ✅ |
 | Changes view: click a line / ⌘-click | Comment on the line (sent to the agent as one message) / open the file there | M4 ✅ |

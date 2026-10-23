@@ -67,6 +67,14 @@ struct MergeState {
 }
 
 /// What the stage shows.
+/// A task's latest turn-end check (decision 29).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Check {
+    Running,
+    Passed,
+    Failed,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Selected {
     Agent(String),
@@ -113,6 +121,7 @@ pub struct Workspace {
     selected: Option<Selected>,
     /// Sessions that finished, errored or need you while not selected (Orca's unread).
     unread: HashSet<String>,
+    checks: HashMap<String, Check>,
     /// One file tree per root (main checkout and each worktree).
     trees: HashMap<PathBuf, Entity<TreeView>>,
     buffers: Buffers,
@@ -195,6 +204,7 @@ impl Workspace {
             terms,
             selected: None,
             unread: HashSet::new(),
+            checks: HashMap::new(),
             trees: HashMap::new(),
             buffers: Buffers { list: Vec::new() },
             code: None,
@@ -608,6 +618,9 @@ impl Workspace {
                     (a.record.id.clone(), a.status.clone())
                 };
                 let attention = matches!(status, Status::Done | Status::NeedsYou | Status::Error(_));
+                if status == Status::Working {
+                    this.checks.remove(&id);
+                }
                 if attention && this.selected != Some(Selected::Agent(id.clone())) {
                     this.unread.insert(id);
                 }
@@ -633,6 +646,10 @@ impl Workspace {
             AgentEvent::Merge => {
                 let id = a.read(cx).record.id.clone();
                 this.merge_task(&id, window, cx);
+            }
+            AgentEvent::TurnChangedFiles => {
+                let id = a.read(cx).record.id.clone();
+                this.run_checks(&id, false, window, cx);
             }
             AgentEvent::Discard => {
                 let id = a.read(cx).record.id.clone();
@@ -1438,6 +1455,73 @@ impl Workspace {
             Some(Selected::TermTask(id)) => self.term_task(id).map(|t| (t.record.id.clone(), t.record.worktree.clone(), t.record.branch.clone())),
             _ => None,
         }
+    }
+
+    fn run_checks_action(&mut self, _: &qur::RunChecks, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((id, ..)) = self.selected_worktree(cx) {
+            self.run_checks(&id, true, window, cx);
+        }
+    }
+
+    /// Run the project's `[checks] command` in a task's worktree (decision 29):
+    /// after an ACP turn that changed files, or by hand (Run Checks Now, also
+    /// for Agent Terminals, which have no turn boundaries). A failure goes back
+    /// to the agent as text to review: the prompt (ACP) or the terminal's input
+    /// line (Agent Terminal), not sent unless `auto_send` is on.
+    fn run_checks(&mut self, id: &str, manual: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let settings = ProjectSettings::load(&self.project_id).checks;
+        let Some(command) = settings.command.clone().filter(|c| !c.trim().is_empty()) else {
+            if manual {
+                let path = qur_config::project_settings_path(&self.project_id);
+                self.flash(format!("No checks set: add [checks] command = \"…\" to {}", path.display()), cx);
+            }
+            return;
+        };
+        if self.checks.get(id) == Some(&Check::Running) {
+            return;
+        }
+        let Some((wt, ..)) = self.task_parts(id, cx) else { return };
+        let agent = self.agent(id).cloned();
+        let term = self.term_task(id).and_then(|t| t.term_id);
+        self.checks.insert(id.to_string(), Check::Running);
+        if let Some(a) = &agent {
+            a.update(cx, |a, cx| a.notice(format!("Running checks: {command}"), cx));
+        }
+        cx.notify();
+        let id = id.to_string();
+        let bg = cx.background_executor().clone();
+        let timeout = Duration::from_secs(settings.timeout.max(1));
+        cx.spawn_in(window, async move |this, cx| {
+            let path = qur_agents::login_path().to_string();
+            let (ok, out) = {
+                let command = command.clone();
+                bg.spawn(async move { qur_worktree::run_check(&wt, &command, &path, timeout) }).await
+            };
+            this.update_in(cx, |this, _, cx| {
+                this.checks.insert(id.clone(), if ok { Check::Passed } else { Check::Failed });
+                let repair = format!("Checks failed (`{command}`):\n```\n{}\n```\nPlease fix this.", out.trim_end());
+                if let Some(a) = &agent {
+                    a.update(cx, |a, cx| {
+                        if !out.trim().is_empty() {
+                            a.output(out.clone(), cx);
+                        }
+                        if ok {
+                            a.notice("Checks passed", cx);
+                        } else if settings.auto_send && matches!(a.status, Status::Done | Status::Idle) {
+                            a.send(repair.clone(), Vec::new(), cx);
+                        } else {
+                            a.prefill(&repair, cx);
+                        }
+                    });
+                } else if let Some(tid) = term.filter(|_| !ok) {
+                    this.terms.update(cx, |p, cx| p.type_text(tid, &repair, cx));
+                }
+                this.flash(if ok { format!("Checks passed: {command}") } else { format!("Checks failed: {command}") }, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn reveal_worktree(&mut self, _: &qur::RevealWorktree, _: &mut Window, cx: &mut Context<Self>) {
@@ -2488,6 +2572,7 @@ impl Workspace {
                     badge = if badge.is_empty() { g.to_string() } else { format!("{badge} {g}") };
                 }
             }
+            badge = with_check(badge, self.checks.get(&id));
             let unread = self.unread.contains(&id);
             let row = self
                 .agent_button(format!("agent-{id}").into(), t.accent, t.record.title.clone(), badge, active, sel, look)
@@ -2502,7 +2587,7 @@ impl Workspace {
             let s = t.term_id.and_then(|tid| panel.session_by_id(tid));
             let busy = s.is_some_and(|s| s.is_busy());
             let title = s.and_then(|s| s.first_line.clone()).unwrap_or_else(|| t.record.title.clone());
-            let badge = if s.is_some() { String::new() } else { "stopped".to_string() };
+            let badge = with_check(if s.is_some() { String::new() } else { "stopped".to_string() }, self.checks.get(&id));
             let row = self
                 .agent_button(format!("tt-{id}").into(), t.accent, title, badge, busy, sel, look)
                 .on_click(cx.listener(move |this, _, window, cx| this.select(Some(Selected::TermTask(id.clone())), window, cx)));
@@ -3153,6 +3238,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::discard_task))
             .on_action(cx.listener(Self::show_git))
             .on_action(cx.listener(Self::merge_action))
+            .on_action(cx.listener(Self::run_checks_action))
             .on_action(cx.listener(Self::git_stage_all))
             .on_action(cx.listener(Self::git_unstage_all))
             .on_action(cx.listener(Self::git_commit))
@@ -3228,4 +3314,14 @@ fn ask(window: &mut Window, level: PromptLevel, message: &str, detail: Option<&s
         }
     }
     window.prompt(level, message, detail, answers, cx)
+}
+
+/// An agent button's badge plus its latest check (decision 29).
+fn with_check(badge: String, check: Option<&Check>) -> String {
+    let mark = match check {
+        Some(Check::Running) => "checking…",
+        Some(Check::Failed) => "✕ checks",
+        Some(Check::Passed) | None => return badge,
+    };
+    if badge.is_empty() { mark.to_string() } else { format!("{badge} · {mark}") }
 }

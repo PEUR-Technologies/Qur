@@ -285,6 +285,26 @@ pub struct ProjectSettings {
     pub theme: Option<String>,
     pub window: ProjectWindow,
     pub worktree: ProjectWorktree,
+    pub checks: ProjectChecks,
+}
+
+/// Turn-end checks: run after an agent turn that changed files (OpenADE /
+/// PandaCode research, decision 29).
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ProjectChecks {
+    /// e.g. "cargo check" or "pnpm test --run". None = no checks.
+    pub command: Option<String>,
+    /// Seconds before the check is stopped and counted as failed.
+    pub timeout: u64,
+    /// Send a failure to the agent right away instead of prefilling the prompt.
+    pub auto_send: bool,
+}
+
+impl Default for ProjectChecks {
+    fn default() -> Self {
+        ProjectChecks { command: None, timeout: 300, auto_send: false }
+    }
 }
 
 /// New task worktrees (decision 22).
@@ -448,6 +468,16 @@ mod tests {
         let e = effective(&global, &proj);
         assert_eq!((e.theme.as_str(), e.opacity, e.blur), ("Tokyo Night", 0.9, true));
         assert!(e.theme_is_project && e.window_is_project);
+    }
+
+    #[test]
+    fn project_checks_parse() {
+        let p: ProjectSettings = toml_edit::de::from_str("[checks]\ncommand = \"cargo check\"\n").unwrap();
+        assert_eq!(p.checks.command.as_deref(), Some("cargo check"));
+        assert_eq!((p.checks.timeout, p.checks.auto_send), (300, false));
+        let p: ProjectSettings = toml_edit::de::from_str("[checks]\ncommand = \"make\"\ntimeout = 20\nauto_send = true\n").unwrap();
+        assert_eq!((p.checks.timeout, p.checks.auto_send), (20, true));
+        assert_eq!(ProjectSettings::default().checks.command, None);
     }
 
     #[test]

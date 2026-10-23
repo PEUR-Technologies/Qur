@@ -92,6 +92,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Next Agent · Previous Agent · Agent 1–9 `Ctrl+1..9`
 - ---
 - Review Changes `Cmd+4` · Merge into My Branch · Keep Working · Discard Task…
+- Run Checks Now (the project's `[checks] command`, decision 29)
 - Merge Conflicts ▸ Next Conflict · Previous Conflict · Accept Ours · Accept Theirs · Accept Both · Finish Merge · Abort Merge (enabled only during a merge)
 - ---
 - Open Task Worktree in Terminal

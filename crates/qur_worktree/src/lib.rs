@@ -204,6 +204,63 @@ pub fn run_setup(worktree: &Path, command: &str, path_env: &str) -> (bool, Strin
     }
 }
 
+/// Run the project's turn-end check (e.g. `cargo check`) in a worktree
+/// through the login shell. Returns (passed, last ~60 lines of combined
+/// output). After `timeout` the whole process group is killed and the check
+/// fails.
+pub fn run_check(worktree: &Path, command: &str, path_env: &str, timeout: std::time::Duration) -> (bool, String) {
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let child = Command::new(shell)
+        .args(["-l", "-c", &format!("{command} 2>&1")])
+        .current_dir(worktree)
+        .env("PATH", path_env)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .process_group(0)
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => return (false, format!("couldn't run the check: {e}")),
+    };
+    // Read on a thread so a chatty check can't fill the pipe and stall.
+    let mut stdout = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(s) = stdout.as_mut() {
+            s.read_to_end(&mut buf).ok();
+        }
+        buf
+    });
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) if start.elapsed() >= timeout => {
+                let group = format!("-{}", child.id());
+                Command::new("/bin/kill").args(["-KILL", "--", &group]).status().ok();
+                child.wait().ok();
+                break None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(_) => break None,
+        }
+    };
+    let text = String::from_utf8_lossy(&reader.join().unwrap_or_default()).into_owned();
+    let lines: Vec<&str> = text.lines().collect();
+    let mut tail = lines[lines.len().saturating_sub(60)..].join("\n");
+    match status {
+        Some(s) => (s.success(), tail),
+        None => {
+            tail.push_str(&format!("\n(check stopped after {} s)", timeout.as_secs()));
+            (false, tail)
+        }
+    }
+}
+
 /// True when the worktree has uncommitted changes (or untracked files).
 pub fn is_dirty(path: &Path) -> bool {
     git(path, &["status", "--porcelain"]).map(|s| !s.is_empty()).unwrap_or(false)
@@ -276,6 +333,14 @@ mod tests {
         assert!(ok, "{out}");
         assert!(out.contains("setting up"));
         assert!(!run_setup(&c.path, "exit 3", "/usr/bin:/bin").0);
+        let (ok, out) = run_check(&c.path, "echo checking; test -f .env", "/usr/bin:/bin", std::time::Duration::from_secs(10));
+        assert!(ok, "{out}");
+        assert!(out.contains("checking"));
+        assert!(!run_check(&c.path, "echo nope; exit 2", "/usr/bin:/bin", std::time::Duration::from_secs(10)).0);
+        let t0 = std::time::Instant::now();
+        let (ok, out) = run_check(&c.path, "sleep 30 & sleep 30", "/usr/bin:/bin", std::time::Duration::from_millis(300));
+        assert!(!ok && out.contains("check stopped"), "{out}");
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "timeout kills the group: {:?}", t0.elapsed());
         remove(&r, &c.path, &c.branch, true).unwrap();
     }
 

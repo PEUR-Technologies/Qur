@@ -68,6 +68,7 @@ One window is one project. There's no permanent editor area: the window is for a
   - Streaming tool calls, the agent's to-do plan, and a permission bar (Allow once / Allow for this task / Deny).
   - Stop at any time. Messages sent mid-turn are queued; `@` mentions a file and `/` runs agent commands.
 - **Unread markers** on agents that finished or need you while you were elsewhere.
+- **Turn-end checks.** Set `[checks] command` per project, and Qur runs it in the worktree after each agent turn that changed files. A failure marks the agent's button `✕ checks` and lands in the prompt (or the Agent Terminal's input line) for you to send back. Agent > Run Checks Now runs it any time.
 
 ### Watching
 
@@ -117,7 +118,7 @@ Everything lives in `~/Library/Application Support/Qur/`. Qur never writes into 
 |---|---|
 | `config.toml` | Theme, window opacity/blur, editor font, soft wrap, peek layout. Qur > Settings opens it; saved changes apply right away. |
 | `agents.toml` | Which agents Qur can start (ACP or terminal mode). Written on first launch. |
-| `projects/<id>.toml` | Per-project theme, opacity, and `[worktree] setup = "pnpm install"` (runs in each new worktree before the agent starts). |
+| `projects/<id>.toml` | Per-project theme, opacity, `[worktree] setup = "pnpm install"` (runs in each new worktree before the agent starts), and `[checks] command = "cargo check"` (runs after each agent turn that changed files). |
 | `projects/<id>.tasks.toml` | Tasks, so they survive restarts and resume their sessions. |
 | `worktrees/<id>/<task>/` | The task worktrees. |
 
