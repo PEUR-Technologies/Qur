@@ -292,6 +292,11 @@ impl AgentTask {
         });
         let list = ListState::new(0, ListAlignment::Bottom, px(400.));
         list.set_follow_mode(gpui::FollowMode::Tail);
+        // Re-render on scroll: the "↓" button shows while you're scrolled up.
+        let weak = cx.weak_entity();
+        list.set_scroll_handler(move |_, _, cx| {
+            weak.update(cx, |_, cx| cx.notify()).ok();
+        });
         let record_queue = record
             .queued
             .iter()
@@ -349,6 +354,12 @@ impl AgentTask {
         let n = self.chat.len();
         self.chat.push(item);
         self.list.splice(n..n, 1);
+    }
+
+    /// Back to the newest message, following it again as it streams.
+    fn follow_bottom(&self) {
+        self.list.set_follow_mode(gpui::FollowMode::Tail);
+        self.list.scroll_to_end();
     }
 
     /// Rows are measured once; a thought's open/folded state depends on
@@ -491,6 +502,8 @@ impl AgentTask {
         if text.trim().is_empty() && atts.is_empty() {
             return;
         }
+        // Sending (or queueing) brings you back to the newest message.
+        self.follow_bottom();
         let mut out = Outgoing::plain(if text.trim().is_empty() { "Adjust this.".into() } else { text }, mentions);
         for a in atts {
             out.labels.push(a.label.to_string());
@@ -582,6 +595,8 @@ impl AgentTask {
             self.push(ChatItem::User(shown));
         }
         let Outgoing { text, mentions, context, images, .. } = out;
+        // Put back in the prompt if the turn fails (as Zed does).
+        let resend = text.clone();
         let mut blocks = vec![PromptBlock::Text(text)];
         for c in context {
             blocks.push(PromptBlock::Text(c));
@@ -609,11 +624,29 @@ impl AgentTask {
                     }
                     Ok(Ok(StopReason::EndTurn)) => t.set_status(Status::Done, cx),
                     Ok(Ok(other)) => {
-                        t.push(ChatItem::Notice(format!("Turn ended: {other:?}")));
+                        let label = t.def.label.clone();
+                        t.push(ChatItem::Notice(match other {
+                            StopReason::MaxTokens => "Stopped: the reply reached its length limit. Say \"continue\" to go on.".into(),
+                            StopReason::MaxTurnRequests => "Stopped: this turn took too many steps. Send a message to carry on.".into(),
+                            StopReason::Refusal => format!("{label} declined this request."),
+                            other => format!("Turn ended: {other:?}"),
+                        }));
                         t.set_status(Status::Done, cx)
                     }
                     Ok(Err(e)) => {
-                        t.push(ChatItem::Notice(format!("Error: {e}")));
+                        // -32000 is ACP's "authentication required".
+                        let msg = if e.code == Some(-32000) {
+                            format!("{} isn't signed in. Run `claude /login` in a terminal (or /login here), then send again.", t.def.label)
+                        } else {
+                            format!("Error: {e}")
+                        };
+                        t.push(ChatItem::Notice(msg));
+                        // Your message back in the prompt, to edit or resend.
+                        t.prompt.update(cx, |p, cx| {
+                            if p.text.trim().is_empty() {
+                                p.set_text(&resend, cx);
+                            }
+                        });
                         t.set_status(Status::Error(e.to_string()), cx)
                     }
                     Err(_) => t.set_status(Status::Error("agent exited".into()), cx),
@@ -656,12 +689,23 @@ impl AgentTask {
         handle
     }
 
+    /// Answer by kind (the Agent menu's Allow Once / Allow for This Task / Deny).
     pub fn answer_permission(&mut self, kind: PermissionKind, cx: &mut Context<Self>) {
+        let id = self.permission.as_ref().and_then(|p| p.options.iter().find(|o| o.kind == kind)).map(|o| o.id.clone());
+        self.answer_with(id, cx);
+    }
+
+    /// Answer with one of the agent's own options (the permission bar's buttons).
+    fn answer_option(&mut self, option_id: &str, cx: &mut Context<Self>) {
+        self.answer_with(Some(option_id.to_string()), cx);
+    }
+
+    fn answer_with(&mut self, option_id: Option<String>, cx: &mut Context<Self>) {
         let Some(p) = self.permission.take() else { return };
         let paths: Vec<PathBuf> = p.tool.locations.iter().flatten().map(|l| l.path.clone()).collect();
         self.monitor.update(cx, |m, cx| m.on_permission(&paths, false, cx));
-        let outcome = match p.options.iter().find(|o| o.kind == kind) {
-            Some(o) => PermissionOutcome::Selected(o.id.clone()),
+        let outcome = match option_id {
+            Some(id) => PermissionOutcome::Selected(id),
             None => PermissionOutcome::Cancelled,
         };
         if let Some(c) = &self.client {
@@ -1075,20 +1119,56 @@ impl AgentTask {
         let ui = &look.theme.ui;
         let what = p.tool.title.clone().unwrap_or_else(|| "use a tool".into());
         let file = p.tool.locations.as_ref().and_then(|l| l.first()).map(|l| self.rel(&l.path));
-        let button = |label: &'static str, kind: PermissionKind, primary: bool, id: &'static str| {
-            div()
-                .id(id)
-                .px(look.z(10.))
-                .py(look.z(3.))
-                .rounded(look.z(4.))
-                .cursor_pointer()
-                .text_size(look.text(-1.))
-                .bg(look.c(if primary { ui.button_primary_bg } else { ui.button_bg }))
-                .text_color(look.c(if primary { ui.button_primary_text } else { ui.button_text }))
-                .child(label)
-                .on_click(cx.listener(move |t, _, _, cx| t.answer_permission(kind, cx)))
-        };
-        let has = |k: PermissionKind| p.options.iter().any(|o| o.kind == k);
+        // What's being approved: the diff, text or command, as in the chat.
+        let tool = self.tools.get(&p.tool.id).cloned().map(|mut t| {
+            t.apply(&p.tool);
+            t
+        });
+        let tool = tool.unwrap_or_else(|| p.tool.to_tool_call());
+        let diffs: Vec<(&PathBuf, Vec<(char, &str)>)> = tool
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                ToolContent::Diff { path, old_text, new_text } => Some((path, line_diff(old_text.as_deref().unwrap_or(""), new_text))),
+                _ => None,
+            })
+            .collect();
+        let detail = self.tool_body(&tool, &diffs, look, cx);
+        // Every option the agent offers, in its words ("Yes, and auto-accept
+        // edits", "No, keep planning"…); the first allow is the primary one.
+        let primary = p.options.iter().position(|o| o.kind == PermissionKind::AllowOnce).or_else(|| p.options.iter().position(|o| matches!(o.kind, PermissionKind::AllowAlways)));
+        let buttons: Vec<_> = p
+            .options
+            .iter()
+            .enumerate()
+            .map(|(i, o)| {
+                let is_primary = Some(i) == primary;
+                let reject = matches!(o.kind, PermissionKind::RejectOnce | PermissionKind::RejectAlways);
+                let label = if o.name.trim().is_empty() {
+                    match o.kind {
+                        PermissionKind::AllowOnce => "Allow once",
+                        PermissionKind::AllowAlways => "Allow for this task",
+                        PermissionKind::RejectOnce => "Deny",
+                        PermissionKind::RejectAlways => "Always deny",
+                    }
+                    .to_string()
+                } else {
+                    o.name.clone()
+                };
+                let id = o.id.clone();
+                div()
+                    .id(("perm-option", i))
+                    .px(look.z(10.))
+                    .py(look.z(3.))
+                    .rounded(look.z(4.))
+                    .cursor_pointer()
+                    .text_size(look.text(-1.))
+                    .bg(look.c(if is_primary { ui.button_primary_bg } else { ui.button_bg }))
+                    .text_color(look.c(if is_primary { ui.button_primary_text } else if reject { ui.text_secondary } else { ui.button_text }))
+                    .child(label)
+                    .on_click(cx.listener(move |t, _, _, cx| t.answer_option(&id, cx)))
+            })
+            .collect();
         Some(
             div()
                 .flex_none()
@@ -1109,22 +1189,16 @@ impl AgentTask {
                     div()
                         .id("perm-what")
                         .min_w(px(0.))
-                        .max_h(look.z(140.))
+                        .max_h(look.z(260.))
                         .overflow_y_scroll()
                         .flex()
                         .flex_col()
+                        .gap(look.z(4.))
                         .child(div().text_color(look.c(ui.text)).child(format!("{} wants to {what}", self.def.label)))
-                        .children(file.map(|f| div().truncate().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(f))),
+                        .children(file.map(|f| div().truncate().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(f)))
+                        .children(detail),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(look.z(6.))
-                        .when(has(PermissionKind::AllowOnce), |d| d.child(button("Allow once", PermissionKind::AllowOnce, true, "perm-once")))
-                        .when(has(PermissionKind::AllowAlways), |d| d.child(button("Allow for this task", PermissionKind::AllowAlways, false, "perm-always")))
-                        .when(has(PermissionKind::RejectOnce), |d| d.child(button("Deny", PermissionKind::RejectOnce, false, "perm-deny"))),
-                ),
+                .child(div().flex().flex_wrap().gap(look.z(6.)).children(buttons)),
         )
     }
 }
@@ -1250,9 +1324,31 @@ impl AgentTask {
         let ui = look.theme.ui.clone();
         let me = cx.entity();
         let look2 = look.clone();
-        let chat = list(self.list.clone(), move |ix, _, cx| me.update(cx, |t, cx| t.render_item(ix, &look2, cx)))
-            .flex_1()
-            .min_h(px(0.));
+        let chat = list(self.list.clone(), move |ix, _, cx| me.update(cx, |t, cx| t.render_item(ix, &look2, cx))).size_full();
+        // Scrolled up: a "↓" to jump back to the newest message.
+        let jump = (!self.list.is_following_tail() && self.list.is_scrolled_to_end() == Some(false)).then(|| {
+            div()
+                .id("chat-bottom")
+                .absolute()
+                .right(look.z(16.))
+                .bottom(look.z(8.))
+                .px(look.z(9.))
+                .py(look.z(3.))
+                .rounded(look.z(12.))
+                .cursor_pointer()
+                .border_1()
+                .border_color(look.c(ui.border_strong))
+                .bg(look.c(ui.overlay_bg))
+                .text_size(look.text(-1.))
+                .text_color(look.c(ui.text_secondary))
+                .hover(|d| d.text_color(look.c(ui.text)))
+                .child("↓")
+                .on_click(cx.listener(|t, _, _, cx| {
+                    t.follow_bottom();
+                    cx.notify();
+                }))
+        });
+        let chat = div().flex_1().min_h(px(0.)).relative().child(chat).children(jump);
         let working = matches!(self.status, Status::Working | Status::NeedsYou);
         let empty = self.chat.is_empty();
         let prompt_bar = div()
@@ -1293,7 +1389,15 @@ impl AgentTask {
             })
             .collect();
         let busy = working || !self.pending.is_empty();
-        let hints = (busy || !chips.is_empty()).then(|| {
+        // "24k / 1M · $0.31": context used of the window (warning colour
+        // past 80 %, as Zed does), and the session's cost.
+        let usage = self.usage.filter(|u| u.1 > 0).map(|(used, size, cost)| {
+            let k = |n: u64| if n >= 1_000_000 { format!("{}M", (n as f64 / 1e6 * 10.).round() / 10.) } else { format!("{}k", n.div_ceil(1000)) };
+            let text = format!("{} / {}{}", k(used), k(size), cost.map(|c| format!(" · ${c:.2}")).unwrap_or_default());
+            let hot = used as f64 >= size as f64 * 0.8;
+            div().flex_none().mr(look.z(6.)).when(hot, |d| d.text_color(look.c(ui.warning))).child(text)
+        });
+        let hints = (busy || !chips.is_empty() || usage.is_some()).then(|| {
             div()
                 .flex_none()
                 .mx(look.z(12.))
@@ -1305,6 +1409,7 @@ impl AgentTask {
                 .text_color(look.c(ui.text_muted))
                 .children(chips)
                 .child(div().flex_1())
+                .children(usage)
                 .when(!self.pending.is_empty(), |d| d.child(div().flex_none().mr(look.z(6.)).text_color(look.c(ui.text_secondary)).child(format!("{} queued", self.pending.len()))))
                 .when(working, |d| d.child(div().min_w(px(0.)).mr(look.z(2.)).truncate().child("esc to stop")))
         });
