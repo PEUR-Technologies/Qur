@@ -1,0 +1,15 @@
+[package]
+name = "qur_editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# LF-only line breaks: tree-sitter rows count only '\n', so ropey's
+# `unicode_lines` (U+2028, CR, ...) must stay off. A test guards this, because
+# feature unification would turn it back on if any crate enables defaults.
+ropey = { version = "1.6.1", default-features = false, features = ["simd"] }
+regex = { version = "1.13.1", default-features = false, features = ["std", "perf", "unicode"] }
+unicode-segmentation = "1.13.3"
+unicode-width = { version = "0.2.2", default-features = false }

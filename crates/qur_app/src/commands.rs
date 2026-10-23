@@ -1,0 +1,538 @@
+//! The one command table: every action, its title, keys, context and tier.
+//! Key bindings, the command palette and the native menu bar are all built
+//! from `COMMANDS` (docs/keymap.md, docs/menus.md).
+
+use std::path::PathBuf;
+
+use gpui::{Action, App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType};
+
+/// App/window/workspace commands, handled by the workspace whatever is focused.
+pub mod qur {
+    gpui::actions!(
+        qur,
+        [
+            Quit, Hide, HideOthers, ShowAll, CloseWindow, Minimize, Zoom, ToggleFullScreen,
+            CommandPalette, ToggleSidebar, ToggleBottomPanel, ToggleTerminal, ZoomIn, ZoomOut,
+            ZoomReset, Transparency, GoToLine, RevealInFiles, NewTerminal, NewAgentTerminal,
+            NextTerminal, PrevTerminal, CloseTerminal, OpenConfig, ThemePicker, NewWindow,
+            OpenFolder, QuickOpen, SaveAll, RevertFile, NavBack, NavForward, RecentFile,
+            UseDefaultTheme, ProjectSwitcher,
+            // Listed in menus/palette, built in later milestones (shown disabled).
+            About, CheckSetup, OpenKeymap, OpenAgents, VimMode, NewAgentTask, FindInProject,
+            ReplaceInProject, GitPanel, SearchPanel, PeekLayoutA, PeekLayoutB, PeekLayoutC,
+            CyclePeekLayout, PeekLive, PeekTodo, PeekChat, PeekChanges, FollowAgent, GoToSymbol,
+            FocusPrompt, StopAgent, TakeOver, NextAgent, PrevAgent, ReviewChanges, Merge,
+            KeepWorking, DiscardTask, OpenWorktreeInTerminal, RevealWorktree, KeyboardShortcuts,
+            RunDoctor, ShowLogs, ReportProblem, ExpandSelection, ShrinkSelection,
+        ]
+    );
+
+    /// File > Open Recent > <project>.
+    #[derive(Clone, PartialEq, gpui::Action)]
+    #[action(namespace = qur, no_json)]
+    pub struct OpenProject {
+        pub path: std::path::PathBuf,
+    }
+}
+
+/// The Edit menu's OS items; whatever is focused (editor, terminal, text field) handles them.
+pub mod edit {
+    gpui::actions!(edit, [Undo, Redo, Cut, Copy, Paste, SelectAll]);
+}
+
+pub mod editor {
+    gpui::actions!(
+        editor,
+        [
+            Left, Right, Up, Down, SelectLeft, SelectRight, SelectUp, SelectDown, WordLeft,
+            WordRight, SelectWordLeft, SelectWordRight, LineStart, LineEnd, SelectLineStart,
+            SelectLineEnd, DocStart, DocEnd, SelectDocStart, SelectDocEnd, PageUp, PageDown,
+            SelectPageUp, SelectPageDown, Backspace, Delete, DeleteWordLeft, DeleteWordRight,
+            DeleteToLineStart, DeleteLine, MoveLineUp, MoveLineDown, CopyLineUp, CopyLineDown,
+            InsertLineBelow, InsertLineAbove, Indent, Outdent, Tab, ShiftTab, ToggleComment,
+            ToggleBlockComment, TrimWhitespace, SelectLine, AddNextMatch, SelectAllMatches,
+            AddCursorAbove, AddCursorBelow, JumpToBracket, Escape, ToggleSoftWrap, Save, Newline,
+            Find, Replace, FindNext, FindPrev, UseSelectionForFind, ToggleCase, ToggleWholeWord,
+            ToggleRegex,
+        ]
+    );
+}
+
+pub mod terminal {
+    gpui::actions!(terminal, [Clear, SendLineStart, SendLineEnd, SendKillLine]);
+}
+
+/// Single-line text fields (find, replace, go to line, pickers).
+pub mod input {
+    gpui::actions!(
+        input,
+        [
+            Backspace, Delete, Left, Right, Home, End, WordLeft, WordRight, DeleteWordLeft,
+            DeleteToStart, Confirm, ConfirmAlt, ConfirmAll, Cancel, Up, Down, Tab
+        ]
+    );
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tier {
+    Ready,
+    /// Built in a later milestone; shown disabled.
+    Later(&'static str),
+}
+
+pub struct Cmd {
+    pub action: fn() -> Box<dyn Action>,
+    pub category: &'static str,
+    pub title: &'static str,
+    /// GPUI keystroke syntax; several bindings separated by `|`.
+    pub keys: &'static str,
+    pub context: Option<&'static str>,
+    pub tier: Tier,
+}
+
+impl Cmd {
+    pub fn ready(&self) -> bool {
+        self.tier == Tier::Ready
+    }
+
+    pub fn first_keys(&self) -> &'static str {
+        self.keys.split('|').next().unwrap_or("")
+    }
+}
+
+macro_rules! cmd {
+    ($a:path, $cat:literal, $title:literal, $keys:literal, $ctx:expr, $tier:expr) => {
+        Cmd { action: || Box::new($a), category: $cat, title: $title, keys: $keys, context: $ctx, tier: $tier }
+    };
+}
+
+const E: Option<&str> = Some("Editor");
+const T: Option<&str> = Some("Terminal");
+const I: Option<&str> = Some("TextInput");
+const W: Option<&str> = None;
+/// Global, except where the terminal needs the key itself (Ctrl+G, Ctrl+Tab,
+/// chords that would shadow Cmd+K Clear).
+const NT: Option<&str> = Some("!Terminal");
+use Tier::{Later as L, Ready as R};
+
+#[rustfmt::skip]
+pub static COMMANDS: &[Cmd] = &[
+    // App and window
+    cmd!(qur::Quit, "Qur", "Quit Qur", "cmd-q", W, R),
+    cmd!(qur::Hide, "Qur", "Hide Qur", "cmd-h", W, R),
+    cmd!(qur::HideOthers, "Qur", "Hide Others", "cmd-alt-h", W, R),
+    cmd!(qur::ShowAll, "Qur", "Show All", "", W, R),
+    cmd!(qur::About, "Qur", "About Qur", "", W, L("M7")),
+    cmd!(qur::CheckSetup, "Qur", "Check Setup…", "", W, L("M6")),
+    cmd!(qur::OpenConfig, "Qur", "Open config.toml", "cmd-,", W, R),
+    cmd!(qur::OpenKeymap, "Qur", "Open keymap.toml", "", W, L("M6")),
+    cmd!(qur::OpenAgents, "Qur", "Agents (agents.toml)", "", W, L("M2")),
+    cmd!(qur::ThemePicker, "Qur", "Theme…", "cmd-k cmd-t", NT, R),
+    cmd!(qur::UseDefaultTheme, "Qur", "Use Default Theme for This Project", "", W, R),
+    cmd!(qur::Transparency, "Qur", "Transparency…", "", W, R),
+    cmd!(qur::VimMode, "Qur", "Vim Mode", "", W, L("M6")),
+    cmd!(qur::NewWindow, "File", "New Window", "cmd-n", W, R),
+    cmd!(qur::NewAgentTask, "Agent", "New Task…", "cmd-shift-n", W, L("M2")),
+    cmd!(qur::OpenFolder, "File", "Open Folder…", "cmd-o", W, R),
+    cmd!(qur::ProjectSwitcher, "File", "Switch Project…", "cmd-alt-o", W, R),
+    cmd!(qur::CloseWindow, "File", "Close Window", "cmd-shift-w", W, R),
+    cmd!(qur::Minimize, "Window", "Minimize", "cmd-m", W, R),
+    cmd!(qur::Zoom, "Window", "Zoom", "", W, R),
+    cmd!(qur::ToggleFullScreen, "View", "Enter Full Screen", "ctrl-cmd-f", W, R),
+    cmd!(qur::CommandPalette, "View", "Command Palette…", "cmd-shift-p|f1", W, R),
+    cmd!(qur::ToggleSidebar, "View", "Sidebar", "cmd-b", W, R),
+    cmd!(qur::ToggleBottomPanel, "View", "Bottom Panel", "cmd-j", W, R),
+    cmd!(qur::ZoomIn, "View", "Zoom In", "cmd-=|cmd-+", W, R),
+    cmd!(qur::ZoomOut, "View", "Zoom Out", "cmd--", W, R),
+    cmd!(qur::ZoomReset, "View", "Reset Zoom", "cmd-0", W, R),
+    // Files and navigation
+    cmd!(qur::QuickOpen, "Go", "Go to File…", "cmd-p", W, R),
+    cmd!(qur::RecentFile, "Go", "Next Recent File", "ctrl-tab", NT, R),
+    cmd!(editor::Save, "File", "Save", "cmd-s", E, R),
+    cmd!(qur::SaveAll, "File", "Save All", "cmd-alt-s", W, R),
+    cmd!(qur::RevertFile, "File", "Revert File", "", W, R),
+    cmd!(qur::RevealInFiles, "View", "Files Dropdown", "cmd-shift-e", W, R),
+    cmd!(qur::GoToLine, "Go", "Go to Line…", "ctrl-g", NT, R),
+    cmd!(qur::NavBack, "Go", "Back", "ctrl--", NT, R),
+    cmd!(qur::NavForward, "Go", "Forward", "ctrl-shift--", NT, R),
+    cmd!(qur::GoToSymbol, "Go", "Go to Symbol in File…", "cmd-shift-o", W, L("M6")),
+    cmd!(editor::JumpToBracket, "Go", "Jump to Matching Bracket", "cmd-shift-\\", E, R),
+    // Editing
+    cmd!(edit::Undo, "Edit", "Undo", "cmd-z", W, R),
+    cmd!(edit::Redo, "Edit", "Redo", "cmd-shift-z", W, R),
+    cmd!(edit::Cut, "Edit", "Cut", "cmd-x", W, R),
+    cmd!(edit::Copy, "Edit", "Copy", "cmd-c", W, R),
+    cmd!(edit::Paste, "Edit", "Paste", "cmd-v", W, R),
+    cmd!(edit::SelectAll, "Edit", "Select All", "cmd-a", W, R),
+    cmd!(editor::Left, "Editor", "Move Left", "left", E, R),
+    cmd!(editor::Right, "Editor", "Move Right", "right", E, R),
+    cmd!(editor::Up, "Editor", "Move Up", "up", E, R),
+    cmd!(editor::Down, "Editor", "Move Down", "down", E, R),
+    cmd!(editor::SelectLeft, "Editor", "Select Left", "shift-left", E, R),
+    cmd!(editor::SelectRight, "Editor", "Select Right", "shift-right", E, R),
+    cmd!(editor::SelectUp, "Editor", "Select Up", "shift-up", E, R),
+    cmd!(editor::SelectDown, "Editor", "Select Down", "shift-down", E, R),
+    cmd!(editor::WordLeft, "Editor", "Word Left", "alt-left", E, R),
+    cmd!(editor::WordRight, "Editor", "Word Right", "alt-right", E, R),
+    cmd!(editor::SelectWordLeft, "Editor", "Select Word Left", "alt-shift-left", E, R),
+    cmd!(editor::SelectWordRight, "Editor", "Select Word Right", "alt-shift-right", E, R),
+    cmd!(editor::LineStart, "Editor", "Line Start", "cmd-left|home", E, R),
+    cmd!(editor::LineEnd, "Editor", "Line End", "cmd-right|end", E, R),
+    cmd!(editor::SelectLineStart, "Editor", "Select to Line Start", "cmd-shift-left|shift-home", E, R),
+    cmd!(editor::SelectLineEnd, "Editor", "Select to Line End", "cmd-shift-right|shift-end", E, R),
+    cmd!(editor::DocStart, "Editor", "File Start", "cmd-up", E, R),
+    cmd!(editor::DocEnd, "Editor", "File End", "cmd-down", E, R),
+    cmd!(editor::SelectDocStart, "Editor", "Select to File Start", "cmd-shift-up", E, R),
+    cmd!(editor::SelectDocEnd, "Editor", "Select to File End", "cmd-shift-down", E, R),
+    cmd!(editor::PageUp, "Editor", "Page Up", "pageup", E, R),
+    cmd!(editor::PageDown, "Editor", "Page Down", "pagedown", E, R),
+    cmd!(editor::SelectPageUp, "Editor", "Select Page Up", "shift-pageup", E, R),
+    cmd!(editor::SelectPageDown, "Editor", "Select Page Down", "shift-pagedown", E, R),
+    cmd!(editor::Backspace, "Editor", "Delete Left", "backspace|shift-backspace", E, R),
+    cmd!(editor::Delete, "Editor", "Delete Right", "delete", E, R),
+    cmd!(editor::DeleteWordLeft, "Editor", "Delete Word Left", "alt-backspace", E, R),
+    cmd!(editor::DeleteWordRight, "Editor", "Delete Word Right", "alt-delete", E, R),
+    cmd!(editor::DeleteToLineStart, "Editor", "Delete to Line Start", "cmd-backspace", E, R),
+    cmd!(editor::DeleteLine, "Selection", "Delete Line", "cmd-shift-k", E, R),
+    cmd!(editor::MoveLineUp, "Selection", "Move Line Up", "alt-up", E, R),
+    cmd!(editor::MoveLineDown, "Selection", "Move Line Down", "alt-down", E, R),
+    cmd!(editor::CopyLineUp, "Selection", "Copy Line Up", "alt-shift-up", E, R),
+    cmd!(editor::CopyLineDown, "Selection", "Copy Line Down", "alt-shift-down", E, R),
+    cmd!(editor::InsertLineBelow, "Selection", "Insert Line Below", "cmd-enter", E, R),
+    cmd!(editor::InsertLineAbove, "Selection", "Insert Line Above", "cmd-shift-enter", E, R),
+    cmd!(editor::Indent, "Edit", "Indent", "cmd-]", E, R),
+    cmd!(editor::Outdent, "Edit", "Outdent", "cmd-[", E, R),
+    cmd!(editor::Tab, "Editor", "Tab", "tab", E, R),
+    cmd!(editor::ShiftTab, "Editor", "Outdent (Tab)", "shift-tab", E, R),
+    cmd!(editor::ToggleComment, "Edit", "Toggle Line Comment", "cmd-/", E, R),
+    cmd!(editor::ToggleBlockComment, "Edit", "Toggle Block Comment", "shift-alt-a", E, R),
+    cmd!(editor::SelectLine, "Selection", "Select Line", "cmd-l", E, R),
+    cmd!(qur::ExpandSelection, "Selection", "Expand Selection", "", W, L("M6")),
+    cmd!(qur::ShrinkSelection, "Selection", "Shrink Selection", "", W, L("M6")),
+    cmd!(editor::AddNextMatch, "Selection", "Add Next Match", "cmd-d", E, R),
+    cmd!(editor::SelectAllMatches, "Selection", "Select All Matches", "cmd-shift-l", E, R),
+    cmd!(editor::AddCursorAbove, "Selection", "Add Cursor Above", "cmd-alt-up", E, R),
+    cmd!(editor::AddCursorBelow, "Selection", "Add Cursor Below", "cmd-alt-down", E, R),
+    cmd!(editor::TrimWhitespace, "Edit", "Trim Trailing Whitespace", "cmd-k cmd-x", E, R),
+    cmd!(editor::Escape, "Editor", "Collapse Selection / Close Find", "escape", E, R),
+    cmd!(editor::ToggleSoftWrap, "View", "Soft Wrap", "alt-z", W, R),
+    cmd!(editor::Newline, "Editor", "Newline", "enter|shift-enter", E, R),
+    // Find
+    cmd!(editor::Find, "Edit", "Find", "cmd-f", W, R),
+    cmd!(editor::Replace, "Edit", "Replace", "cmd-alt-f", W, R),
+    cmd!(editor::FindNext, "Edit", "Find Next", "cmd-g", W, R),
+    cmd!(editor::FindPrev, "Edit", "Find Previous", "cmd-shift-g", W, R),
+    cmd!(editor::UseSelectionForFind, "Edit", "Use Selection for Find", "cmd-e", W, R),
+    cmd!(editor::ToggleCase, "Edit", "Find: Match Case", "cmd-alt-c", W, R),
+    cmd!(editor::ToggleWholeWord, "Edit", "Find: Whole Word", "cmd-alt-w", W, R),
+    cmd!(editor::ToggleRegex, "Edit", "Find: Regular Expression", "cmd-alt-r", W, R),
+    cmd!(qur::FindInProject, "Edit", "Find in Project", "cmd-shift-f", W, L("M6")),
+    cmd!(qur::ReplaceInProject, "Edit", "Replace in Project", "cmd-shift-h", W, L("M6")),
+    // Terminal
+    cmd!(qur::NewTerminal, "Terminal", "New Terminal", "cmd-t", W, R),
+    cmd!(qur::NewAgentTerminal, "Terminal", "New Agent Terminal", "cmd-shift-t", W, R),
+    cmd!(qur::CloseTerminal, "Terminal", "Close Terminal", "cmd-w", T, R),
+    cmd!(qur::ToggleTerminal, "View", "Terminal", "ctrl-`", W, R),
+    cmd!(terminal::Clear, "Terminal", "Clear", "cmd-k", T, R),
+    cmd!(qur::PrevTerminal, "Terminal", "Previous Terminal", "cmd-shift-[|cmd-{", W, R),
+    cmd!(qur::NextTerminal, "Terminal", "Next Terminal", "cmd-shift-]|cmd-}", W, R),
+    cmd!(terminal::SendLineStart, "Terminal", "Line Start", "cmd-left", T, R),
+    cmd!(terminal::SendLineEnd, "Terminal", "Line End", "cmd-right", T, R),
+    cmd!(terminal::SendKillLine, "Terminal", "Kill Line", "cmd-backspace", T, R),
+    // Panels
+    cmd!(qur::GitPanel, "View", "Git", "ctrl-shift-g", W, L("M4")),
+    cmd!(qur::SearchPanel, "View", "Search", "", W, L("M6")),
+    // Agents and peek
+    cmd!(qur::FocusPrompt, "Agent", "Focus Prompt", "cmd-i", W, L("M2")),
+    cmd!(qur::StopAgent, "Agent", "Stop", "cmd-.", W, L("M2")),
+    cmd!(qur::TakeOver, "Agent", "Take Over", "", W, L("M3")),
+    cmd!(qur::NextAgent, "Agent", "Next Agent", "", W, L("M2")),
+    cmd!(qur::PrevAgent, "Agent", "Previous Agent", "", W, L("M2")),
+    cmd!(qur::ReviewChanges, "Agent", "Review Changes", "", W, L("M4")),
+    cmd!(qur::Merge, "Agent", "Merge…", "", W, L("M4")),
+    cmd!(qur::KeepWorking, "Agent", "Keep Working", "", W, L("M4")),
+    cmd!(qur::DiscardTask, "Agent", "Discard Task…", "", W, L("M4")),
+    cmd!(qur::OpenWorktreeInTerminal, "Agent", "Open Task Worktree in Terminal", "", W, L("M2")),
+    cmd!(qur::RevealWorktree, "Agent", "Reveal Worktree in Finder", "", W, L("M2")),
+    cmd!(qur::CyclePeekLayout, "View", "Cycle Peek Layout", "cmd-k cmd-l", NT, L("M3")),
+    cmd!(qur::PeekLayoutA, "View", "A Watch + Side Notes", "", W, L("M3")),
+    cmd!(qur::PeekLayoutB, "View", "B One View at a Time", "", W, L("M3")),
+    cmd!(qur::PeekLayoutC, "View", "C Watch + Drawer", "", W, L("M3")),
+    cmd!(qur::PeekLive, "View", "Live", "cmd-1", W, L("M3")),
+    cmd!(qur::PeekTodo, "View", "To-do", "cmd-2", W, L("M3")),
+    cmd!(qur::PeekChat, "View", "Chat", "cmd-3", W, L("M3")),
+    cmd!(qur::PeekChanges, "View", "Changes", "cmd-4", W, L("M3")),
+    cmd!(qur::FollowAgent, "View", "Follow Agent", "", W, L("M3")),
+    // Help
+    cmd!(qur::KeyboardShortcuts, "Help", "Qur Keyboard Shortcuts", "", W, L("M7")),
+    cmd!(qur::RunDoctor, "Help", "Run Doctor", "", W, L("M7")),
+    cmd!(qur::ShowLogs, "Help", "Show Logs in Finder", "", W, L("M7")),
+    cmd!(qur::ReportProblem, "Help", "Report a Problem…", "", W, L("M7")),
+    // Text fields
+    cmd!(input::Backspace, "Input", "Delete Left", "backspace", I, R),
+    cmd!(input::Delete, "Input", "Delete Right", "delete", I, R),
+    cmd!(input::Left, "Input", "Left", "left", I, R),
+    cmd!(input::Right, "Input", "Right", "right", I, R),
+    cmd!(input::WordLeft, "Input", "Word Left", "alt-left", I, R),
+    cmd!(input::WordRight, "Input", "Word Right", "alt-right", I, R),
+    cmd!(input::DeleteWordLeft, "Input", "Delete Word Left", "alt-backspace", I, R),
+    cmd!(input::DeleteToStart, "Input", "Delete to Start", "cmd-backspace", I, R),
+    cmd!(input::Home, "Input", "Start", "cmd-left|home", I, R),
+    cmd!(input::End, "Input", "End", "cmd-right|end", I, R),
+    cmd!(input::Confirm, "Input", "Confirm", "enter", I, R),
+    cmd!(input::ConfirmAlt, "Input", "Confirm (Previous)", "shift-enter", I, R),
+    cmd!(input::ConfirmAll, "Input", "Confirm All", "cmd-enter", I, R),
+    cmd!(input::Cancel, "Input", "Cancel", "escape", I, R),
+    cmd!(input::Up, "Input", "Up", "up", I, R),
+    cmd!(input::Down, "Input", "Down", "down", I, R),
+    cmd!(input::Tab, "Input", "Tab", "tab", I, R),
+];
+
+pub fn find(action: &dyn Action) -> Option<&'static Cmd> {
+    COMMANDS.iter().find(|c| (c.action)().partial_eq(action))
+}
+
+/// Commands shown in the palette (not the low-level cursor/input ones).
+pub fn palette_commands() -> impl Iterator<Item = &'static Cmd> {
+    COMMANDS.iter().filter(|c| !matches!(c.category, "Editor" | "Input"))
+}
+
+pub fn bind_keys(cx: &mut App) {
+    let mut bindings = Vec::new();
+    for c in COMMANDS {
+        for keys in c.keys.split('|').filter(|k| !k.is_empty()) {
+            let predicate = c.context.map(|ctx| gpui::KeyBindingContextPredicate::parse(ctx).unwrap().into());
+            bindings.push(KeyBinding::load(keys, (c.action)(), predicate, false, None, cx).unwrap());
+        }
+    }
+    cx.bind_keys(bindings);
+}
+
+/// `cmd-shift-p` -> `⇧⌘P` (macOS order: ⌃⌥⇧⌘).
+pub fn display_keys(keys: &str) -> String {
+    keys.split(' ')
+        .map(|stroke| {
+            let parts: Vec<&str> = stroke.split('-').collect();
+            let (mods, key) = if stroke.ends_with("--") {
+                (&parts[..parts.len() - 2], "-")
+            } else {
+                (&parts[..parts.len() - 1], parts[parts.len() - 1])
+            };
+            let mut out = String::new();
+            for (m, sym) in [("ctrl", "⌃"), ("alt", "⌥"), ("shift", "⇧"), ("cmd", "⌘")] {
+                if mods.contains(&m) {
+                    out.push_str(sym);
+                }
+            }
+            out.push_str(&match key {
+                "enter" => "↩".into(),
+                "backspace" => "⌫".into(),
+                "delete" => "⌦".into(),
+                "escape" => "⎋".into(),
+                "left" => "←".into(),
+                "right" => "→".into(),
+                "up" => "↑".into(),
+                "down" => "↓".into(),
+                "tab" => "⇥".into(),
+                "pageup" => "PgUp".into(),
+                "pagedown" => "PgDn".into(),
+                "home" => "Home".into(),
+                "end" => "End".into(),
+                k => k.to_uppercase(),
+            });
+            out
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// State shown in the menu bar (checkmarks, recent projects). Menus are
+/// rebuilt when it changes or another window becomes active.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct MenuState {
+    pub sidebar: bool,
+    pub bottom_panel: bool,
+    pub soft_wrap: bool,
+    pub recent: Vec<PathBuf>,
+}
+
+fn item(action: impl Action) -> MenuItem {
+    let cmd = find(&action).expect("menu action is in COMMANDS");
+    MenuItem::action(cmd.title, action).disabled(!cmd.ready())
+}
+
+fn titled(title: &'static str, action: impl Action) -> MenuItem {
+    let ready = find(&action).map(|c| c.ready()).unwrap_or(false);
+    MenuItem::action(title, action).disabled(!ready)
+}
+
+pub fn menus(s: &MenuState) -> Vec<Menu> {
+    use MenuItem as M;
+    let sep = M::separator;
+    let home = std::env::var("HOME").unwrap_or_default();
+    let recent: Vec<MenuItem> = if s.recent.is_empty() {
+        vec![MenuItem::action("No Recent Projects", qur::OpenFolder).disabled(true)]
+    } else {
+        s.recent
+            .iter()
+            .map(|p| {
+                let shown = p.to_string_lossy().replacen(&home, "~", 1);
+                MenuItem::action(shown, qur::OpenProject { path: p.clone() })
+            })
+            .collect()
+    };
+    vec![
+        Menu::new("Qur").items([
+            titled("About Qur", qur::About),
+            item(qur::CheckSetup),
+            sep(),
+            M::submenu(Menu::new("Settings").items([item(qur::OpenConfig), item(qur::OpenKeymap), item(qur::OpenAgents)])),
+            item(qur::ThemePicker),
+            item(qur::UseDefaultTheme),
+            item(qur::Transparency),
+            item(qur::VimMode).checked(false),
+            sep(),
+            M::os_submenu("Services", SystemMenuType::Services),
+            sep(),
+            item(qur::Hide),
+            item(qur::HideOthers),
+            item(qur::ShowAll),
+            sep(),
+            item(qur::Quit),
+        ]),
+        Menu::new("File").items([
+            titled("New Agent Task…", qur::NewAgentTask),
+            item(qur::NewTerminal),
+            item(qur::NewAgentTerminal),
+            item(qur::NewWindow),
+            sep(),
+            item(qur::OpenFolder),
+            M::submenu(Menu::new("Open Recent").items(recent)),
+            item(qur::ProjectSwitcher),
+            titled("Quick Open…", qur::QuickOpen),
+            sep(),
+            item(editor::Save),
+            item(qur::SaveAll),
+            item(qur::RevertFile),
+            sep(),
+            item(qur::CloseTerminal),
+            item(qur::CloseWindow),
+        ]),
+        Menu::new("Edit").items([
+            M::os_action("Undo", edit::Undo, OsAction::Undo),
+            M::os_action("Redo", edit::Redo, OsAction::Redo),
+            sep(),
+            M::os_action("Cut", edit::Cut, OsAction::Cut),
+            M::os_action("Copy", edit::Copy, OsAction::Copy),
+            M::os_action("Paste", edit::Paste, OsAction::Paste),
+            M::os_action("Select All", edit::SelectAll, OsAction::SelectAll),
+            sep(),
+            item(editor::Find),
+            item(editor::Replace),
+            item(editor::FindNext),
+            item(editor::FindPrev),
+            item(editor::UseSelectionForFind),
+            item(qur::FindInProject),
+            item(qur::ReplaceInProject),
+            sep(),
+            item(editor::ToggleComment),
+            item(editor::ToggleBlockComment),
+            item(editor::Indent),
+            item(editor::Outdent),
+            item(editor::TrimWhitespace),
+        ]),
+        Menu::new("Selection").items([
+            item(editor::SelectLine),
+            item(qur::ExpandSelection),
+            item(qur::ShrinkSelection),
+            sep(),
+            item(editor::CopyLineUp),
+            item(editor::CopyLineDown),
+            item(editor::MoveLineUp),
+            item(editor::MoveLineDown),
+            item(editor::DeleteLine),
+            item(editor::InsertLineBelow),
+            item(editor::InsertLineAbove),
+            sep(),
+            item(editor::AddNextMatch),
+            item(editor::SelectAllMatches),
+            item(editor::AddCursorAbove),
+            item(editor::AddCursorBelow),
+        ]),
+        Menu::new("View").items([
+            item(qur::CommandPalette),
+            sep(),
+            item(qur::ToggleSidebar).checked(s.sidebar),
+            item(qur::RevealInFiles),
+            item(qur::ToggleBottomPanel).checked(s.bottom_panel),
+            item(qur::ToggleTerminal),
+            item(qur::GitPanel),
+            item(qur::SearchPanel),
+            sep(),
+            M::submenu(Menu::new("Peek Layout").items([
+                item(qur::PeekLayoutA),
+                item(qur::PeekLayoutB),
+                item(qur::PeekLayoutC),
+                item(qur::CyclePeekLayout),
+            ])),
+            M::submenu(Menu::new("Peek").items([
+                item(qur::PeekLive),
+                item(qur::PeekTodo),
+                item(qur::PeekChat),
+                item(qur::PeekChanges),
+            ])),
+            item(qur::FollowAgent).checked(false),
+            sep(),
+            item(editor::ToggleSoftWrap).checked(s.soft_wrap),
+            item(qur::ZoomIn),
+            item(qur::ZoomOut),
+            item(qur::ZoomReset),
+            sep(),
+            item(qur::ToggleFullScreen),
+        ]),
+        Menu::new("Go").items([
+            item(qur::QuickOpen),
+            item(qur::GoToLine),
+            item(qur::GoToSymbol),
+            sep(),
+            item(qur::NavBack),
+            item(qur::NavForward),
+            item(qur::RecentFile),
+            item(editor::JumpToBracket),
+        ]),
+        Menu::new("Agent").items([
+            item(qur::NewAgentTask),
+            item(qur::FocusPrompt),
+            item(qur::StopAgent),
+            item(qur::TakeOver),
+            sep(),
+            item(qur::NextAgent),
+            item(qur::PrevAgent),
+            sep(),
+            item(qur::ReviewChanges),
+            item(qur::Merge),
+            item(qur::KeepWorking),
+            item(qur::DiscardTask),
+            sep(),
+            item(qur::OpenWorktreeInTerminal),
+            item(qur::RevealWorktree),
+        ]),
+        Menu::new("Terminal").items([
+            item(qur::NewTerminal),
+            item(qur::NewAgentTerminal),
+            item(qur::NextTerminal),
+            item(qur::PrevTerminal),
+            item(terminal::Clear),
+            item(qur::CloseTerminal),
+        ]),
+        Menu::new("Window").items([item(qur::Minimize), item(qur::Zoom)]),
+        Menu::new("Help").items([
+            item(qur::KeyboardShortcuts),
+            item(qur::RunDoctor),
+            item(qur::ShowLogs),
+            item(qur::ReportProblem),
+            sep(),
+            titled("About Qur", qur::About),
+        ]),
+    ]
+}

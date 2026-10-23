@@ -1,0 +1,23 @@
+[package]
+name = "qur_app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "qur"
+path = "src/main.rs"
+
+[dependencies]
+qur_config.workspace = true
+qur_editor.workspace = true
+qur_syntax.workspace = true
+qur_theme.workspace = true
+qur_tree.workspace = true
+alacritty_terminal.workspace = true
+futures.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+libc.workspace = true
+nucleo-matcher.workspace = true

@@ -33,3 +33,7 @@ These amend `docs/QUR_HANDOFF.md`. Newest last.
     - **Per window:** each window is one project, so two projects open side by side show two themes. Switching the project in the top-bar switcher swaps the theme instantly with no state loss (decision rules from handoff 12a still apply).
     - **Identity cue:** the project name in the top bar uses the theme's primary text color; nothing else is added. The logo stays black or white by background luminance (never tinted).
     - Opacity (decision 8) can also be set per project with the same scope toggle in the Transparency popover.
+14. **Toolkit: GPUI** (Zed git rev pinned in the workspace; upgrade on purpose, at most once per milestone, re-running the budget). Evidence: `docs/spikes/toolkit.md`.
+15. **Idle memory budget is measured as physical footprint** (Activity Monitor "Memory", `footprint <pid>`), with RSS reported alongside. Same targets: idle < 80 MB, 3 agents < 150 MB.
+16. **Section 15 defaults accepted:** repo at `~/qur`; no file tabs (not even as an option for now); "by PEUR Technologies" only in About. The 6-accent palettes are chosen in M1 and shown to the owner with the M1 report.
+17. **"New Claude Task" is now called "New Agent Terminal"** (`Cmd+Shift+T`) in menus, the command palette and the empty-editor hints. Behaviour is unchanged (decision 12).

@@ -14,6 +14,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+N` | New Window | File | M1+ |
 | `Cmd+Shift+N` | New Agent Task (same as sidebar `+`) | File | M2 |
 | `Cmd+O` | Open Folder… | File | M1+ |
+| `Cmd+Opt+O` | Switch Project… (also: click the project name in the top bar) | File | M1 |
 | `Cmd+Shift+W` | Close Window | File | S |
 | `Cmd+M` | Minimize | Window | S |
 | `Ctrl+Cmd+F` | Toggle Full Screen | View | S |
@@ -86,7 +87,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | Keys | Command | Tier |
 |---|---|---|
 | `Cmd+T` | New terminal | S |
-| `Cmd+Shift+T` | New Claude agent task in its own worktree, shown as a terminal (decision 12) | S |
+| `Cmd+Shift+T` | New Agent Terminal: a Claude agent task in its own worktree, shown as a terminal (decisions 12, 17) | S |
 | `Cmd+W` | Close focused terminal | S |
 | `` Ctrl+` `` | Toggle terminal / focus it | S |
 | `Cmd+K` (terminal focused) | Clear terminal | S |

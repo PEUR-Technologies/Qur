@@ -24,7 +24,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 ## File
 - New Agent Task… `Cmd+Shift+N`
 - New Terminal `Cmd+T`
-- New Claude Task (terminal) `Cmd+Shift+T`
+- New Agent Terminal `Cmd+Shift+T`
 - New Window `Cmd+N`
 - ---
 - Open Folder… `Cmd+O`
@@ -94,7 +94,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Reveal Worktree in Finder
 
 ## Terminal
-- New Terminal `Cmd+T` · New Claude Task (terminal) `Cmd+Shift+T`
+- New Terminal `Cmd+T` · New Agent Terminal `Cmd+Shift+T`
 - Next / Previous Terminal `Cmd+Shift+]` / `Cmd+Shift+[`
 - Clear `Cmd+K`
 - Close Terminal `Cmd+W`
