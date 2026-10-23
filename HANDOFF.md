@@ -12,7 +12,7 @@ Agents are first-class. The sidebar lists agents as buttons. Each agent works in
 
 ## Rules (read before changing anything)
 
-1. **`docs/decisions.md` wins** over everything else (36 owner decisions so far). Then `docs/QUR_HANDOFF.md` (the original spec; its section 0 rules still apply), `docs/keymap.md` and `docs/menus.md`.
+1. **`docs/decisions.md` wins** over everything else (37 owner decisions so far). Then `docs/QUR_HANDOFF.md` (the original spec; its section 0 rules still apply), `docs/keymap.md` and `docs/menus.md`.
 2. **Lightness is the product.** Measure, don't estimate (`scripts/budget.sh`). Budgets: binary under 40 MB, idle physical footprint under 80 MB, 3 agents under 150 MB, first frame under 250 ms, 10k-line file highlighted in under 100 ms, glow under 100 ms, keystroke p99 at most 8.3 ms, search over 5,000 files under 300 ms.
 3. **Ask the owner before:** adding a crate that isn't already compiled in, any network call made by Qur itself, telemetry, cloud features, or UI that isn't in the spec or decisions. So far every feature since M4 reused crates already in the build.
 4. **Agents use their own CLI logins.** Never set or ask for `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`. **No Codex for now** (decision 6).
