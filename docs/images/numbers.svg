@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 240" width="960" height="240" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <rect width="960" height="240" rx="14" fill="#0b0b0c"/>
+
+  <!-- app size bars (scale: 431 MB = 320 px) -->
+  <text x="32" y="44" font-size="13" fill="#7a7a80" letter-spacing="0.6">APP SIZE</text>
+  <g font-size="14">
+    <text x="32" y="88" fill="#f2f2f2" font-weight="600">Qur</text>
+    <rect x="112" y="72" width="19" height="24" rx="4" fill="#ff7a45"/>
+    <text x="140" y="90" fill="#f2f2f2" font-weight="600">25 MB</text>
+
+    <text x="32" y="138" fill="#9a9aa0">Orca</text>
+    <rect x="112" y="122" width="189" height="24" rx="4" fill="#3a3a3f"/>
+    <text x="310" y="140" fill="#9a9aa0">254 MB</text>
+
+    <text x="32" y="188" fill="#9a9aa0">Superset</text>
+    <rect x="112" y="172" width="320" height="24" rx="4" fill="#3a3a3f"/>
+    <text x="440" y="190" fill="#9a9aa0">431 MB</text>
+  </g>
+
+  <line x1="512" y1="28" x2="512" y2="212" stroke="#2a2a2e"/>
+
+  <!-- tiles -->
+  <g text-anchor="middle">
+    <text x="636" y="88" font-size="34" font-weight="700" fill="#ff7a45">113 ms</text>
+    <text x="636" y="112" font-size="13" fill="#9a9aa0">launch to first frame</text>
+    <text x="828" y="88" font-size="34" font-weight="700" fill="#ff7a45">73 MB</text>
+    <text x="828" y="112" font-size="13" fill="#9a9aa0">idle memory</text>
+    <text x="636" y="172" font-size="34" font-weight="700" fill="#ff7a45">81 ms</text>
+    <text x="636" y="196" font-size="13" fill="#9a9aa0">agent write → glow</text>
+    <text x="828" y="172" font-size="34" font-weight="700" fill="#ff7a45">0</text>
+    <text x="828" y="196" font-size="13" fill="#9a9aa0">network connections</text>
+  </g>
+</svg>
