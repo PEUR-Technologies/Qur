@@ -142,6 +142,9 @@ pub enum SessionUpdate {
     CurrentMode(String),
     /// `config_option_update`: the agent's whole set of session settings.
     ConfigOptions(Vec<ConfigOption>),
+    /// `usage_update`: context tokens used of the window, and the session's
+    /// cost so far (USD) when the agent knows it.
+    Usage { used: u64, size: u64, cost: Option<f64> },
     Other { kind: String, raw: Value },
 }
 
@@ -256,6 +259,11 @@ impl SessionUpdate {
             ),
             "current_mode_update" => SessionUpdate::CurrentMode(s(u, "currentModeId").unwrap_or_default()),
             "config_option_update" => SessionUpdate::ConfigOptions(ConfigOption::parse_list(u)),
+            "usage_update" => SessionUpdate::Usage {
+                used: u.get("used").and_then(Value::as_u64).unwrap_or(0),
+                size: u.get("size").and_then(Value::as_u64).unwrap_or(0),
+                cost: u.pointer("/cost/amount").and_then(Value::as_f64),
+            },
             k => SessionUpdate::Other { kind: k.to_string(), raw: u.clone() },
         }
     }
@@ -397,6 +405,13 @@ pub struct ToolCall {
     pub locations: Vec<Location>,
     pub content: Vec<ToolContent>,
     pub raw_input: Option<Value>,
+    /// The tool's raw result, when no other field carries it.
+    pub raw_output: Option<Value>,
+    /// A command's output (`_meta.terminal_output`, sent because Qur
+    /// advertises `terminal_output`), and its exit once it ended: the code,
+    /// or None when the agent doesn't know it.
+    pub output: Option<String>,
+    pub exit: Option<Option<i64>>,
 }
 
 impl ToolCall {
@@ -409,6 +424,28 @@ impl ToolCall {
             locations: u.get("locations").map(parse_locations).unwrap_or_default(),
             content: u.get("content").map(parse_content).unwrap_or_default(),
             raw_input: u.get("rawInput").filter(|v| !v.is_null()).cloned(),
+            ..Default::default()
+        }
+        .with_output(&ToolCallUpdate::parse(u))
+    }
+
+    fn with_output(mut self, u: &ToolCallUpdate) -> Self {
+        self.apply_output(u);
+        self
+    }
+
+    fn apply_output(&mut self, u: &ToolCallUpdate) {
+        if let Some(r) = &u.raw_output {
+            self.raw_output = Some(r.clone());
+        }
+        if let Some(o) = &u.output {
+            self.output = Some(o.clone());
+        }
+        if let Some(d) = &u.output_delta {
+            self.output.get_or_insert_with(String::new).push_str(d);
+        }
+        if let Some(e) = u.exit {
+            self.exit = Some(e);
         }
     }
 
@@ -433,6 +470,7 @@ impl ToolCall {
         if let Some(r) = &u.raw_input {
             self.raw_input = Some(r.clone());
         }
+        self.apply_output(u);
     }
 }
 
@@ -445,6 +483,13 @@ pub struct ToolCallUpdate {
     pub locations: Option<Vec<Location>>,
     pub content: Option<Vec<ToolContent>>,
     pub raw_input: Option<Value>,
+    pub raw_output: Option<Value>,
+    /// `_meta.terminal_output.data`: the command's whole output so far.
+    pub output: Option<String>,
+    /// `_meta.terminal_output_delta.data`: more output.
+    pub output_delta: Option<String>,
+    /// `_meta.terminal_exit`: the command ended (exit code if known).
+    pub exit: Option<Option<i64>>,
 }
 
 impl ToolCallUpdate {
@@ -458,6 +503,10 @@ impl ToolCallUpdate {
             locations: present("locations").map(parse_locations),
             content: present("content").map(parse_content),
             raw_input: present("rawInput").cloned(),
+            raw_output: present("rawOutput").cloned(),
+            output: u.pointer("/_meta/terminal_output/data").and_then(Value::as_str).map(str::to_owned),
+            output_delta: u.pointer("/_meta/terminal_output_delta/data").and_then(Value::as_str).map(str::to_owned),
+            exit: u.pointer("/_meta/terminal_exit").filter(|v| v.is_object()).map(|e| e.get("exit_code").and_then(Value::as_i64)),
         }
     }
 

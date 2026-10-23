@@ -33,8 +33,31 @@ fn parses_real_claude_updates() {
     assert!(ups.iter().any(|u| matches!(u, SessionUpdate::ToolCallUpdate(t) if t.locations.as_ref().is_some_and(|l| !l.is_empty()))));
     assert!(ups.iter().any(|u| matches!(u, SessionUpdate::ToolCallUpdate(t) if t.status == Some(ToolStatus::Completed))));
     assert!(ups.iter().any(|u| matches!(u, SessionUpdate::ToolCallUpdate(t) if t.content.is_some())));
-    // Kinds Qur doesn't model are kept as Other, never dropped or panicking.
-    assert!(ups.iter().any(|u| matches!(u, SessionUpdate::Other { kind, .. } if kind == "usage_update")));
+    // Context usage (shown above the prompt).
+    assert!(ups.iter().any(|u| matches!(u, SessionUpdate::Usage { used: 24577, size: 1_000_000, cost: None })));
+}
+
+#[test]
+fn command_output_and_exit_from_meta() {
+    use serde_json::json;
+    // What claude-agent-acp sends a client that advertises `terminal_output`.
+    let start = SessionUpdate::parse(&json!({
+        "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "ls", "kind": "execute", "status": "pending",
+        "content": [{ "type": "terminal", "terminalId": "t1" }], "rawInput": { "command": "ls" },
+        "_meta": { "terminal_info": { "terminal_id": "t1" } }
+    }));
+    let SessionUpdate::ToolCall(mut t) = start else { panic!("tool_call") };
+    assert_eq!(t.content, [ToolContent::Terminal("t1".into())]);
+    let out = ToolCallUpdate::parse(&json!({ "toolCallId": "t1", "_meta": { "terminal_output": { "terminal_id": "t1", "data": "a\nb\n" } } }));
+    t.apply(&out);
+    assert_eq!(t.output.as_deref(), Some("a\nb\n"));
+    assert_eq!(t.exit, None, "still running");
+    let done = ToolCallUpdate::parse(&json!({ "toolCallId": "t1", "status": "completed", "_meta": { "terminal_exit": { "terminal_id": "t1", "exit_code": 2, "signal": null } } }));
+    t.apply(&done);
+    assert_eq!(t.exit, Some(Some(2)));
+    let unknown = ToolCallUpdate::parse(&json!({ "toolCallId": "t1", "_meta": { "terminal_exit": { "terminal_id": "t1", "exit_code": null } } }));
+    t.apply(&unknown);
+    assert_eq!(t.exit, Some(None), "ended, code unknown");
 }
 
 #[test]

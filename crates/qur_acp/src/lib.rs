@@ -333,8 +333,10 @@ impl Client {
             "initialize",
             json!({
                 "protocolVersion": PROTOCOL_VERSION,
-                // Minimal: no fs, no terminal. Agents use their own tools in the worktree.
-                "clientCapabilities": {},
+                // No fs, no terminal: agents use their own tools in the worktree.
+                // `terminal_output` (Zed's extension, which claude-agent-acp
+                // reads) gets a command's output and exit code on its tool call.
+                "clientCapabilities": { "_meta": { "terminal_output": true } },
                 "clientInfo": { "name": "qur", "title": "Qur", "version": env!("CARGO_PKG_VERSION") }
             }),
             r,
