@@ -68,3 +68,7 @@ These amend `docs/QUR_HANDOFF.md`. Newest last.
     - **How:** the system WKWebView (no bundled engine). Pages run in WebKit's own processes. It's opt-in per task and freed when idle.
     - **Measured cost** on the owner's Mac (M3 probe): +8 MB in Qur's own process and about +55 MB in WebKit's processes for a simple page. Those processes exit when the page closes.
     - Modelled on Orca's Design Mode (`docs/research/orca.md`, item P8).
+27. **Sidebar: agents are buttons, only FILES is a dropdown** (owner, 2026-10-23). Amends decision 19.
+    - AGENTS: each ACP task and Agent Terminal is a button with its accent dot and title (plus `+n −m`, `⚠`, `!`, `✓`, `✕` or "stopped" on the right). It fills with the agent's accent while the agent is active (ACP: starting, working or needs you; terminal: output in the last 2 s). The selected agent gets an accent outline.
+    - Clicking an agent's button opens its session: an Agent Terminal's terminal (restarted in its worktree if it had stopped), or an ACP agent's stage.
+    - FILES is the only collapsible section: its header toggles the tree (chevron), open by default. TERMINALS and SOURCE CONTROL stay plain sections.

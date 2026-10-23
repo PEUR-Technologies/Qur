@@ -121,6 +121,8 @@ pub struct Workspace {
     code_prev_focus: Option<FocusHandle>,
     sidebar: bool,
     sidebar_w: f32,
+    /// FILES is the one collapsible section in the left column.
+    files_open: bool,
     resizing: bool,
     overlay: Option<Overlay>,
     /// File picker shown over the New Agent Task dialog (`@` mentions).
@@ -199,6 +201,7 @@ impl Workspace {
             code_prev_focus: None,
             sidebar: true,
             sidebar_w: SIDEBAR_DEFAULT_W,
+            files_open: true,
             resizing: false,
             overlay: None,
             mention_over_dialog: None,
@@ -2330,6 +2333,70 @@ impl Workspace {
             )
     }
 
+    /// An agent in the AGENTS section: a button that fills with the agent's
+    /// accent while it is active (working, or its terminal is busy). Clicking it
+    /// opens the agent's session.
+    #[allow(clippy::too_many_arguments)]
+    fn agent_button(
+        &self,
+        id: SharedString,
+        accent: Rgba,
+        title: String,
+        badge: String,
+        active: bool,
+        selected: bool,
+        look: &Look,
+    ) -> gpui::Stateful<gpui::Div> {
+        let ui = &look.theme.ui;
+        let tint = |a: f32| {
+            let mut h = look.c(accent);
+            h.a = a;
+            h
+        };
+        div()
+            .id(id)
+            .mx(look.z(6.))
+            .mb(look.z(4.))
+            .px(look.z(8.))
+            .py(look.z(5.))
+            .rounded(look.z(5.))
+            .border_1()
+            .flex()
+            .items_center()
+            .gap(look.z(8.))
+            .cursor_pointer()
+            .map(|d| match (active, selected) {
+                (true, _) => d.bg(tint(if selected { 0.32 } else { 0.22 })).border_color(look.c(accent)),
+                (false, true) => d.bg(look.c(ui.active_bg)).border_color(tint(0.6)),
+                (false, false) => d.border_color(look.c(ui.border)).hover(|d| d.bg(look.c(ui.hover_bg))),
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .size(look.z(8.))
+                    .rounded_full()
+                    .map(|d| if active { d.bg(look.c(accent)) } else { d.border_1().border_color(look.c(accent)) }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_size(look.text(-1.))
+                    .text_color(look.c(if active || selected { ui.text } else { ui.text_secondary }))
+                    .child(title),
+            )
+            .when(!badge.is_empty(), |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .text_size(look.text(-2.))
+                        .text_color(look.c(if badge.ends_with('!') { accent } else { ui.text_muted }))
+                        .child(badge),
+                )
+            })
+    }
+
     fn sidebar(&self, look: &Look, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = look.theme.ui.clone();
         let mut agents: Vec<gpui::AnyElement> = Vec::new();
@@ -2339,17 +2406,17 @@ impl Workspace {
             let sel = self.selected == Some(Selected::Agent(id.clone()));
             let ch = t.changes.read(cx);
             let (add, del, conflicts) = (ch.totals.0, ch.totals.1, !ch.conflicts.is_empty());
-            let mut detail = match (&t.status, t.last_line()) {
-                (Status::Working | Status::Done | Status::Idle, Some(l)) => l,
-                (Status::Error(_), _) => format!("{} · error", t.def.label),
-                (s, _) => format!("{} · {}", t.def.label, s.label()),
-            };
-            if add + del > 0 {
-                detail = format!("+{add} −{del}{} · {detail}", if conflicts { " ⚠" } else { "" });
+            let active = matches!(t.status, Status::Working | Status::Starting | Status::NeedsYou);
+            let mut badge = if add + del > 0 { format!("+{add} −{del}{}", if conflicts { " ⚠" } else { "" }) } else { String::new() };
+            if !matches!(t.status, Status::Working | Status::Starting) {
+                let g = t.status.glyph();
+                if g != "·" {
+                    badge = if badge.is_empty() { g.to_string() } else { format!("{badge} {g}") };
+                }
             }
             let unread = self.unread.contains(&id);
             let row = self
-                .session_row(format!("agent-{id}").into(), Some(t.accent), t.record.title.clone(), detail, t.status.glyph(), sel, look)
+                .agent_button(format!("agent-{id}").into(), t.accent, t.record.title.clone(), badge, active, sel, look)
                 .when(unread, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
                 .on_click(cx.listener(move |this, _, window, cx| this.select(Some(Selected::Agent(id.clone())), window, cx)));
             agents.push(row.into_any_element());
@@ -2361,9 +2428,9 @@ impl Workspace {
             let s = t.term_id.and_then(|tid| panel.session_by_id(tid));
             let busy = s.is_some_and(|s| s.is_busy());
             let title = s.and_then(|s| s.first_line.clone()).unwrap_or_else(|| t.record.title.clone());
-            let detail = if s.is_some() { "terminal".to_string() } else { "terminal · stopped".to_string() };
+            let badge = if s.is_some() { String::new() } else { "stopped".to_string() };
             let row = self
-                .session_row(format!("tt-{id}").into(), Some(t.accent), title, detail, if busy { "~" } else { "·" }, sel, look)
+                .agent_button(format!("tt-{id}").into(), t.accent, title, badge, busy, sel, look)
                 .on_click(cx.listener(move |this, _, window, cx| this.select(Some(Selected::TermTask(id.clone())), window, cx)));
             agents.push(row.into_any_element());
         }
@@ -2388,6 +2455,7 @@ impl Workspace {
             format!("FILES · {}", root.file_name().unwrap_or_default().to_string_lossy()).into()
         };
         let empty_agents = agents.is_empty();
+        let agents = div().pt(look.z(2.)).flex().flex_col().children(agents);
         div()
             .relative()
             .w(look.z(self.sidebar_w))
@@ -2412,7 +2480,7 @@ impl Workspace {
                         .on_click(cx.listener(|this, _, window, cx| this.new_agent_task(&qur::NewAgentTask, window, cx))),
                 ),
             )
-            .children(agents)
+            .child(agents)
             .when(empty_agents, |d| {
                 d.child(
                     div()
@@ -2442,8 +2510,28 @@ impl Workspace {
                 self.session_row("git".into(), None, branch, detail, if self.merge.is_some() { "!" } else { "" }, self.selected == Some(Selected::Git), look)
                     .on_click(cx.listener(|this, _, window, cx| this.show_git(&qur::GitPanel, window, cx)))
             })
-            .child(self.section_header(files_label, look).pt(look.z(14.)))
-            .children(tree.map(|t| div().flex_1().min_h(px(0.)).flex().flex_col().child(t)))
+            .child(
+                div()
+                    .id("files-toggle")
+                    .cursor_pointer()
+                    .child(
+                        self.section_header(files_label, look)
+                            .pt(look.z(14.))
+                            .gap(look.z(4.))
+                            .child(
+                                svg()
+                                    .path(if self.files_open { icon::CHEVRON_DOWN } else { icon::CHEVRON_RIGHT })
+                                    .size(look.z(12.))
+                                    .flex_none()
+                                    .text_color(look.c(ui.text_muted)),
+                            ),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.files_open = !this.files_open;
+                        cx.notify();
+                    })),
+            )
+            .when(self.files_open, |d| d.children(tree.map(|t| div().flex_1().min_h(px(0.)).flex().flex_col().child(t))))
             // Drag handle on the right edge.
             .child(
                 div()
@@ -2472,23 +2560,9 @@ impl Workspace {
             Some(Selected::TermTask(id)) => {
                 if let Some(t) = self.term_task(id) {
                     let term = div().size_full().bg(look.bg(ui.panel_bg)).pt(look.z(6.)).child(self.terms.clone());
-                    return match self.layout {
-                        Layout::A => div()
-                            .size_full()
-                            .flex()
-                            .child(div().flex_1().min_w(px(0.)).child(if t.show_changes { t.changes.clone().into_any_element() } else { t.live.clone().into_any_element() }))
-                            .child(div().w(gpui::relative(0.45)).flex_none().h_full().border_l_1().border_color(look.c(ui.border)).child(term))
-                            .into_any_element(),
-                        Layout::B if t.show_live => div().size_full().child(t.live.clone()).into_any_element(),
-                        Layout::B => term.into_any_element(),
-                        Layout::C => div()
-                            .size_full()
-                            .flex()
-                            .flex_col()
-                            .child(div().flex_1().min_h(px(0.)).child(t.live.clone()))
-                            .child(div().h(gpui::relative(0.42)).flex_none().border_t_1().border_color(look.c(ui.border)).child(term))
-                            .into_any_element(),
-                    };
+                    // The agent's terminal is the whole stage (decision 27). Review
+                    // Changes still swaps it for the diff until Keep Working.
+                    return if t.show_changes { t.changes.clone().into_any_element() } else { term.into_any_element() };
                 }
             }
             Some(Selected::Shell(_)) => {
