@@ -312,11 +312,14 @@ pub struct ProjectChecks {
     pub timeout: u64,
     /// Send a failure to the agent right away instead of prefilling the prompt.
     pub auto_send: bool,
+    /// Also run after an Agent Terminal goes quiet having changed files (it
+    /// has no real turns, so this is a guess; off by default).
+    pub terminal: bool,
 }
 
 impl Default for ProjectChecks {
     fn default() -> Self {
-        ProjectChecks { command: None, timeout: 300, auto_send: false }
+        ProjectChecks { command: None, timeout: 300, auto_send: false, terminal: false }
     }
 }
 

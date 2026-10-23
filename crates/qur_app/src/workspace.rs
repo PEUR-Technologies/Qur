@@ -56,6 +56,18 @@ struct TermTask {
     changes: Entity<ChangesView>,
     /// The left pane shows Changes instead of Live.
     show_changes: bool,
+    /// New Agent Task text and setup command, used on the first start only.
+    first_run: Option<FirstRun>,
+    /// Task text to type once the agent first goes quiet (`prompt = "type"`).
+    pending_type: Option<String>,
+    /// Turn detection (M5): the terminal was busy, and files changed meanwhile.
+    was_busy: bool,
+    wrote: bool,
+}
+
+struct FirstRun {
+    prompt: String,
+    setup: Option<String>,
 }
 
 /// A merge stopped on conflicts (resolved in the code modal, then Finish).
@@ -99,6 +111,8 @@ enum PickKind {
 enum Overlay {
     Picker(Entity<Picker>, PickKind),
     GoTo(Entity<TextInput>),
+    /// Rename Agent…: the selected agent's name.
+    Rename(Entity<TextInput>),
     Transparency { project_scope: bool },
     NewTask { input: Entity<PromptInput>, agent: usize },
 }
@@ -167,8 +181,20 @@ impl Workspace {
         let terms = cx.new(TerminalPanel::new);
         let subs = vec![
             cx.subscribe_in(&terms, window, |this, _, ev: &PanelEvent, window, cx| {
-                if let PanelEvent::Closed = ev {
-                    this.prune_closed_terms(window, cx);
+                match ev {
+                    PanelEvent::Closed => this.prune_closed_terms(window, cx),
+                    PanelEvent::Activity => this.terminal_activity(window, cx),
+                    // Cmd-click in a terminal (M5): the user asked for it.
+                    PanelEvent::OpenUrl(url) => {
+                        if let Err(e) = std::process::Command::new("/usr/bin/open").arg(url).spawn() {
+                            this.flash(format!("Couldn't open {url}: {e}"), cx);
+                        }
+                    }
+                    PanelEvent::OpenPath(path, at) => {
+                        let at = at.map(|(l, c)| Point { line: l.saturating_sub(1) as usize, col: c.saturating_sub(1) as usize });
+                        let path = path.clone();
+                        this.open_path_at(&path, at, window, cx);
+                    }
                 }
                 cx.notify();
             }),
@@ -531,7 +557,20 @@ impl Workspace {
         let id = record.id.clone();
         let sub = cx.subscribe_in(&changes, window, move |this, _, ev: &ChangesEvent, window, cx| this.on_changes_event(&id, ev, window, cx));
         self._subs.push(sub);
-        self.term_tasks.push(TermTask { record, term_id: None, accent, monitor, live, show_live: false, changes, show_changes: false });
+        self.term_tasks.push(TermTask {
+            record,
+            term_id: None,
+            accent,
+            monitor,
+            live,
+            show_live: false,
+            changes,
+            show_changes: false,
+            first_run: None,
+            pending_type: None,
+            was_busy: false,
+            wrote: false,
+        });
         self.refresh_overlaps(cx);
     }
 
@@ -540,6 +579,9 @@ impl Workspace {
         let sub = cx.subscribe_in(monitor, window, |this, m, ev: &MonitorEvent, window, cx| match ev {
             MonitorEvent::Files(paths) => {
                 let root = m.read(cx).worktree.clone();
+                if let Some(t) = this.term_tasks.iter_mut().find(|t| t.record.worktree == root) {
+                    t.wrote = true;
+                }
                 let paths = paths.clone();
                 this.files_changed(&root, &paths, window, cx);
             }
@@ -712,6 +754,7 @@ impl Workspace {
                         mode: def.mode,
                         // Dev/test: QUR_DEBUG_BROWSER_URL="http://localhost:8765/{slug}/index.html".
                         browser_url: std::env::var("QUR_DEBUG_BROWSER_URL").ok().map(|u| u.replace("{slug}", &c.slug)),
+                        renamed: false,
                     };
                     let debug_browser = std::env::var_os("QUR_DEBUG_BROWSER_URL").is_some();
                     match def.mode {
@@ -764,6 +807,9 @@ impl Workspace {
                         }
                         Mode::Terminal => {
                             this.add_term_task(record, window, cx);
+                            if let Some(t) = this.term_tasks.last_mut() {
+                                t.first_run = Some(FirstRun { prompt: text.clone(), setup: setup.clone() });
+                            }
                             this.apply_look(window, cx);
                             this.save_tasks(cx);
                             this.select(Some(Selected::TermTask(c.slug)), window, cx);
@@ -808,6 +854,7 @@ impl Workspace {
                         created: qur_agents::now_secs(),
                         mode: Mode::Terminal,
                         browser_url: None,
+                        renamed: false,
                     };
                     this.add_term_task(record, window, cx);
                     this.apply_look(window, cx);
@@ -826,8 +873,28 @@ impl Workspace {
         let Some(ix) = self.term_tasks.iter().position(|t| t.record.id == id) else { return };
         let alive = self.term_tasks[ix].term_id.is_some_and(|tid| self.terms.update(cx, |p, cx| p.activate_id(tid, cx)));
         if !alive {
+            let def = self.roster.get(&self.term_tasks[ix].record.agent).filter(|d| d.mode == Mode::Terminal).cloned();
+            let mut command = def.as_ref().map(shell_command).unwrap_or_else(|| "claude".into());
+            // First start of a New Agent Task: pass the task text and run the
+            // project's setup first (decision 22), like ACP tasks.
+            if let Some(first) = self.term_tasks[ix].first_run.take() {
+                let prompt = first.prompt.trim().to_string();
+                if !prompt.is_empty() {
+                    match def.as_ref().map(AgentDef::prompt_via).unwrap_or(qur_agents::PromptVia::Type) {
+                        qur_agents::PromptVia::Arg => command = format!("{command} {}", shell_quote(&prompt)),
+                        qur_agents::PromptVia::Flag(f) => command = format!("{command} {} {}", shell_quote(&f), shell_quote(&prompt)),
+                        qur_agents::PromptVia::Type => self.term_tasks[ix].pending_type = Some(prompt),
+                    }
+                }
+                if let Some(setup) = first.setup {
+                    command = format!(
+                        "echo {}; if {setup}; then {command}; else echo; echo {}; fi",
+                        shell_quote(&format!("qur: running setup: {setup}")),
+                        shell_quote("qur: setup failed. Fix it, then start the agent from this shell.")
+                    );
+                }
+            }
             let t = &self.term_tasks[ix];
-            let command = self.roster.get(&t.record.agent).filter(|d| d.mode == Mode::Terminal).map(shell_command).unwrap_or_else(|| "claude".into());
             let kind = Kind::Agent { task: t.record.title.clone(), command };
             let wt = t.record.worktree.clone();
             let label = t.record.title.clone();
@@ -836,6 +903,62 @@ impl Workspace {
         }
         let f = self.terms.read(cx).focus.clone();
         window.focus(&f, cx);
+    }
+
+    /// Agent Terminals have no turns, so "busy, then quiet" stands in for one
+    /// (M5): deliver a typed first prompt once the agent is first quiet, and
+    /// after a busy stretch that changed files, run the project's checks if
+    /// `[checks] terminal = true`.
+    fn terminal_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut turns = Vec::new();
+        let mut typed = Vec::new();
+        let mut renamed = false;
+        {
+            let panel = self.terms.read(cx);
+            for t in &mut self.term_tasks {
+                let Some(s) = t.term_id.and_then(|tid| panel.session_by_id(tid)) else { continue };
+                // Name: the user's rename, else what the agent says it's doing
+                // (its terminal title), else the first line typed.
+                if !t.record.renamed
+                    && let Some(name) = s.agent_title().or_else(|| s.first_line.clone())
+                    && name != t.record.title
+                {
+                    t.record.title = name;
+                    renamed = true;
+                }
+                let busy = s.is_busy();
+                let started = s.has_output();
+                if !busy && started && let Some(p) = t.pending_type.take() {
+                    // Startup (and setup) isn't a turn: start counting from here.
+                    typed.push((s.id, p));
+                    t.was_busy = false;
+                    t.wrote = false;
+                    continue;
+                }
+                if t.pending_type.is_some() {
+                    continue;
+                }
+                if busy {
+                    t.was_busy = true;
+                } else if std::mem::take(&mut t.was_busy) && std::mem::take(&mut t.wrote) {
+                    turns.push(t.record.id.clone());
+                }
+            }
+        }
+        if renamed {
+            self.save_tasks(cx);
+        }
+        for (tid, p) in typed {
+            self.terms.update(cx, |panel, cx| {
+                panel.type_text(tid, &p, cx);
+                panel.send_keys(tid, "\r");
+            });
+        }
+        if !turns.is_empty() && ProjectSettings::load(&self.project_id).checks.terminal {
+            for id in turns {
+                self.run_checks(&id, false, window, cx);
+            }
+        }
     }
 
     fn new_terminal_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -2236,6 +2359,58 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Rename Agent… (also double-click its button): the name sticks; an
+    /// empty name goes back to following the agent.
+    fn rename_agent(&mut self, _: &qur::RenameAgent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((id, ..)) = self.selected_worktree(cx) else {
+            return self.flash("Select an agent first", cx);
+        };
+        let Some((_, _, current, _)) = self.task_parts(&id, cx) else { return };
+        self.close_overlays(window, cx);
+        self.prev_focus = window.focused(cx);
+        let input = cx.new(|cx| {
+            let mut i = TextInput::new("Agent name (empty = let the agent name it)", cx);
+            i.set_text(&current, cx);
+            i
+        });
+        let sub = cx.subscribe_in(&input, window, move |this, input, ev: &InputEvent, window, cx| match ev {
+            InputEvent::Confirm { .. } => {
+                let name = input.read(cx).text.trim().to_string();
+                this.close_overlays(window, cx);
+                this.set_task_name(&id, name, cx);
+            }
+            InputEvent::Cancel => this.close_overlays(window, cx),
+            _ => {}
+        });
+        self._subs.push(sub);
+        let f = input.read(cx).focus.clone();
+        window.focus(&f, cx);
+        self.overlay = Some(Overlay::Rename(input));
+        cx.notify();
+    }
+
+    fn set_task_name(&mut self, id: &str, name: String, cx: &mut Context<Self>) {
+        let renamed = !name.is_empty();
+        if let Some(a) = self.agent(id).cloned() {
+            a.update(cx, |a, cx| {
+                a.record.renamed = renamed;
+                if renamed {
+                    a.record.title = name.clone();
+                }
+                cx.emit(AgentEvent::Changed);
+                cx.notify();
+            });
+        }
+        if let Some(t) = self.term_tasks.iter_mut().find(|t| t.record.id == id) {
+            t.record.renamed = renamed;
+            if renamed {
+                t.record.title = name;
+            }
+        }
+        self.save_tasks(cx);
+        cx.notify();
+    }
+
     fn new_agent_task(&mut self, _: &qur::NewAgentTask, window: &mut Window, cx: &mut Context<Self>) {
         self.close_overlays(window, cx);
         self.prev_focus = window.focused(cx);
@@ -2381,6 +2556,7 @@ impl Workspace {
                     created: 0,
                     mode: Mode::Terminal,
                     browser_url: None,
+                    renamed: false,
                 };
                 this.add_term_task(record, window, cx);
                 // Show the tree without starting a terminal process.
@@ -2658,7 +2834,12 @@ impl Workspace {
             let row = self
                 .agent_button(format!("agent-{id}").into(), t.accent, t.record.title.clone(), badge, active, sel, look)
                 .when(unread, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
-                .on_click(cx.listener(move |this, _, window, cx| this.select(Some(Selected::Agent(id.clone())), window, cx)));
+                .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
+                    this.select(Some(Selected::Agent(id.clone())), window, cx);
+                    if ev.click_count() == 2 {
+                        this.rename_agent(&qur::RenameAgent, window, cx);
+                    }
+                }));
             agents.push(row.into_any_element());
         }
         let panel = self.terms.read(cx);
@@ -2667,11 +2848,16 @@ impl Workspace {
             let sel = self.selected == Some(Selected::TermTask(id.clone()));
             let s = t.term_id.and_then(|tid| panel.session_by_id(tid));
             let busy = s.is_some_and(|s| s.is_busy());
-            let title = s.and_then(|s| s.first_line.clone()).unwrap_or_else(|| t.record.title.clone());
+            let title = t.record.title.clone();
             let badge = with_check(if s.is_some() { String::new() } else { "stopped".to_string() }, self.checks.get(&id));
             let row = self
                 .agent_button(format!("tt-{id}").into(), t.accent, title, badge, busy, sel, look)
-                .on_click(cx.listener(move |this, _, window, cx| this.select(Some(Selected::TermTask(id.clone())), window, cx)));
+                .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
+                    this.select(Some(Selected::TermTask(id.clone())), window, cx);
+                    if ev.click_count() == 2 {
+                        this.rename_agent(&qur::RenameAgent, window, cx);
+                    }
+                }));
             agents.push(row.into_any_element());
         }
         let shells: Vec<gpui::AnyElement> = self
@@ -2923,7 +3109,7 @@ impl Workspace {
         };
         match self.overlay.as_ref()? {
             Overlay::Picker(p, _) => Some(centered(p.clone().into_any_element())),
-            Overlay::GoTo(g) => Some(centered(
+            Overlay::GoTo(g) | Overlay::Rename(g) => Some(centered(
                 div()
                     .w(look.z(360.))
                     .px(look.z(10.))
@@ -3321,6 +3507,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::merge_action))
             .on_action(cx.listener(Self::run_checks_action))
             .on_action(cx.listener(Self::run_project))
+            .on_action(cx.listener(Self::rename_agent))
             .on_action(cx.listener(Self::git_stage_all))
             .on_action(cx.listener(Self::git_unstage_all))
             .on_action(cx.listener(Self::git_commit))
