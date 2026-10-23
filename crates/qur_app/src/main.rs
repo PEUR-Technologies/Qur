@@ -6,8 +6,10 @@
 mod assets;
 mod agent_view;
 mod browser_view;
+mod changes_view;
 mod commands;
 mod editor_view;
+mod git_panel;
 mod input;
 mod live;
 mod look;

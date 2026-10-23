@@ -34,7 +34,22 @@ Summary of the owner decisions so far:
 
 ## Status
 
-**M0–M3 and Browser + Inspect are done.** Commits: "M0: spikes", "M1: editor shell", "M2: agents in worktrees", "M3: Live view + heatmap", "Browser + Inspect". The repo lives at https://github.com/PEUR-Technologies/Qur (private). Next is **M4**.
+**M0–M3 and Browser + Inspect are done** and on `main`. Commits: "M0: spikes", "M1: editor shell", "M2: agents in worktrees", "M3: Live view + heatmap", "Browser + Inspect", "Add README". The repo lives at https://github.com/PEUR-Technologies/Qur (private).
+
+**M4 (Changes + Merge + Git panel) is in progress on the branch `m4-wip`.** It builds, and all 144 workspace tests pass (qur_git: 16 passed, 1 timing test ignored). The UI flows have **not** been verified end to end yet. Merge `m4-wip` into `main` only after the checks under "Next" pass.
+
+M4 built so far (on `m4-wip`):
+- **`qur_git` crate** (std + git CLI only):
+  - `task_diff` and `diff_totals` (temp index copy with intent-to-add for untracked files; renames via `-M`; settled at about 60 ms on big-repo).
+  - `commit_all`, `precheck`, and `merge_clean` → `Merged | UpToDate | Conflicts | Refused`. Merge uses merge-tree → commit-tree → read-tree → update-ref, so the user's index, stash and untracked files stay byte-identical (tested). If HEAD moves mid-merge it rolls back and refuses.
+  - The conflict path: `start_conflict_merge`, `find_conflicts`, `resolve` (Ours/Theirs/Both, diff3-aware), `finish_merge`, `abort_merge`.
+  - The Git panel backend: `status` (with ahead/behind), `stage`, `unstage`, `commit` (runs the user's hooks), `discard_unstaged`, `file_diff`.
+- **App:**
+  - `changes_view.rs`: the task's diff with word emphasis, line comments sent back to the agent as one prompt, a conflict pre-check, and Merge / Keep working / Discard.
+  - `git_panel.rs` (`Ctrl+Shift+G`, SOURCE CONTROL row in the sidebar): status, stage and unstage, file diff, commit with `Cmd+Enter`, and Finish/Abort merge.
+  - The editor conflict bar (Prev, Next, Accept ours/theirs/both). Esc steps out of find, then multi-cursor, then closes.
+  - `+n −m ⚠` on agent rows, the Changes tab in the agent stage, and Merge into My Branch, Review Changes and Keep Working in the menus and palette.
+  - After a merge, Qur offers to remove the task (the branch is kept as a safety net).
 
 Browser + Inspect delivered (decision 26):
 - `qur_browser`: a system WKWebView embedded in GPUI's NSView, plus an injected inspector. It reports picks (selector, HTML, styles, rect, React/`data-qur-source` source), page text, SPA navigation and load errors, and takes snapshots.
@@ -102,22 +117,38 @@ spikes/               M0 spikes (acp_spike, worktree_spike.sh, toolkit_gpui, too
 
 ```sh
 cargo build --release -p qur_app && target/release/qur ~/some/project   # or a file; no arg = last project
-cargo test --release --workspace                 # 84 tests, incl. the theme contrast test
+cargo test --release --workspace                 # 144 tests, incl. the theme contrast test and qur_git
 scripts/budget.sh 5                              # needs an unlocked screen; prefer AC power
 QUR_DEBUG_ACTIONS="qur::ThemePicker" scripts/shot.sh out.png <file>   # scripted screenshot
 python3 spikes/fixtures/gen.py                   # fixtures (once)
 spikes/worktree_spike.sh claude claude-agent-acp # M0 ACP + worktree + merge check
 ```
 
-Env: `QUR_HOME` (settings folder; **always set it to a scratch dir in tests**, so the owner's real settings stay untouched), `QUR_BENCH=first_frame|scroll|type|theme`, `QUR_DEBUG_ACTIONS` (comma-separated action names, `wait:<ms>`).
+Env:
+- `QUR_HOME`: the settings folder. **Always set it to a scratch dir in tests**, so the owner's real settings stay untouched.
+- `QUR_BENCH=first_frame|scroll|type|theme|glow`: benchmarks; it also floats the window so it keeps drawing.
+- `QUR_DEBUG_ACTIONS`: comma-separated action names, plus `wait:<ms>`.
+- `QUR_DEBUG_TASKS="prompt1|prompt2"`: start tasks on launch. Use tiny prompts.
+- `QUR_DEBUG_BROWSER_URL` (`{slug}` is replaced), `QUR_DEBUG_PICK=<css selector>`, `QUR_DEBUG_SEND`: drive the browser and inspector.
+- `QUR_ACP_LOG=<dir>`: log ACP traffic. `QUR_WEB_DEVTOOLS=1`: enable the WebKit inspector.
+
+Test fixtures: `spikes/fixtures/big-repo` must be left clean afterwards (no `qur/*` branches or worktrees).
 
 ## Next
 
-1. **M4: Changes + Merge + Git panel** (handoff section 10, with the M0 merge recipe):
-   - Changes diff view (task branch vs base).
-   - Merge via `merge-tree` + `read-tree` (keeps the user's index and stash), conflicts opened in the editor, Discard (already done).
-   - Git panel on the main checkout: status, stage, commit.
-   - Orca items: line comments on the agent's diff sent back as one prompt; a conflict pre-check and +n −m on agent rows; preserved-branch safety net.
+1. **Finish M4 on `m4-wip`:**
+   - **Verify Merge end to end in the UI.** The one scripted attempt didn't merge (no `hello.txt` landed). The likely cause is timing in the script: AllowOnce was sent before the permission request arrived, and Merge stops the agent. Let the agent's turn finish before triggering Merge. This is unverified.
+   - Test the conflict flow in the UI: make main and the task edit the same line, then Merge → conflict prompt → editor conflict bar → Finish merge (and Abort).
+   - Test the Git panel by hand: stage, unstage, file diff, commit.
+   - Record M4 in `docs/budget.md`: footprint with Changes open, and diff time on big-repo.
+   - Then merge `m4-wip` into `main`.
+   - Known qur_git gaps:
+     - `root` must be the top of the checkout.
+     - `diff --cc` entries are skipped.
+     - A change that only adds or removes the final newline shows no marker.
+     - Submodules and fsmonitor are untested.
+     - A gpgsign passphrase prompt could block commits.
+     - The HEAD-moved rollback path has no test.
 2. Browser follow-ups (known gaps):
    - Iframes and closed shadow roots can't be inspected; selectors aren't scoped inside shadow roots.
    - React 19 has no `_debugSource`; `data-qur-source` attributes work everywhere.
@@ -134,5 +165,4 @@ Env: `QUR_HOME` (settings folder; **always set it to a scratch dir in tests**, s
 - Trademark clearance for "Qur" hasn't been checked (brand README). It needs flagging in the public README at M7.
 - Approve the accent palettes (Qur Dark: #ff7a45 #3ddc97 #5b9bff #f062c0 #f5c04a #a77bff; Qur Light: #d9480f #0e9f6e #2563eb #c026d3 #0891b2 #db2777).
 - Kotlin adds about 5.5 MB to the binary. Keep it, or load it lazily later?
-- Orca item: pre-trust new worktrees for Claude CLI terminals. That means Qur writing to `~/.claude.json`, which is another app's config. OK or not?
 - Which of Orca's "conflicts" items, if any, should override a non-goal? See the table in `docs/research/orca.md`.

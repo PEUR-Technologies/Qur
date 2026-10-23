@@ -251,7 +251,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(terminal::SendLineEnd, "Terminal", "Line End", "cmd-right", T, R),
     cmd!(terminal::SendKillLine, "Terminal", "Kill Line", "cmd-backspace", T, R),
     // Panels
-    cmd!(qur::GitPanel, "View", "Git", "ctrl-shift-g", W, L("M4")),
+    cmd!(qur::GitPanel, "View", "Source Control", "ctrl-shift-g", NT, R),
     cmd!(qur::SearchPanel, "View", "Search", "", W, L("M6")),
     // Agents and peek
     cmd!(qur::FocusPrompt, "Agent", "Focus Prompt", "cmd-i", W, R),
@@ -262,9 +262,9 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(agent::AllowOnce, "Agent", "Permission: Allow Once", "", W, R),
     cmd!(agent::AllowAlways, "Agent", "Permission: Allow for This Task", "", W, R),
     cmd!(agent::Deny, "Agent", "Permission: Deny", "", W, R),
-    cmd!(qur::ReviewChanges, "Agent", "Review Changes", "", W, L("M4")),
-    cmd!(qur::Merge, "Agent", "Merge…", "", W, L("M4")),
-    cmd!(qur::KeepWorking, "Agent", "Keep Working", "", W, L("M4")),
+    cmd!(qur::ReviewChanges, "Agent", "Review Changes", "", W, R),
+    cmd!(qur::Merge, "Agent", "Merge into My Branch", "", W, R),
+    cmd!(qur::KeepWorking, "Agent", "Keep Working", "", W, R),
     cmd!(qur::DiscardTask, "Agent", "Discard Task…", "", W, R),
     cmd!(qur::OpenWorktreeInTerminal, "Agent", "Open Task Worktree in Terminal", "", W, R),
     cmd!(qur::RevealWorktree, "Agent", "Reveal Worktree in Finder", "", W, R),

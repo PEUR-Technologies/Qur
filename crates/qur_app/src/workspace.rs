@@ -21,6 +21,8 @@ use qur_editor::Point;
 use qur_theme::{Registry, Rgba, ThemeChoice};
 
 use crate::agent_view::{AgentEvent, AgentTask, Layout, Status, View};
+use crate::changes_view::{ChangesEvent, ChangesView};
+use crate::git_panel::{GitEvent, GitPanel};
 use crate::live::{LiveEvent, LivePane};
 use crate::monitor::{MonitorEvent, TaskMonitor};
 use crate::assets::{self, icon};
@@ -51,6 +53,17 @@ struct TermTask {
     live: Entity<LivePane>,
     /// Layout B: show Live instead of the terminal.
     show_live: bool,
+    changes: Entity<ChangesView>,
+    /// The left pane shows Changes instead of Live.
+    show_changes: bool,
+}
+
+/// A merge stopped on conflicts (resolved in the code modal, then Finish).
+struct MergeState {
+    task: String,
+    title: String,
+    branch: String,
+    files: Vec<PathBuf>,
 }
 
 /// What the stage shows.
@@ -59,6 +72,8 @@ enum Selected {
     Agent(String),
     TermTask(String),
     Shell(usize),
+    /// The Git panel for the main checkout.
+    Git,
 }
 
 enum PickKind {
@@ -119,6 +134,8 @@ pub struct Workspace {
     file_lists: HashMap<PathBuf, Vec<PathBuf>>,
     layout: Layout,
     _root_watcher: Option<qur_watch::Watcher>,
+    git: Option<Entity<GitPanel>>,
+    merge: Option<MergeState>,
     slider: Rc<Cell<Bounds<Pixels>>>,
     sliding: bool,
     title_drag: bool,
@@ -193,6 +210,8 @@ impl Workspace {
             file_lists: HashMap::new(),
             layout: Layout::A,
             _root_watcher: None,
+            git: None,
+            merge: None,
             slider: Rc::new(Cell::new(Bounds::default())),
             sliding: false,
             title_drag: false,
@@ -444,6 +463,10 @@ impl Workspace {
                 let f = self.terms.read(cx).focus.clone();
                 window.focus(&f, cx);
             }
+            Some(Selected::Git) => {
+                self.git_panel(window, cx);
+                window.focus(&self.focus, cx);
+            }
             None => window.focus(&self.focus, cx),
         }
         self.sync_menus(cx);
@@ -482,7 +505,11 @@ impl Workspace {
             }
         });
         self._subs.push(sub);
-        self.term_tasks.push(TermTask { record, term_id: None, accent, monitor, live, show_live: false });
+        let changes = cx.new(|cx| ChangesView::new(self.root.clone(), record.worktree.clone(), record.base.clone(), record.branch.clone(), cx));
+        let id = record.id.clone();
+        let sub = cx.subscribe_in(&changes, window, move |this, _, ev: &ChangesEvent, window, cx| this.on_changes_event(&id, ev, window, cx));
+        self._subs.push(sub);
+        self.term_tasks.push(TermTask { record, term_id: None, accent, monitor, live, show_live: false, changes, show_changes: false });
         self.refresh_overlaps(cx);
     }
 
@@ -528,6 +555,11 @@ impl Workspace {
             }
         }
         self.file_lists.remove(root);
+        if root == self.root.as_path()
+            && let Some(g) = &self.git
+        {
+            g.update(cx, |g, cx| g.refresh(cx));
+        }
         // Open copies: clean ones reload, dirty ones get the banner.
         for b in self.buffers.list.clone() {
             let hit = b.read(cx).path().is_some_and(|bp| paths.iter().any(|p| p == bp));
@@ -555,7 +587,8 @@ impl Workspace {
         let id = record.id.clone();
         let accent = Look::of(window, cx).theme.accents[0].base;
         let (layout, wrap, tab) = (self.layout, self.config.editor.soft_wrap, self.config.editor.tab_width);
-        let a = cx.new(|cx| AgentTask::new(record, def, accent, layout, wrap, tab, window, cx));
+        let root = self.root.clone();
+        let a = cx.new(|cx| AgentTask::new(root, record, def, accent, layout, wrap, tab, window, cx));
         AGENT_IDS.with(|m| m.borrow_mut().insert(a.entity_id(), id));
         let monitor = a.read(cx).monitor.clone();
         self.watch_monitor(&monitor, window, cx);
@@ -587,6 +620,15 @@ impl Workspace {
                 let p = p.clone();
                 let at = line.map(|l| Point { line: (l as usize).saturating_sub(1), col: 0 });
                 this.open_path_at(&p, at, window, cx);
+            }
+            AgentEvent::Merge => {
+                let id = a.read(cx).record.id.clone();
+                this.merge_task(&id, window, cx);
+            }
+            AgentEvent::Discard => {
+                let id = a.read(cx).record.id.clone();
+                this.select(Some(Selected::Agent(id)), window, cx);
+                this.discard_task(&qur::DiscardTask, window, cx);
             }
             AgentEvent::MentionRequested => {
                 let (root, target) = {
@@ -974,6 +1016,316 @@ impl Workspace {
         }
     }
 
+    fn on_changes_event(&mut self, id: &str, ev: &ChangesEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match ev {
+            ChangesEvent::Merge => self.merge_task(id, window, cx),
+            ChangesEvent::Discard => {
+                self.select(Some(Selected::TermTask(id.to_string())), window, cx);
+                self.discard_task(&qur::DiscardTask, window, cx);
+            }
+            ChangesEvent::KeepWorking => self.select(Some(Selected::TermTask(id.to_string())), window, cx),
+            ChangesEvent::SendComments(text) => {
+                // Terminal agents: type the review into the terminal (no Enter).
+                if let Some(tid) = self.term_task(id).and_then(|t| t.term_id) {
+                    let text = text.replace('\n', " ");
+                    self.terms.update(cx, |p, cx| p.type_text(tid, &text, cx));
+                }
+                self.select(Some(Selected::TermTask(id.to_string())), window, cx);
+            }
+            ChangesEvent::Open(p, line) => {
+                let at = line.map(|l| Point { line: (l as usize).saturating_sub(1), col: 0 });
+                let p = p.clone();
+                self.open_path_at(&p, at, window, cx);
+            }
+        }
+    }
+
+    /// Worktree, branch, title and Changes view of a task by id.
+    fn task_parts(&self, id: &str, cx: &App) -> Option<(PathBuf, String, String, Entity<ChangesView>)> {
+        if let Some(a) = self.agent(id) {
+            let a = a.read(cx);
+            return Some((a.record.worktree.clone(), a.record.branch.clone(), a.record.title.clone(), a.changes.clone()));
+        }
+        self.term_task(id).map(|t| (t.record.worktree.clone(), t.record.branch.clone(), t.record.title.clone(), t.changes.clone()))
+    }
+
+    /// Merge (handoff section 10, M0 recipe): commit the task's work on its
+    /// branch, then merge it into the main checkout's current branch without
+    /// touching the user's index or stash. Conflicts open in the editor.
+    fn merge_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((wt, branch, title, changes)) = self.task_parts(id, cx) else { return };
+        if self.merge.is_some() {
+            return self.flash("A merge is already in progress: finish or abort it first (Git panel)", cx);
+        }
+        if let Some(a) = self.agent(id).cloned()
+            && matches!(a.read(cx).status, Status::Working | Status::NeedsYou)
+        {
+            a.update(cx, |a, cx| a.stop(cx));
+        }
+        let root = self.root.clone();
+        let bg = cx.background_executor().clone();
+        let id = id.to_string();
+        self.flash(format!("Merging “{title}”…"), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let (t2, b2, root2) = (title.clone(), branch.clone(), root.clone());
+            let outcome = bg
+                .spawn(async move {
+                    qur_git::commit_all(&wt, &format!("qur: {t2}"))?;
+                    Ok::<_, String>(qur_git::merge_clean(&root2, &b2, &format!("Merge {b2}: {t2}")))
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| match outcome {
+                Err(e) => this.flash(format!("Couldn't commit the task's work: {e}"), cx),
+                Ok(qur_git::MergeOutcome::UpToDate) => this.flash("Nothing to merge: your branch already has these changes", cx),
+                Ok(qur_git::MergeOutcome::Merged { commit }) => {
+                    changes.update(cx, |c, cx| {
+                        c.merged = true;
+                        c.refresh(cx);
+                    });
+                    if let Some(g) = &this.git {
+                        g.update(cx, |g, cx| g.refresh(cx));
+                    }
+                    this.flash(format!("Merged “{title}” into your branch ({})", &commit[..commit.len().min(8)]), cx);
+                    this.offer_cleanup(&id, window, cx);
+                }
+                Ok(qur_git::MergeOutcome::Refused { reason }) => {
+                    let _ = window.prompt(PromptLevel::Warning, "Merge not started", Some(&reason), &["OK"], cx);
+                }
+                Ok(qur_git::MergeOutcome::Conflicts { files }) => {
+                    let detail = format!(
+                        "{} file{} conflict with your branch: {}.\n\nResolve them in Qur? Your checkout must have no uncommitted changes.",
+                        files.len(),
+                        if files.len() == 1 { "" } else { "s" },
+                        files.iter().take(5).map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+                    );
+                    let answer = window.prompt(PromptLevel::Warning, "Merge conflicts", Some(&detail), &["Resolve in Qur", "Cancel"], cx);
+                    let (root, branch, title, id) = (root.clone(), branch.clone(), title.clone(), id.clone());
+                    cx.spawn_in(window, async move |this, cx| {
+                        if answer.await.ok() != Some(0) {
+                            return;
+                        }
+                        let started = {
+                            let (r, b) = (root.clone(), branch.clone());
+                            cx.background_executor().spawn(async move { qur_git::start_conflict_merge(&r, &b) }).await
+                        };
+                        this.update_in(cx, |this, window, cx| match started {
+                            Err(e) => this.flash(e, cx),
+                            Ok(files) => {
+                                this.merge = Some(MergeState { task: id, title, branch, files: files.clone() });
+                                if let Some(f) = files.first() {
+                                    let abs = this.root.join(f);
+                                    this.open_path(&abs, window, cx);
+                                    if let Some(c) = &this.code {
+                                        c.update(cx, |c, cx| {
+                                            c.merge_conflicts = true;
+                                            cx.notify();
+                                        });
+                                    }
+                                }
+                                if let Some(g) = &this.git {
+                                    g.update(cx, |g, cx| g.refresh(cx));
+                                }
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// After a merge: remove the task's worktree and branch now, or keep it.
+    fn offer_cleanup(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let answer = window.prompt(
+            PromptLevel::Info,
+            "Merged. Remove the task?",
+            Some("This deletes its worktree and branch (the changes are on your branch now)."),
+            &["Remove task", "Keep it"],
+            cx,
+        );
+        let id = id.to_string();
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await.ok() == Some(0) {
+                this.update_in(cx, |this, window, cx| this.remove_task(&id, window, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Stop a task's process and delete its worktree and branch (no prompt).
+    fn remove_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((wt, branch, _, _)) = self.task_parts(id, cx) else { return };
+        let mut handle = None;
+        if let Some(a) = self.agent(id).cloned() {
+            handle = a.update(cx, |a, cx| a.shutdown(cx));
+            self.agents.retain(|x| x != &a);
+        }
+        if let Some(t) = self.term_task(id).and_then(|t| t.term_id) {
+            self.terms.update(cx, |p, cx| {
+                if let Some(ix) = p.sessions.iter().position(|s| s.id == t) {
+                    p.close(ix, cx);
+                }
+            });
+        }
+        self.term_tasks.retain(|t| t.record.id != id);
+        self.trees.remove(&wt);
+        self.save_tasks(cx);
+        let root = self.root.clone();
+        let bg = cx.background_executor().clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let r = bg
+                .spawn(async move {
+                    if let Some(h) = handle {
+                        let _ = h.join();
+                    }
+                    qur_worktree::remove(&root, &wt, &branch, true)
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                if let Err(e) = r {
+                    this.flash(format!("Couldn't remove the worktree: {e}"), cx);
+                }
+                this.refresh_overlaps(cx);
+                let next = this.session_order().into_iter().next();
+                this.select(next, window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn finish_merge(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(m) = &self.merge else {
+            return self.flash("No merge in progress", cx);
+        };
+        // Save any open conflicted files first.
+        for b in self.buffers.dirty(cx) {
+            let inside = b.read(cx).path().is_some_and(|p| m.files.iter().any(|f| self.root.join(f) == p));
+            if inside {
+                b.update(cx, |b, cx| b.save(cx));
+            }
+        }
+        let (root, files, msg, id) = (self.root.clone(), m.files.clone(), format!("Merge {}: {}", m.branch, m.title), m.task.clone());
+        let bg = cx.background_executor().clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let r = bg.spawn(async move { qur_git::finish_merge(&root, &files, &msg) }).await;
+            this.update_in(cx, |this, window, cx| match r {
+                Ok(sha) => {
+                    let title = this.merge.take().map(|m| m.title).unwrap_or_default();
+                    for b in &this.buffers.list {
+                        b.update(cx, |b, _| b.merge_conflicts = false);
+                    }
+                    if let Some((_, _, _, changes)) = this.task_parts(&id, cx) {
+                        changes.update(cx, |c, cx| {
+                            c.merged = true;
+                            c.refresh(cx);
+                        });
+                    }
+                    if let Some(g) = &this.git {
+                        g.update(cx, |g, cx| g.refresh(cx));
+                    }
+                    this.flash(format!("Merged “{title}” ({})", &sha[..sha.len().min(8)]), cx);
+                    this.offer_cleanup(&id, window, cx);
+                }
+                Err(e) => this.flash(e, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn abort_merge(&mut self, cx: &mut Context<Self>) {
+        let root = self.root.clone();
+        let bg = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let r = bg.spawn(async move { qur_git::abort_merge(&root) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.merge = None;
+                for b in this.buffers.list.clone() {
+                    b.update(cx, |b, cx| {
+                        b.merge_conflicts = false;
+                        b.disk_change(cx);
+                    });
+                }
+                if let Some(g) = &this.git {
+                    g.update(cx, |g, cx| g.refresh(cx));
+                }
+                match r {
+                    Ok(()) => this.flash("Merge aborted; your branch is as it was", cx),
+                    Err(e) => this.flash(e, cx),
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn git_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<GitPanel> {
+        if let Some(g) = &self.git {
+            return g.clone();
+        }
+        let root = self.root.clone();
+        let g = cx.new(|cx| GitPanel::new(root, window, cx));
+        let sub = cx.subscribe_in(&g, window, |this, _, ev: &GitEvent, window, cx| match ev {
+            GitEvent::Open(p) => {
+                let p = p.clone();
+                this.open_path(&p, window, cx);
+                if this.merge.as_ref().is_some_and(|m| m.files.iter().any(|f| this.root.join(f) == p))
+                    && let Some(c) = &this.code
+                {
+                    c.update(cx, |c, cx| {
+                        c.merge_conflicts = true;
+                        cx.notify();
+                    });
+                }
+            }
+            GitEvent::FinishMerge => this.finish_merge(window, cx),
+            GitEvent::AbortMerge => this.abort_merge(cx),
+            GitEvent::Error(e) => this.flash(e.clone(), cx),
+            GitEvent::Committed(sha) => this.flash(format!("Committed {}", &sha[..sha.len().min(8)]), cx),
+        });
+        self._subs.push(sub);
+        self.git = Some(g.clone());
+        g
+    }
+
+    fn show_git(&mut self, _: &qur::GitPanel, window: &mut Window, cx: &mut Context<Self>) {
+        let g = self.git_panel(window, cx);
+        g.update(cx, |g, cx| g.refresh(cx));
+        self.select(Some(Selected::Git), window, cx);
+    }
+
+    fn merge_action(&mut self, _: &qur::Merge, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((id, ..)) = self.selected_worktree(cx) {
+            self.merge_task(&id, window, cx);
+        }
+    }
+
+    fn review_changes(&mut self, _: &qur::ReviewChanges, _: &mut Window, cx: &mut Context<Self>) {
+        match self.selected.clone() {
+            Some(Selected::Agent(id)) => {
+                if let Some(a) = self.agent(&id).cloned() {
+                    a.update(cx, |a, cx| a.show_changes(cx));
+                }
+            }
+            Some(Selected::TermTask(id)) => {
+                if let Some(t) = self.term_tasks.iter_mut().find(|t| t.record.id == id) {
+                    t.show_changes = true;
+                    t.changes.update(cx, |c, cx| c.refresh(cx));
+                }
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    fn keep_working(&mut self, _: &qur::KeepWorking, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_prompt(&qur::FocusPrompt, window, cx);
+    }
+
     fn stop_agent(&mut self, _: &qur::StopAgent, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(a) = self.selected_agent() {
             a.update(cx, |a, cx| a.stop(cx));
@@ -1159,7 +1511,7 @@ impl Workspace {
                 let f = self.terms.read(cx).focus.clone();
                 window.focus(&f, cx);
             }
-            None => window.focus(&self.focus, cx),
+            Some(Selected::Git) | None => window.focus(&self.focus, cx),
         }
     }
 
@@ -1849,6 +2201,7 @@ impl Workspace {
             Some(Selected::Agent(id)) => self.agent(id).map(|a| a.read(cx).record.title.clone()),
             Some(Selected::TermTask(id)) => self.term_task(id).map(|t| t.record.title.clone()),
             Some(Selected::Shell(s)) => self.terms.read(cx).session_by_id(*s).map(|s| s.label.clone()),
+            Some(Selected::Git) => Some("Source control".into()),
             None => None,
         }
     }
@@ -1984,11 +2337,16 @@ impl Workspace {
             let t = a.read(cx);
             let id = t.record.id.clone();
             let sel = self.selected == Some(Selected::Agent(id.clone()));
-            let detail = match (&t.status, t.last_line()) {
+            let ch = t.changes.read(cx);
+            let (add, del, conflicts) = (ch.totals.0, ch.totals.1, !ch.conflicts.is_empty());
+            let mut detail = match (&t.status, t.last_line()) {
                 (Status::Working | Status::Done | Status::Idle, Some(l)) => l,
                 (Status::Error(_), _) => format!("{} · error", t.def.label),
                 (s, _) => format!("{} · {}", t.def.label, s.label()),
             };
+            if add + del > 0 {
+                detail = format!("+{add} −{del}{} · {detail}", if conflicts { " ⚠" } else { "" });
+            }
             let unread = self.unread.contains(&id);
             let row = self
                 .session_row(format!("agent-{id}").into(), Some(t.accent), t.record.title.clone(), detail, t.status.glyph(), sel, look)
@@ -2066,6 +2424,24 @@ impl Workspace {
                 )
             })
             .when(!shells.is_empty(), |d| d.child(self.section_header("TERMINALS".into(), look)).children(shells))
+            .child(self.section_header("SOURCE CONTROL".into(), look))
+            .child({
+                let (branch, n) = self
+                    .git
+                    .as_ref()
+                    .map(|g| {
+                        let st = &g.read(cx).status;
+                        (st.branch.clone().unwrap_or_else(|| "detached".into()), st.staged.len() + st.unstaged.len() + st.untracked.len())
+                    })
+                    .unwrap_or_else(|| ("Git".into(), 0));
+                let detail = match (&self.merge, n) {
+                    (Some(m), _) => format!("merging · {} conflicted", m.files.len()),
+                    (None, 0) => "clean".to_string(),
+                    (None, n) => format!("{n} changed"),
+                };
+                self.session_row("git".into(), None, branch, detail, if self.merge.is_some() { "!" } else { "" }, self.selected == Some(Selected::Git), look)
+                    .on_click(cx.listener(|this, _, window, cx| this.show_git(&qur::GitPanel, window, cx)))
+            })
             .child(self.section_header(files_label, look).pt(look.z(14.)))
             .children(tree.map(|t| div().flex_1().min_h(px(0.)).flex().flex_col().child(t)))
             // Drag handle on the right edge.
@@ -2100,7 +2476,7 @@ impl Workspace {
                         Layout::A => div()
                             .size_full()
                             .flex()
-                            .child(div().flex_1().min_w(px(0.)).child(t.live.clone()))
+                            .child(div().flex_1().min_w(px(0.)).child(if t.show_changes { t.changes.clone().into_any_element() } else { t.live.clone().into_any_element() }))
                             .child(div().w(gpui::relative(0.45)).flex_none().h_full().border_l_1().border_color(look.c(ui.border)).child(term))
                             .into_any_element(),
                         Layout::B if t.show_live => div().size_full().child(t.live.clone()).into_any_element(),
@@ -2117,6 +2493,11 @@ impl Workspace {
             }
             Some(Selected::Shell(_)) => {
                 return div().size_full().bg(look.bg(ui.panel_bg)).pt(look.z(6.)).child(self.terms.clone()).into_any_element();
+            }
+            Some(Selected::Git) => {
+                if let Some(g) = &self.git {
+                    return g.clone().into_any_element();
+                }
             }
             None => {}
         }
@@ -2622,6 +3003,10 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::reveal_worktree))
             .on_action(cx.listener(Self::worktree_terminal))
             .on_action(cx.listener(Self::discard_task))
+            .on_action(cx.listener(Self::show_git))
+            .on_action(cx.listener(Self::merge_action))
+            .on_action(cx.listener(Self::review_changes))
+            .on_action(cx.listener(Self::keep_working))
             .on_action(cx.listener(Self::cycle_layout))
             .on_action(cx.listener(Self::layout_a))
             .on_action(cx.listener(Self::layout_b))

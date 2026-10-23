@@ -104,6 +104,9 @@ pub struct EditorView {
     /// The file changed on disk while this buffer had unsaved edits: ask
     /// before reloading (never overwrite what the user hasn't seen).
     pub disk_changed: bool,
+    /// Opened during a merge with conflicts: show the resolve bar (M4).
+    pub merge_conflicts: bool,
+    conflict_cache: Option<(u64, Vec<qur_git::Conflict>)>,
     bench: Bench,
 }
 
@@ -155,6 +158,8 @@ impl EditorView {
             read_only: false,
             agent_mark: None,
             disk_changed: false,
+            merge_conflicts: false,
+            conflict_cache: None,
             bench,
         };
         if view.syntax.is_none() {
@@ -234,6 +239,42 @@ impl EditorView {
         self.reload_from_disk(cx);
         self.scroll_y = scroll;
         Some(range)
+    }
+
+    /// Conflict markers in the buffer (cached per text version).
+    pub fn conflicts(&mut self) -> Vec<qur_git::Conflict> {
+        let v = self.model.version();
+        if self.conflict_cache.as_ref().map(|c| c.0) != Some(v) {
+            let text = self.model.rope().to_string();
+            self.conflict_cache = Some((v, qur_git::find_conflicts(&text)));
+        }
+        self.conflict_cache.as_ref().map(|c| c.1.clone()).unwrap_or_default()
+    }
+
+    /// Resolve conflict #i in the buffer (one undoable edit; save to keep it).
+    pub fn resolve_conflict(&mut self, i: usize, r: qur_git::Resolution, cx: &mut Context<Self>) {
+        let text = self.model.rope().to_string();
+        let start = self.conflicts().get(i).map(|c| c.start).unwrap_or(0);
+        let new = qur_git::resolve(&text, i, r);
+        if new == text {
+            return;
+        }
+        let was_ro = std::mem::replace(&mut self.read_only, false);
+        self.run(Command::SelectAll, cx);
+        self.run(Command::Insert(new), cx);
+        self.read_only = was_ro;
+        let p = self.model.clamp(Point { line: start, col: 0 });
+        self.model.set_selections(vec![Selection::caret(p)], 0);
+        self.reveal_lines(start..start + 1, cx);
+        cx.emit(EditorEvent::Changed);
+    }
+
+    fn jump_conflict(&mut self, i: usize, cx: &mut Context<Self>) {
+        if let Some(c) = self.conflicts().get(i).cloned() {
+            let p = Point { line: c.start, col: 0 };
+            self.model.set_selections(vec![Selection::caret(p)], 0);
+            self.reveal_lines(c.start..c.end + 1, cx);
+        }
     }
 
     /// Scroll so `lines` are visible, centred when they're off screen.
@@ -1287,6 +1328,54 @@ impl Render for EditorView {
                         .child(div().flex_none().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child("↩ one · ⌘↩ all"))
                 }))
         });
+        let conflict_bar = self.merge_conflicts.then(|| {
+            let conflicts = self.conflicts();
+            let cur = self.cursor().line;
+            // The conflict at or after the cursor (else the last one).
+            let i = conflicts.iter().position(|c| c.end >= cur).unwrap_or(conflicts.len().saturating_sub(1));
+            let n = conflicts.len();
+            let act = |label: &'static str, id: &'static str, r: Option<qur_git::Resolution>, primary: bool| {
+                div()
+                    .id(id)
+                    .px(look.z(8.))
+                    .py(look.z(1.))
+                    .rounded(look.z(4.))
+                    .cursor_pointer()
+                    .bg(look.c(if primary { ui.button_primary_bg } else { ui.button_bg }))
+                    .text_color(look.c(if primary { ui.button_primary_text } else { ui.button_text }))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| match r {
+                        Some(r) => this.resolve_conflict(i, r, cx),
+                        None => {
+                            let next = if label == "Next" { (i + 1).min(n.saturating_sub(1)) } else { i.saturating_sub(1) };
+                            this.jump_conflict(next, cx);
+                        }
+                    }))
+            };
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(look.z(6.))
+                .px(look.z(10.))
+                .py(look.z(5.))
+                .bg(look.c(ui.permission_bar_bg))
+                .border_b_1()
+                .border_color(look.c(ui.border))
+                .text_size(look.text(-1.))
+                .child(div().flex_1().child(if n == 0 {
+                    "No conflicts left in this file. Save it (⌘S), then Finish merge.".to_string()
+                } else {
+                    format!("Conflict {} of {n}: {} ↔ {}", i + 1, conflicts[i].ours_label, conflicts[i].theirs_label)
+                }))
+                .when(n > 0, |d| {
+                    d.child(act("Prev", "c-prev", None, false))
+                        .child(act("Next", "c-next", None, false))
+                        .child(act("Accept ours", "c-ours", Some(qur_git::Resolution::Ours), false))
+                        .child(act("Accept theirs", "c-theirs", Some(qur_git::Resolution::Theirs), false))
+                        .child(act("Accept both", "c-both", Some(qur_git::Resolution::Both), true))
+                })
+        });
         let banner = self.disk_changed.then(|| {
             let button = |label: &'static str, id: &'static str, reload: bool| {
                 div()
@@ -1389,6 +1478,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::a_case))
             .on_action(cx.listener(Self::a_word))
             .on_action(cx.listener(Self::a_regex))
+            .children(conflict_bar)
             .children(banner)
             .children(find_bar)
             .child(

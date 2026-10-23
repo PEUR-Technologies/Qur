@@ -100,7 +100,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 
 | Keys | Command | Tier |
 |---|---|---|
-| `Ctrl+Shift+G` | Git panel | M4 |
+| `Ctrl+Shift+G` | Source Control (Git panel: stage, unstage, diff, commit; merge in progress: Finish / Abort) | M4 ✅ |
 | `Cmd+Shift+F` | Search panel | M6 |
 
 ## Agents and sessions (M2)
@@ -121,7 +121,8 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+1..4` | Live / To-do / Chat / Changes (layout B) | M3 ✅ |
 | `Cmd+5` | Browser: show the selected agent's browser (any layout) | Browser ✅ |
 | `Cmd+Shift+C` | Browser: Inspect Element (highlight, click to attach to the prompt; select text to attach it) | Browser ✅ |
-| `Cmd+Shift+Enter` (Changes view) | Merge | M4 |
+| Changes view / Agent menu | Merge into My Branch, Keep Working, Discard Task…, Review Changes | M4 ✅ |
+| Changes view: click a line / ⌘-click | Comment on the line (sent to the agent as one message) / open the file there | M4 ✅ |
 
 The code modal closes with `Esc`: first the find bar, then extra cursors, then the modal (decision 18).
 

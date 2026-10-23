@@ -380,6 +380,17 @@ impl TerminalPanel {
     }
 
 
+    /// Type text into a session as if pasted (bracketed when the app asks
+    /// for it); no Enter, so the user reviews before sending.
+    pub fn type_text(&mut self, id: usize, text: &str, cx: &mut Context<Self>) {
+        if let Some(s) = self.sessions.iter().find(|s| s.id == id) {
+            let bracketed = s.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
+            let t = if bracketed { format!("\x1b[200~{text}\x1b[201~") } else { text.to_string() };
+            s.write(t.into_bytes());
+        }
+        cx.notify();
+    }
+
     pub fn session_by_id(&self, id: usize) -> Option<&Session> {
         self.sessions.iter().find(|s| s.id == id)
     }
