@@ -122,6 +122,8 @@ pub struct Workspace {
     /// Sessions that finished, errored or need you while not selected (Orca's unread).
     unread: HashSet<String>,
     checks: HashMap<String, Check>,
+    /// Run Project sessions (terminal ids) per task.
+    runs: HashMap<String, usize>,
     /// One file tree per root (main checkout and each worktree).
     trees: HashMap<PathBuf, Entity<TreeView>>,
     buffers: Buffers,
@@ -205,6 +207,7 @@ impl Workspace {
             selected: None,
             unread: HashSet::new(),
             checks: HashMap::new(),
+            runs: HashMap::new(),
             trees: HashMap::new(),
             buffers: Buffers { list: Vec::new() },
             code: None,
@@ -857,6 +860,7 @@ impl Workspace {
         let panel = self.terms.read(cx);
         let live: Vec<usize> = panel.sessions.iter().map(|s| s.id).collect();
         self.shells.retain(|s| live.contains(s));
+        self.runs.retain(|_, s| live.contains(s));
         for t in &mut self.term_tasks {
             if t.term_id.is_some_and(|id| !live.contains(&id)) {
                 t.term_id = None;
@@ -1184,14 +1188,16 @@ impl Workspace {
     }
 
     /// Stop a task's process and delete its worktree and branch (no prompt).
-    fn remove_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((wt, branch, _, _)) = self.task_parts(id, cx) else { return };
+    /// Discard and post-merge cleanup: stop the task's agent, its terminal and
+    /// its Run Project dev server, and drop it from the window. Returns the
+    /// agent's shutdown thread to join before removing the worktree.
+    fn stop_task(&mut self, id: &str, wt: &Path, cx: &mut Context<Self>) -> Option<std::thread::JoinHandle<()>> {
         let mut handle = None;
         if let Some(a) = self.agent(id).cloned() {
             handle = a.update(cx, |a, cx| a.shutdown(cx));
             self.agents.retain(|x| x != &a);
         }
-        if let Some(t) = self.term_task(id).and_then(|t| t.term_id) {
+        for t in self.term_task(id).and_then(|t| t.term_id).into_iter().chain(self.runs.remove(id)) {
             self.terms.update(cx, |p, cx| {
                 if let Some(ix) = p.sessions.iter().position(|s| s.id == t) {
                     p.close(ix, cx);
@@ -1199,7 +1205,14 @@ impl Workspace {
             });
         }
         self.term_tasks.retain(|t| t.record.id != id);
-        self.trees.remove(&wt);
+        self.checks.remove(id);
+        self.trees.remove(wt);
+        handle
+    }
+
+    fn remove_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((wt, branch, _, _)) = self.task_parts(id, cx) else { return };
+        let handle = self.stop_task(id, &wt, cx);
         self.save_tasks(cx);
         let root = self.root.clone();
         let bg = cx.background_executor().clone();
@@ -1524,6 +1537,90 @@ impl Workspace {
         .detach();
     }
 
+    /// Run Project (decision 29): start the project's dev server in the
+    /// selected task's worktree on a free port, under TERMINALS as
+    /// "run · <task>", then open its URL in that agent's Browser (ACP) or the
+    /// system browser (Agent Terminal). Localhost only. Running it again shows
+    /// the live session.
+    fn run_project(&mut self, _: &qur::RunProject, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((id, wt, _)) = self.selected_worktree(cx) else {
+            return self.flash("Select an agent first", cx);
+        };
+        if let Some(&tid) = self.runs.get(&id)
+            && self.terms.read(cx).session_by_id(tid).is_some()
+        {
+            return self.select(Some(Selected::Shell(tid)), window, cx);
+        }
+        let run = ProjectSettings::load(&self.project_id).run;
+        let Some(command) = run.command.filter(|c| !c.trim().is_empty()) else {
+            let path = qur_config::project_settings_path(&self.project_id);
+            return self.flash(format!("No run command: add [run] command = \"…\" and url = \"http://localhost:$PORT\" to {}", path.display()), cx);
+        };
+        let Some(port) = std::net::TcpListener::bind(("127.0.0.1", 0)).ok().and_then(|l| l.local_addr().ok()).map(|a| a.port()) else {
+            return self.flash("Couldn't find a free port", cx);
+        };
+        let url = run.url.map(|u| u.replace("$PORT", &port.to_string()));
+        let target = match url.as_deref().map(local_port) {
+            None => None,
+            Some(Some(p)) => Some(p),
+            Some(None) => return self.flash("[run] url must be on localhost", cx),
+        };
+        let title = self.task_parts(&id, cx).map(|(_, _, t, _)| t).unwrap_or_default();
+        let kind = Kind::Agent { task: format!("run · {title}"), command: format!("export PORT={port}; {command}") };
+        let label = format!("run · {title}");
+        let Some(tid) = self.terms.update(cx, |p, cx| p.open(&wt, kind, label, cx)) else { return };
+        self.shells.push(tid);
+        self.runs.insert(id.clone(), tid);
+        let (Some(url), Some(target)) = (url, target) else {
+            return self.select(Some(Selected::Shell(tid)), window, cx);
+        };
+        self.flash(format!("Starting {title} on port {port}…"), cx);
+        let bg = cx.background_executor().clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let up = bg
+                .spawn(async move {
+                    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], target));
+                    let start = Instant::now();
+                    while start.elapsed() < Duration::from_secs(30) {
+                        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok() {
+                            return true;
+                        }
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                    false
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                if !up {
+                    this.flash(format!("Nothing answered on {url} after 30 s; see the run terminal"), cx);
+                    return this.select(Some(Selected::Shell(tid)), window, cx);
+                }
+                match this.agent(&id).cloned() {
+                    Some(a) => {
+                        a.update(cx, |a, cx| {
+                            a.browser.update(cx, |b, cx| b.navigate(&url, cx));
+                            a.show_browser(true, cx);
+                        });
+                        this.select(Some(Selected::Agent(id.clone())), window, cx);
+                        // Start loading now rather than on the next frame; the
+                        // render pass keeps `shown` in sync from here on.
+                        if this.overlay.is_none() && this.code.is_none() {
+                            a.update(cx, |a, cx| a.browser.update(cx, |b, cx| b.set_shown(true, window, cx)));
+                        }
+                    }
+                    None => {
+                        if let Err(e) = std::process::Command::new("/usr/bin/open").arg(&url).spawn() {
+                            this.flash(format!("Couldn't open {url}: {e}"), cx);
+                        }
+                    }
+                }
+                this.flash(format!("Running at {url}"), cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn reveal_worktree(&mut self, _: &qur::RevealWorktree, _: &mut Window, cx: &mut Context<Self>) {
         if let Some((_, wt, _)) = self.selected_worktree(cx) {
             let _ = std::process::Command::new("open").arg(&wt).spawn();
@@ -1551,23 +1648,7 @@ impl Workspace {
                 return;
             }
             let handle = this
-                .update(cx, |this, cx| {
-                    let mut h = None;
-                    if let Some(a) = this.agent(&id).cloned() {
-                        h = a.update(cx, |a, cx| a.shutdown(cx));
-                        this.agents.retain(|x| x != &a);
-                    }
-                    if let Some(t) = this.term_task(&id).and_then(|t| t.term_id) {
-                        this.terms.update(cx, |p, cx| {
-                            if let Some(ix) = p.sessions.iter().position(|s| s.id == t) {
-                                p.close(ix, cx);
-                            }
-                        });
-                    }
-                    this.term_tasks.retain(|t| t.record.id != id);
-                    this.trees.remove(&wt);
-                    h
-                })
+                .update(cx, |this, cx| this.stop_task(&id, &wt, cx))
                 .ok()
                 .flatten();
             let removed = cx
@@ -3239,6 +3320,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_git))
             .on_action(cx.listener(Self::merge_action))
             .on_action(cx.listener(Self::run_checks_action))
+            .on_action(cx.listener(Self::run_project))
             .on_action(cx.listener(Self::git_stage_all))
             .on_action(cx.listener(Self::git_unstage_all))
             .on_action(cx.listener(Self::git_commit))
@@ -3324,4 +3406,32 @@ fn with_check(badge: String, check: Option<&Check>) -> String {
         Some(Check::Passed) | None => return badge,
     };
     if badge.is_empty() { mark.to_string() } else { format!("{badge} · {mark}") }
+}
+
+/// The port of a localhost URL (`http://localhost:5173/…`, `127.0.0.1`,
+/// `[::1]`), or None for anything else: Run Project never opens remote URLs.
+fn local_port(url: &str) -> Option<u16> {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let (host, port) = authority.rsplit_once(':')?;
+    if !matches!(host, "localhost" | "127.0.0.1" | "[::1]") {
+        return None;
+    }
+    port.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_port;
+
+    #[test]
+    fn run_project_urls_are_local_only() {
+        assert_eq!(local_port("http://localhost:5173"), Some(5173));
+        assert_eq!(local_port("http://127.0.0.1:8080/app?x=1"), Some(8080));
+        assert_eq!(local_port("localhost:3000"), Some(3000));
+        assert_eq!(local_port("http://[::1]:4000/"), Some(4000));
+        assert_eq!(local_port("https://example.com:443"), None);
+        assert_eq!(local_port("http://localhost.evil.com:80"), None);
+        assert_eq!(local_port("http://localhost"), None);
+    }
 }

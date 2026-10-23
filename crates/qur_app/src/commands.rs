@@ -24,7 +24,7 @@ pub mod qur {
             FocusPrompt, StopAgent, TakeOver, NextAgent, PrevAgent, ReviewChanges, Merge,
             KeepWorking, DiscardTask, OpenWorktreeInTerminal, RevealWorktree, KeyboardShortcuts,
             RunDoctor, ShowLogs, ReportProblem, ExpandSelection, ShrinkSelection,
-            RunChecks, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge,
+            RunChecks, RunProject, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge,
         ]
     );
 
@@ -270,6 +270,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::Merge, "Agent", "Merge into My Branch", "", W, R),
     cmd!(qur::KeepWorking, "Agent", "Keep Working", "", W, R),
     cmd!(qur::RunChecks, "Agent", "Run Checks Now", "", W, R),
+    cmd!(qur::RunProject, "Agent", "Run Project in Worktree", "", W, R),
     cmd!(qur::DiscardTask, "Agent", "Discard Task…", "", W, R),
     cmd!(qur::NextConflict, "Merge", "Next Conflict", "", W, R),
     cmd!(qur::PrevConflict, "Merge", "Previous Conflict", "", W, R),
@@ -555,6 +556,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::Merge),
             item(qur::KeepWorking),
             item(qur::RunChecks),
+            item(qur::RunProject),
             item(qur::DiscardTask),
             M::submenu(Menu::new("Merge Conflicts").items([
                 item(qur::NextConflict).disabled(!s.merging),

@@ -122,6 +122,9 @@ impl BrowserPane {
     fn on_event(&mut self, ev: BrowserEvent, cx: &mut Context<Self>) {
         match ev {
             BrowserEvent::Navigated { url, title } => {
+                if std::env::var_os("QUR_DEBUG_ACTIONS").is_some() {
+                    println!("BROWSER navigated {url}");
+                }
                 self.title = title;
                 self.error = None;
                 self.url.update(cx, |u, cx| {
@@ -169,6 +172,17 @@ impl BrowserPane {
                 cx.emit(BrowserPaneEvent::Attach(Attachment { label, context, png }));
             });
         });
+    }
+
+    /// Go to `url` now if the page is loaded, else when it's next shown
+    /// (Run Project).
+    pub fn navigate(&mut self, url: &str, cx: &mut Context<Self>) {
+        self.home = Some(url.to_string());
+        self.url.update(cx, |u, cx| u.set_text(url, cx));
+        if let Some(w) = &self.web {
+            w.load(url);
+        }
+        cx.notify();
     }
 
     /// Reload the page if it's loaded (the agent changed files).

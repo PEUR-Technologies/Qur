@@ -286,6 +286,19 @@ pub struct ProjectSettings {
     pub window: ProjectWindow,
     pub worktree: ProjectWorktree,
     pub checks: ProjectChecks,
+    pub run: ProjectRun,
+}
+
+/// Run Project: the dev server for a task's worktree (decision 29).
+/// `$PORT` in `url` is the free port Qur picks per task; the command gets it
+/// as the `PORT` environment variable (and `$PORT` works in it too).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ProjectRun {
+    /// e.g. "pnpm dev --port $PORT".
+    pub command: Option<String>,
+    /// e.g. "http://localhost:$PORT". Only localhost URLs are opened.
+    pub url: Option<String>,
 }
 
 /// Turn-end checks: run after an agent turn that changed files (OpenADE /
@@ -478,6 +491,8 @@ mod tests {
         let p: ProjectSettings = toml_edit::de::from_str("[checks]\ncommand = \"make\"\ntimeout = 20\nauto_send = true\n").unwrap();
         assert_eq!((p.checks.timeout, p.checks.auto_send), (20, true));
         assert_eq!(ProjectSettings::default().checks.command, None);
+        let p: ProjectSettings = toml_edit::de::from_str("[run]\ncommand = \"pnpm dev --port $PORT\"\nurl = \"http://localhost:$PORT\"\n").unwrap();
+        assert_eq!(p.run.url.as_deref(), Some("http://localhost:$PORT"));
     }
 
     #[test]

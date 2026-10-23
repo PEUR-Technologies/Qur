@@ -78,6 +78,7 @@ One window is one project. There's no permanent editor area: the window is for a
   - On your main checkout, dots show which files agents changed in their worktrees.
 - **Live view** (structured agents): the file the agent is working in, as it types. Read-only while the agent edits, with **Take over** to step in. It follows the agent across files but never jumps within 5 s of your own scroll or click.
 - **Browser with Inspect.** Open your dev server next to the agent, pick elements or text, and ask the agent to adjust them. It gets the selector, HTML, key CSS, the source location when available, and a screenshot. Uses the system WebKit, freed when idle.
+- **Run Project in Worktree.** Starts your dev server in the agent's worktree on its own port and opens it in that agent's Browser, so parallel agents never collide. Localhost only; stopped on Discard, Merge cleanup or quit.
 
 ![Browser + Inspect: pick an element, ask the agent, see the change](docs/images/browser-inspect.png)
 
@@ -118,7 +119,7 @@ Everything lives in `~/Library/Application Support/Qur/`. Qur never writes into 
 |---|---|
 | `config.toml` | Theme, window opacity/blur, editor font, soft wrap, peek layout. Qur > Settings opens it; saved changes apply right away. |
 | `agents.toml` | Which agents Qur can start (ACP or terminal mode). Written on first launch. |
-| `projects/<id>.toml` | Per-project theme, opacity, `[worktree] setup = "pnpm install"` (runs in each new worktree before the agent starts), and `[checks] command = "cargo check"` (runs after each agent turn that changed files). |
+| `projects/<id>.toml` | Per-project theme, opacity, `[worktree] setup = "pnpm install"` (runs in each new worktree before the agent starts), `[checks] command = "cargo check"` (runs after each agent turn that changed files), and `[run] command` / `url` with `$PORT` (Run Project). |
 | `projects/<id>.tasks.toml` | Tasks, so they survive restarts and resume their sessions. |
 | `worktrees/<id>/<task>/` | The task worktrees. |
 
