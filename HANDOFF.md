@@ -38,6 +38,8 @@ Summary of the owner decisions so far:
 
 **M4 (Changes + Merge + Git panel) is done** and merged into `main` (2026-10-23). All 144 workspace tests pass (qur_git: 16 passed, 1 timing test ignored). Merge, conflicts (Finish and Abort), Discard, and the Git panel's Stage All / Unstage All were verified end to end with scripted runs; see `docs/budget.md` (M4). Still to check by hand: per-file stage/unstage, the file diff and a typed commit in the Git panel.
 
+**After M4 (decision 29, ideas from OpenADE and PandaCode, `docs/research/openade-pandacode.md`):** turn-end checks (`[checks]`, Run Checks Now) and Run Project in Worktree (`[run]`, localhost only), both verified with scripted runs. Binary 24.4 MB; no crates added. 146 tests pass.
+
 M4 delivered:
 - **`qur_git` crate** (std + git CLI only):
   - `task_diff` and `diff_totals` (temp index copy with intent-to-add for untracked files; renames via `-M`; settled at about 60 ms on big-repo).
@@ -147,12 +149,16 @@ Test fixtures: `spikes/fixtures/big-repo` must be left clean afterwards (no `qur
      - Submodules and fsmonitor are untested.
      - A gpgsign passphrase prompt could block commits.
      - The HEAD-moved rollback path has no test.
-2. Browser follow-ups (known gaps):
+2. **Next from the research shortlist** (`docs/research/openade-pandacode.md` section 4):
+   - Turn checkpoints with Rewind (ACP tasks first): per-turn trees under `refs/qur/turns/<task>/<n>`, "View · Rewind" on each turn. Size M, no crates.
+   - Needs the owner's OK because they cost Claude usage or depend on the pinned adapter: a second-opinion review (a second read-only session), and Plan mode with commentable plans (check what claude-agent-acp 0.94.0 advertises).
+   - Chat polish batch: find in chat, grouped tool calls, Allow All Pending, Copy Chat as Markdown.
+3. Browser follow-ups (known gaps):
    - Iframes and closed shadow roots can't be inspected; selectors aren't scoped inside shadow roots.
    - React 19 has no `_debugSource`; `data-qur-source` attributes work everywhere.
    - Keyboard text selection isn't captured.
    - Page JavaScript can see `window.__qur`.
-3. Known gaps:
+4. Known gaps:
    - IME marked text isn't drawn.
    - End and Cmd+Right go to the line end, not the visual-row end.
    - The watcher honours only the root `.gitignore`.
