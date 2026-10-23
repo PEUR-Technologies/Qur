@@ -2,7 +2,7 @@
 
 Read this first when you pick the project up, whether you're a person or a Claude session. It covers where things stand, the rules, how to work on the code, and what's next. Keep it current: update **Status** and **Next** at the end of every session.
 
-Last updated: 2026-10-24. All milestones M0–M7 are done; `main` is at `558ce36`. Installed at `/Applications/Qur.app`.
+Last updated: 2026-10-24 (evening). All milestones M0–M7 are done; `main` is at `6adb8cb` plus this handoff. The newest build is installed at `/Applications/Qur.app`.
 
 ## What Qur is
 
@@ -19,11 +19,12 @@ Agents are first-class. The sidebar lists agents as buttons. Each agent works in
 5. **Tests that run real agents use a one-line prompt** (decision 20), such as "Reply with just the word ok."
 6. **Always use a scratch `QUR_HOME` in tests**, never the owner's real settings. Leave `spikes/fixtures/big-repo` clean (no `qur/*` branches or worktrees); work on a clone of it.
 7. **Git:** never add Co-Authored-By or Claude attribution lines to commits or PRs (owner preference). Branch per milestone, then merge into `main` and push once it's verified.
-8. **Brand:** never recolor or add effects to the logo (`assets/brand/README.md`). The logo isn't in the top bar (decision 33). It appears only in About and the first-run picker, with "by PEUR Technologies".
+8. **README:** the owner keeps it short and visual (PR #1). Put details in `docs/guide.md`, not the README.
+9. **Brand:** never recolor or add effects to the logo (`assets/brand/README.md`). The logo isn't in the top bar (decision 33). It appears only in About and the first-run picker, with "by PEUR Technologies".
 
 ## Status: what's built
 
-All milestones are on `main`. There are 160 tests (`cargo test --release --workspace`), all passing.
+All milestones are on `main`. There are 161 tests (`cargo test --release --workspace`), all passing.
 
 | Milestone | What | Decisions |
 |---|---|---|
@@ -39,6 +40,8 @@ All milestones are on `main`. There are 160 tests (`cargo test --release --works
 | M7 | `Qur.app` with icon, `qur doctor`, Help menu, About, logs, release README, acceptance checks | 34 |
 | After M7 | Rearrangeable dock stage, layout diagrams, accent colour picker | 32, 35 |
 | 2026-10-24 fixes | `claude` found when opened from Finder; first Agent Terminal in the project folder; right-click agent menu; transparency fixed; terminal answers queries | 36 |
+| Terminal drawing and paste | Block and box characters drawn as shapes (fixes the Claude Code mascot); paste images (Ctrl+V to Claude) and copied files; drop files onto a terminal | 37 |
+| README (owner, PR #1) | README shortened to visuals (`docs/images/window.svg`, `flow.svg`, `numbers.svg`); the full guide moved to `docs/guide.md` | — |
 
 Latest numbers (`docs/budget.md`, M7 table, measured on battery): app 25 MB, first frame 113 ms, idle 73 MB, 3 agents 129 MB, glow 81 ms, keystroke p99 2.0 ms, search 51 ms. `lsof` shows no network sockets in Qur's own process.
 
@@ -76,7 +79,8 @@ crates/
   qur_syntax    tree-sitter, 13 grammars;  qur_theme: themes and contrast tests;  qur_config: settings files
   qur_browser   system WKWebView embedding and the element inspector
 scripts/        bundle.sh (Qur.app), make_icns.swift, budget.sh, shot.sh, wins.swift
-docs/           decisions.md, QUR_HANDOFF.md (spec), budget.md, keymap.md, menus.md, signing.md, research/
+docs/           decisions.md, QUR_HANDOFF.md (spec), guide.md (install, features, config), budget.md, keymap.md,
+                menus.md, signing.md, research/, images/ (README visuals and screenshots)
 ```
 
 Where things are stored on the owner's Mac:
@@ -102,7 +106,7 @@ Where things are stored on the owner's Mac:
 ```sh
 source ~/.cargo/env
 cargo build --release -p qur_app && target/release/qur ~/some/project   # no argument = last project
-cargo test --release --workspace            # 160 tests
+cargo test --release --workspace            # 161 tests
 target/release/qur doctor                   # setup checks, exit 1 on any problem
 scripts/bundle.sh [--zip]                   # target/release/Qur.app (ad-hoc signed); then cp -R to /Applications
 scripts/budget.sh 3                         # the budget, incl. glow and 3 real agents; unlocked screen
