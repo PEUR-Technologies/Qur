@@ -257,6 +257,8 @@ impl AgentTask {
             BrowserPaneEvent::Attach(a) => {
                 let a = a.clone();
                 this.prompt.update(cx, |p, cx| p.attach(a, cx));
+                // The pick was a click in the page, which took the keyboard.
+                this.browser.read(cx).release_focus();
                 let f = this.prompt.read(cx).focus.clone();
                 window.focus(&f, cx);
                 // Dev/test: QUR_DEBUG_SEND="text" sends right after a pick.

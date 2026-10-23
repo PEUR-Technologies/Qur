@@ -507,6 +507,17 @@ impl Workspace {
         self.agents.iter().find(|a| agent_id_matches(a, id))
     }
 
+    /// The page keeps the keyboard until told otherwise: typing went to it
+    /// after you'd clicked back into Qur or picked with Inspect.
+    fn release_browser_focus(&self, cx: &App) {
+        for a in &self.agents {
+            a.read(cx).browser.read(cx).release_focus();
+        }
+        for t in &self.term_tasks {
+            t.browser.read(cx).release_focus();
+        }
+    }
+
     fn term_task(&self, id: &str) -> Option<&TermTask> {
         self.term_tasks.iter().find(|t| t.record.id == id)
     }
@@ -664,6 +675,7 @@ impl Workspace {
             p.type_text(tid, &text, cx);
             p.activate_id(tid, cx);
         });
+        self.release_browser_focus(cx);
         let f = self.terms.read(cx).focus.clone();
         window.focus(&f, cx);
     }
@@ -4134,6 +4146,9 @@ impl Render for Workspace {
         div()
             .key_context("Workspace")
             .track_focus(&self.focus)
+            // A click anywhere in Qur (clicks in a page go to the page, not
+            // here) takes the keyboard back from the browsers.
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| this.release_browser_focus(cx)))
             .size_full()
             .relative()
             .flex()

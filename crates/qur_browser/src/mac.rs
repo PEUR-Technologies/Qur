@@ -368,6 +368,20 @@ impl Browser {
             .then(|| NSRect::new(NSPoint::new(x0, y0), NSSize::new(x1 - x0, y1 - y0)))
     }
 
+    /// If the page has the keyboard, give it back to the view the web view sits
+    /// in. Clicking that view doesn't take it back by itself, so typing kept
+    /// going to the page.
+    pub fn release_focus(&self) {
+        autoreleasepool(|_| {
+            let Some(window) = self.web_view.window() else { return };
+            let Some(fr) = window.firstResponder() else { return };
+            let inside = fr.downcast_ref::<NSView>().is_some_and(|v| v.isDescendantOf(&self.web_view));
+            if inside && let Some(parent) = unsafe { self.web_view.superview() } {
+                window.makeFirstResponder(Some(&parent));
+            }
+        });
+    }
+
     /// Make the web view first responder (keyboard into the page).
     pub fn focus(&self) {
         autoreleasepool(|_| {

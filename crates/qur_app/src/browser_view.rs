@@ -185,6 +185,13 @@ impl BrowserPane {
         cx.notify();
     }
 
+    /// Take the keyboard back from the page (see `Browser::release_focus`).
+    pub fn release_focus(&self) {
+        if let Some(w) = &self.web {
+            w.release_focus();
+        }
+    }
+
     /// Reload the page if it's loaded (the agent changed files).
     pub fn reload(&mut self) {
         if let Some(w) = &self.web {
