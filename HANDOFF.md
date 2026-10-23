@@ -12,7 +12,7 @@ Agents are first-class. The sidebar lists agents as buttons. Each agent works in
 
 ## Rules (read before changing anything)
 
-1. **`docs/decisions.md` wins** over everything else (37 owner decisions so far). Then `docs/QUR_HANDOFF.md` (the original spec; its section 0 rules still apply), `docs/keymap.md` and `docs/menus.md`.
+1. **`docs/decisions.md` wins** over everything else (38 owner decisions so far). Then `docs/QUR_HANDOFF.md` (the original spec; its section 0 rules still apply), `docs/keymap.md` and `docs/menus.md`.
 2. **Lightness is the product.** Measure, don't estimate (`scripts/budget.sh`). Budgets: binary under 40 MB, idle physical footprint under 80 MB, 3 agents under 150 MB, first frame under 250 ms, 10k-line file highlighted in under 100 ms, glow under 100 ms, keystroke p99 at most 8.3 ms, search over 5,000 files under 300 ms.
 3. **Ask the owner before:** adding a crate that isn't already compiled in, any network call made by Qur itself, telemetry, cloud features, or UI that isn't in the spec or decisions. So far every feature since M4 reused crates already in the build.
 4. **Agents use their own CLI logins.** Never set or ask for `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`. **No Codex for now** (decision 6).
@@ -41,6 +41,7 @@ All milestones are on `main`. There are 161 tests (`cargo test --release --works
 | After M7 | Rearrangeable dock stage, layout diagrams, accent colour picker | 32, 35 |
 | 2026-10-24 fixes | `claude` found when opened from Finder; first Agent Terminal in the project folder; right-click agent menu; transparency fixed; terminal answers queries | 36 |
 | Terminal drawing and paste | Block and box characters drawn as shapes (fixes the Claude Code mascot); paste images (Ctrl+V to Claude) and copied files; drop files onto a terminal | 37 |
+| Transparency range | Slider fixed at 60–100% on every theme (per-theme floors had locked some themes at 100%) | 38 |
 | README (owner, PR #1) | README shortened to visuals (`docs/images/window.svg`, `flow.svg`, `numbers.svg`); the full guide moved to `docs/guide.md` | — |
 
 Latest numbers (`docs/budget.md`, M7 table, measured on battery): app 25 MB, first frame 113 ms, idle 73 MB, 3 agents 129 MB, glow 81 ms, keystroke p99 2.0 ms, search 51 ms. `lsof` shows no network sockets in Qur's own process.
