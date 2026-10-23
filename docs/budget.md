@@ -86,3 +86,21 @@ End-to-end check, with a tiny prompt:
 2. Inspect picked `#ship`; the chip "button#ship 'Ship it'" went to Claude with the element's context and a screenshot, plus "Change this button's text to Deploy."
 3. Claude edited `index.html` in its worktree (permission allowed once).
 4. The Browser reloaded at the end of the turn and showed "Deploy". No agent process was left after quit.
+
+## M4 (2026-10-23, Changes + Merge + Git panel, MacBook Air M5)
+
+| Metric | Result |
+|---|---|
+| `task_diff` on big-repo (51 changed files) | cold 241 ms; settled median 62 ms (min 58, max 155); `diff_totals` 62 ms |
+| Footprint, one Agent Terminal on a big-repo clone, window drawing (floated) | 78 MB |
+| Same, with Changes open on 50 changed files | 94–101 MB (Changes adds about 16–23 MB). No M4 target; within the 3-agent budget of 150 MB |
+
+Footprint with the window covered (not drawing) was 75 MB in both cases, which is why these runs float the window.
+
+M4 acceptance, scripted on scratch repos (`QUR_DEBUG_ACTIONS` + `QUR_DEBUG_PROMPT`):
+- **Merge:** an Agent Terminal with a file written into its worktree → Merge → the file is on `main` in a merge commit, and the checkout is clean. A real ACP agent with a one-line prompt (Allow Once, `end_turn`, then Merge) did the same.
+- **Conflict:** the same line changed on `main` and in the task → Merge → "Resolve in Qur" → Accept Both → Finish Merge → a merge commit keeping both lines, with no `MERGE_HEAD` (5 of 5 runs). Abort Merge → `HEAD` unchanged, the file as it was, no `MERGE_HEAD` (2 of 2).
+- **Discard:** removes the worktree, the `qur/…` branch and the task record.
+- **Git panel:** Stage All and Unstage All from the palette update the index; Commit with an empty message focuses the message field. Per-file stage/unstage, the file diff and a typed commit still need a check by hand (synthetic typing would go to whatever app is in front).
+- **Harness finding:** macOS stops drawing a covered window, so a view focused since the last frame (the code modal) isn't in GPUI's dispatch tree, and a scripted action dispatched to it went nowhere (2 of 4 conflict runs before the fix). The `QUR_DEBUG_ACTIONS` driver now falls back to the workspace's own node in that case. A window you're looking at keeps drawing, so users aren't affected.
+

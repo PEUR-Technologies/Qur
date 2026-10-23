@@ -19,6 +19,7 @@ use qur_agents::{AgentDef, TaskRecord};
 use qur_theme::Rgba;
 
 use crate::browser_view::{BrowserPane, BrowserPaneEvent, base64};
+use crate::changes_view::{ChangesEvent, ChangesView};
 use crate::live::{LiveEvent, LivePane};
 use crate::look::Look;
 use crate::monitor::{TaskMonitor, heat_kind, heat_status};
@@ -73,6 +74,18 @@ pub enum AgentEvent {
     MentionRequested,
     /// `/` typed: offer this agent's slash commands.
     SlashRequested,
+    /// Changes view: merge this task's branch into the user's branch.
+    Merge,
+    /// Changes view: discard the task.
+    Discard,
+}
+
+/// What the middle pane shows in layouts A/C.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Middle {
+    Live,
+    Browser,
+    Changes,
 }
 
 #[derive(Clone)]
@@ -185,8 +198,10 @@ pub struct AgentTask {
     images_ok: bool,
     /// Per-task Browser view (decision 26).
     pub browser: Entity<BrowserPane>,
-    /// Layouts A/C: the middle pane shows the browser instead of Live.
-    pub middle_browser: bool,
+    /// Layouts A/C: what the middle pane shows.
+    pub middle: Middle,
+    /// The task's diff, Merge, review comments (M4).
+    pub changes: Entity<ChangesView>,
     /// Files changed during the current turn (reload the browser when it ends).
     turn_wrote: bool,
     /// Slash commands the agent advertised.
@@ -203,7 +218,22 @@ impl EventEmitter<AgentEvent> for AgentTask {}
 
 impl AgentTask {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(record: TaskRecord, def: AgentDef, accent: Rgba, layout: Layout, wrap: bool, tab: usize, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(root: PathBuf, record: TaskRecord, def: AgentDef, accent: Rgba, layout: Layout, wrap: bool, tab: usize, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let changes = cx.new(|cx| ChangesView::new(root, record.worktree.clone(), record.base.clone(), record.branch.clone(), cx));
+        let changes_sub = cx.subscribe_in(&changes, window, |this, _, ev: &ChangesEvent, window, cx| match ev {
+            ChangesEvent::Merge => cx.emit(AgentEvent::Merge),
+            ChangesEvent::Discard => cx.emit(AgentEvent::Discard),
+            ChangesEvent::KeepWorking => {
+                let f = this.prompt.read(cx).focus.clone();
+                window.focus(&f, cx);
+            }
+            ChangesEvent::SendComments(text) => {
+                let text = text.clone();
+                this.prompt.update(cx, |p, cx| p.set_text(&text, cx));
+                this.submit(cx);
+            }
+            ChangesEvent::Open(p, line) => cx.emit(AgentEvent::OpenFile(p.clone(), *line)),
+        });
         let wt = record.worktree.clone();
         let monitor = cx.new(|cx| TaskMonitor::new(record.worktree.clone(), record.base.clone(), accent, cx));
         let label = def.label.clone();
@@ -271,14 +301,15 @@ impl AgentTask {
             pending: Vec::new(),
             images_ok: false,
             browser,
-            middle_browser: false,
+            middle: Middle::Live,
+            changes,
             turn_wrote: false,
             commands: Vec::new(),
             setting_up: false,
             focus: cx.focus_handle(),
             turn_started: None,
             _events: None,
-            _subs: vec![sub, live_sub, monitor_sub, browser_sub, files_sub],
+            _subs: vec![sub, live_sub, monitor_sub, browser_sub, files_sub, changes_sub],
         }
     }
 
@@ -404,9 +435,11 @@ impl AgentTask {
         if s == Status::Working && self.status != Status::NeedsYou {
             self.turn_wrote = false;
         }
-        // The turn changed files: refresh the page (dev servers without hot reload).
+        // The turn changed files: refresh the page (dev servers without hot
+        // reload) and the diff.
         if s == Status::Done && std::mem::take(&mut self.turn_wrote) {
             self.browser.update(cx, |b, _| b.reload());
+            self.changes.update(cx, |c, cx| c.refresh(cx));
         }
         let active = matches!(s, Status::Working | Status::NeedsYou);
         self.monitor.update(cx, |m, _| m.set_turn_active(active));
@@ -1046,6 +1079,9 @@ impl AgentTask {
     }
 
     pub fn set_view(&mut self, v: View, cx: &mut Context<Self>) {
+        if v == View::Changes {
+            self.changes.update(cx, |c, cx| c.refresh(cx));
+        }
         self.view = v;
         cx.notify();
     }
@@ -1093,22 +1129,40 @@ impl AgentTask {
     pub fn shows_browser(&self) -> bool {
         match self.layout {
             Layout::B => self.view == View::Browser,
-            _ => self.middle_browser,
+            _ => self.middle == Middle::Browser,
         }
     }
 
     pub fn show_browser(&mut self, on: bool, cx: &mut Context<Self>) {
         match self.layout {
             Layout::B => self.view = if on { View::Browser } else { View::Live },
-            _ => self.middle_browser = on,
+            _ => self.middle = if on { Middle::Browser } else { Middle::Live },
         }
         cx.notify();
     }
 
-    /// Layouts A/C: Live or Browser, with a small switch above.
+    /// Review Changes (Cmd+4 / Agent menu): show the diff, freshly computed.
+    pub fn show_changes(&mut self, cx: &mut Context<Self>) {
+        match self.layout {
+            Layout::B => self.view = View::Changes,
+            _ => self.middle = Middle::Changes,
+        }
+        self.changes.update(cx, |c, cx| c.refresh(cx));
+        cx.notify();
+    }
+
+    fn set_middle(&mut self, m: Middle, cx: &mut Context<Self>) {
+        self.middle = m;
+        if m == Middle::Changes {
+            self.changes.update(cx, |c, cx| c.refresh(cx));
+        }
+        cx.notify();
+    }
+
+    /// Layouts A/C: Live, Browser or Changes, with a small switch above.
     fn middle(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
         let ui = look.theme.ui.clone();
-        let tab = |label: &'static str, on: bool, id: &'static str, browser: bool| {
+        let tab = |label: &'static str, on: bool, id: &'static str, m: Middle| {
             div()
                 .id(id)
                 .px(look.z(8.))
@@ -1119,9 +1173,10 @@ impl AgentTask {
                 .text_color(look.c(if on { ui.text } else { ui.text_muted }))
                 .when(on, |d| d.bg(look.c(ui.active_bg)))
                 .child(label)
-                .on_click(cx.listener(move |t, _, _, cx| t.show_browser(browser, cx)))
+                .on_click(cx.listener(move |t, _, _, cx| t.set_middle(m, cx)))
         };
-        let browser = self.middle_browser;
+        let m = self.middle;
+        let totals = self.changes.read(cx).totals;
         div()
             .size_full()
             .flex()
@@ -1136,10 +1191,19 @@ impl AgentTask {
                     .gap(look.z(2.))
                     .border_b_1()
                     .border_color(look.c(ui.border))
-                    .child(tab("Live", !browser, "mid-live", false))
-                    .child(tab("Browser", browser, "mid-browser", true)),
+                    .child(tab("Live", m == Middle::Live, "mid-live", Middle::Live))
+                    .child(tab("Browser", m == Middle::Browser, "mid-browser", Middle::Browser))
+                    .child(tab("Changes", m == Middle::Changes, "mid-changes", Middle::Changes))
+                    .when(totals.0 + totals.1 > 0, |d| {
+                        d.child(div().text_size(look.text(-3.)).text_color(look.c(look.theme.diff.added_text)).child(format!("+{}", totals.0)))
+                            .child(div().text_size(look.text(-3.)).text_color(look.c(look.theme.diff.removed_text)).child(format!("−{}", totals.1)))
+                    }),
             )
-            .child(div().flex_1().min_h(px(0.)).child(if browser { self.browser.clone().into_any_element() } else { self.live.clone().into_any_element() }))
+            .child(div().flex_1().min_h(px(0.)).child(match m {
+                Middle::Live => self.live.clone().into_any_element(),
+                Middle::Browser => self.browser.clone().into_any_element(),
+                Middle::Changes => self.changes.clone().into_any_element(),
+            }))
     }
 }
 
@@ -1186,14 +1250,7 @@ impl Render for AgentTask {
                     .child(div().flex_1().min_h(px(0.)).child(self.browser.clone()))
                     .child(self.notes_compact(&look, cx))
                     .into_any_element(),
-                View::Changes => div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(look.c(ui.text_muted))
-                    .child("Changes and Merge arrive in M4. The Files tree shows +n −m per file now.")
-                    .into_any_element(),
+                View::Changes => div().flex_1().min_h(px(0.)).child(self.changes.clone()).into_any_element(),
             },
             Layout::C => {
                 let open = self.drawer_open;

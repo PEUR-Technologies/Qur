@@ -6,8 +6,10 @@
 mod assets;
 mod agent_view;
 mod browser_view;
+mod changes_view;
 mod commands;
 mod editor_view;
+mod git_panel;
 mod input;
 mod live;
 mod look;
@@ -67,8 +69,17 @@ pub fn first_frame(handle: AnyWindowHandle, cx: &mut App) {
                     continue;
                 }
                 bg.timer(std::time::Duration::from_millis(200)).await;
-                let _ = handle.update(cx, |_, window, cx| match cx.build_action(name, None) {
-                    Ok(a) => window.dispatch_action(a, cx),
+                println!("ACTION {name} t={}ms", START.get().map(|s| s.elapsed().as_millis()).unwrap_or(0));
+                let _ = handle.update(cx, |root, window, cx| match cx.build_action(name, None) {
+                    // macOS stops drawing a fully covered window, so a view
+                    // focused since the last frame (e.g. the code modal) isn't in
+                    // the dispatch tree yet and the action would go nowhere.
+                    // Scripted runs usually sit behind other windows: fall back
+                    // to the workspace's own node.
+                    Ok(a) => match root.downcast::<workspace::Workspace>().map(|ws| ws.read(cx).root_focus()) {
+                        Ok(ws) if !ws.contains_focused(window, cx) => ws.dispatch_action(a.as_ref(), window, cx),
+                        _ => window.dispatch_action(a, cx),
+                    },
                     Err(e) => eprintln!("QUR_DEBUG_ACTIONS: {name}: {e}"),
                 });
             }

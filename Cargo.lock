@@ -3681,6 +3681,7 @@ dependencies = [
  "qur_browser",
  "qur_config",
  "qur_editor",
+ "qur_git",
  "qur_heat",
  "qur_syntax",
  "qur_theme",
@@ -3721,6 +3722,10 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width",
 ]
+
+[[package]]
+name = "qur_git"
+version = "0.1.0"
 
 [[package]]
 name = "qur_heat"

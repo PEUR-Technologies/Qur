@@ -15,6 +15,7 @@ qur_agents.workspace = true
 qur_browser.workspace = true
 qur_config.workspace = true
 qur_editor.workspace = true
+qur_git.workspace = true
 qur_heat.workspace = true
 qur_syntax.workspace = true
 qur_theme.workspace = true

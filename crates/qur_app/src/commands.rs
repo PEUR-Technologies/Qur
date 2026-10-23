@@ -24,6 +24,7 @@ pub mod qur {
             FocusPrompt, StopAgent, TakeOver, NextAgent, PrevAgent, ReviewChanges, Merge,
             KeepWorking, DiscardTask, OpenWorktreeInTerminal, RevealWorktree, KeyboardShortcuts,
             RunDoctor, ShowLogs, ReportProblem, ExpandSelection, ShrinkSelection,
+            GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge,
         ]
     );
 
@@ -251,7 +252,10 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(terminal::SendLineEnd, "Terminal", "Line End", "cmd-right", T, R),
     cmd!(terminal::SendKillLine, "Terminal", "Kill Line", "cmd-backspace", T, R),
     // Panels
-    cmd!(qur::GitPanel, "View", "Git", "ctrl-shift-g", W, L("M4")),
+    cmd!(qur::GitPanel, "View", "Source Control", "ctrl-shift-g", NT, R),
+    cmd!(qur::GitStageAll, "Git", "Stage All Changes", "", W, R),
+    cmd!(qur::GitUnstageAll, "Git", "Unstage All Changes", "", W, R),
+    cmd!(qur::GitCommit, "Git", "Commit Staged…", "", W, R),
     cmd!(qur::SearchPanel, "View", "Search", "", W, L("M6")),
     // Agents and peek
     cmd!(qur::FocusPrompt, "Agent", "Focus Prompt", "cmd-i", W, R),
@@ -262,10 +266,17 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(agent::AllowOnce, "Agent", "Permission: Allow Once", "", W, R),
     cmd!(agent::AllowAlways, "Agent", "Permission: Allow for This Task", "", W, R),
     cmd!(agent::Deny, "Agent", "Permission: Deny", "", W, R),
-    cmd!(qur::ReviewChanges, "Agent", "Review Changes", "", W, L("M4")),
-    cmd!(qur::Merge, "Agent", "Merge…", "", W, L("M4")),
-    cmd!(qur::KeepWorking, "Agent", "Keep Working", "", W, L("M4")),
+    cmd!(qur::ReviewChanges, "Agent", "Review Changes", "", W, R),
+    cmd!(qur::Merge, "Agent", "Merge into My Branch", "", W, R),
+    cmd!(qur::KeepWorking, "Agent", "Keep Working", "", W, R),
     cmd!(qur::DiscardTask, "Agent", "Discard Task…", "", W, R),
+    cmd!(qur::NextConflict, "Merge", "Next Conflict", "", W, R),
+    cmd!(qur::PrevConflict, "Merge", "Previous Conflict", "", W, R),
+    cmd!(qur::AcceptOurs, "Merge", "Accept Ours", "", W, R),
+    cmd!(qur::AcceptTheirs, "Merge", "Accept Theirs", "", W, R),
+    cmd!(qur::AcceptBoth, "Merge", "Accept Both", "", W, R),
+    cmd!(qur::FinishMerge, "Merge", "Finish Merge", "", W, R),
+    cmd!(qur::AbortMerge, "Merge", "Abort Merge", "", W, R),
     cmd!(qur::OpenWorktreeInTerminal, "Agent", "Open Task Worktree in Terminal", "", W, R),
     cmd!(qur::RevealWorktree, "Agent", "Reveal Worktree in Finder", "", W, R),
     cmd!(qur::CyclePeekLayout, "View", "Cycle Peek Layout", "cmd-k cmd-l", NT, R),
@@ -375,6 +386,8 @@ pub struct MenuState {
     pub sidebar: bool,
     pub soft_wrap: bool,
     pub recent: Vec<PathBuf>,
+    /// A merge stopped on conflicts: the Merge Conflicts items are enabled.
+    pub merging: bool,
 }
 
 fn item(action: impl Action) -> MenuItem {
@@ -487,6 +500,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::RevealInFiles),
             item(qur::ToggleTerminal),
             item(qur::GitPanel),
+            M::submenu(Menu::new("Git").items([item(qur::GitStageAll), item(qur::GitUnstageAll), item(qur::GitCommit)])),
             item(qur::SearchPanel),
             sep(),
             M::submenu(Menu::new("Peek Layout").items([
@@ -540,6 +554,15 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::Merge),
             item(qur::KeepWorking),
             item(qur::DiscardTask),
+            M::submenu(Menu::new("Merge Conflicts").items([
+                item(qur::NextConflict).disabled(!s.merging),
+                item(qur::PrevConflict).disabled(!s.merging),
+                item(qur::AcceptOurs).disabled(!s.merging),
+                item(qur::AcceptTheirs).disabled(!s.merging),
+                item(qur::AcceptBoth).disabled(!s.merging),
+                item(qur::FinishMerge).disabled(!s.merging),
+                item(qur::AbortMerge).disabled(!s.merging),
+            ])),
             sep(),
             item(qur::OpenWorktreeInTerminal),
             item(qur::RevealWorktree),

@@ -2,7 +2,7 @@
 
 Read this first when picking the project up (person or Claude session). It says where things stand, what was decided, and what to do next. Keep it current: update the **Status** and **Next** sections at the end of every work session.
 
-Last updated: 2026-10-23
+Last updated: 2026-10-23 (M4 done)
 
 ## What Qur is
 
@@ -36,9 +36,9 @@ Summary of the owner decisions so far:
 
 **M0–M3 and Browser + Inspect are done** and on `main`. Commits: "M0: spikes", "M1: editor shell", "M2: agents in worktrees", "M3: Live view + heatmap", "Browser + Inspect", "Add README". The repo lives at https://github.com/PEUR-Technologies/Qur (private).
 
-**M4 (Changes + Merge + Git panel) is in progress on the branch `m4-wip`.** It builds, and all 144 workspace tests pass (qur_git: 16 passed, 1 timing test ignored). The UI flows have **not** been verified end to end yet. Merge `m4-wip` into `main` only after the checks under "Next" pass.
+**M4 (Changes + Merge + Git panel) is done** and merged into `main` (2026-10-23). All 144 workspace tests pass (qur_git: 16 passed, 1 timing test ignored). Merge, conflicts (Finish and Abort), Discard, and the Git panel's Stage All / Unstage All were verified end to end with scripted runs; see `docs/budget.md` (M4). Still to check by hand: per-file stage/unstage, the file diff and a typed commit in the Git panel.
 
-M4 built so far (on `m4-wip`):
+M4 delivered:
 - **`qur_git` crate** (std + git CLI only):
   - `task_diff` and `diff_totals` (temp index copy with intent-to-add for untracked files; renames via `-M`; settled at about 60 ms on big-repo).
   - `commit_all`, `precheck`, and `merge_clean` → `Merged | UpToDate | Conflicts | Refused`. Merge uses merge-tree → commit-tree → read-tree → update-ref, so the user's index, stash and untracked files stay byte-identical (tested). If HEAD moves mid-merge it rolls back and refuses.
@@ -128,6 +128,7 @@ Env:
 - `QUR_HOME`: the settings folder. **Always set it to a scratch dir in tests**, so the owner's real settings stay untouched.
 - `QUR_BENCH=first_frame|scroll|type|theme|glow`: benchmarks; it also floats the window so it keeps drawing.
 - `QUR_DEBUG_ACTIONS`: comma-separated action names, plus `wait:<ms>`.
+- `QUR_DEBUG_PROMPT="0,1"`: answer native dialogs in order with these button indexes (logged as `PROMPT …`). With `QUR_DEBUG_ACTIONS` set, top-bar messages are logged as `FLASH …`.
 - `QUR_DEBUG_TASKS="prompt1|prompt2"`: start tasks on launch. Use tiny prompts.
 - `QUR_DEBUG_BROWSER_URL` (`{slug}` is replaced), `QUR_DEBUG_PICK=<css selector>`, `QUR_DEBUG_SEND`: drive the browser and inspector.
 - `QUR_ACP_LOG=<dir>`: log ACP traffic. `QUR_WEB_DEVTOOLS=1`: enable the WebKit inspector.
@@ -136,12 +137,9 @@ Test fixtures: `spikes/fixtures/big-repo` must be left clean afterwards (no `qur
 
 ## Next
 
-1. **Finish M4 on `m4-wip`:**
-   - **Verify Merge end to end in the UI.** The one scripted attempt didn't merge (no `hello.txt` landed). The likely cause is timing in the script: AllowOnce was sent before the permission request arrived, and Merge stops the agent. Let the agent's turn finish before triggering Merge. This is unverified.
-   - Test the conflict flow in the UI: make main and the task edit the same line, then Merge → conflict prompt → editor conflict bar → Finish merge (and Abort).
-   - Test the Git panel by hand: stage, unstage, file diff, commit.
-   - Record M4 in `docs/budget.md`: footprint with Changes open, and diff time on big-repo.
-   - Then merge `m4-wip` into `main`.
+1. **M4 follow-ups:**
+   - Owner check by hand: in the Git panel, per-file stage/unstage, the file diff, and a commit with a typed message.
+   - Scripted runs: set `QUR_DEBUG_PROMPT="0,1"` to answer native dialogs in order (button index). The `QUR_DEBUG_ACTIONS` driver sends actions to the workspace when the focused view isn't drawn yet (covered window).
    - Known qur_git gaps:
      - `root` must be the top of the checkout.
      - `diff --cc` entries are skipped.
