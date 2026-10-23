@@ -33,6 +33,8 @@ toml_edit = { version = "0.25.17", default-features = false, features = ["parse"
 tree-sitter = "0.27.1"
 qur_browser = { path = "crates/qur_browser" }
 qur_git = { path = "crates/qur_git" }
+qur_search = { path = "crates/qur_search" }
+regex = "1.13"
 
 [profile.release]
 opt-level = 3

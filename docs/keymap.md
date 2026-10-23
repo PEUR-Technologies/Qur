@@ -126,6 +126,9 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+F` (in a terminal) | Find in Terminal (regex; ↩ older, ⇧↩ newer, Esc closes) | M5 ✅ |
 | `Cmd`-click (in a terminal) | Open a URL, or `path:line:col` in the code modal | M5 ✅ |
 | Agent menu / double-click a button | Rename Agent… | M5 ✅ |
+| `Cmd+Shift+F` / `Cmd+Shift+H` | Find / Replace in Project (Search view; ⌥C case, ⌥W word, ⌥R regex) | M6 ✅ |
+| Qur > Vim Mode | Vim keys in the code modal: normal / insert / visual / visual line | M6 ✅ |
+| Qur > Setup… | First-run picker (Enter saves, Esc cancels) | M6 ✅ |
 | Agent > Merge Conflicts | Next / Previous Conflict, Accept Ours / Theirs / Both, Finish Merge, Abort Merge (no default keys) | M4 ✅ |
 | View > Git | Stage All Changes, Unstage All Changes, Commit Staged… (no default keys) | M4 ✅ |
 | Changes view: click a line / ⌘-click | Comment on the line (sent to the agent as one message) / open the file there | M4 ✅ |

@@ -42,3 +42,7 @@ Runtime: `tree-sitter` 0.27.1 (MIT), `tree-sitter-language` 0.1.9 (MIT), `stream
 | Component | License | Notes |
 |---|---|---|
 | objc2-web-kit 0.3.2 (with objc2 0.6, objc2-foundation/app-kit 0.3, block2 0.6) | MIT | Rust bindings to the system WKWebView; WebKit itself ships with macOS (not bundled) |
+
+## Sounds
+
+- `assets/sounds/chime.wav`: the alert chime, generated for Qur (two sine notes with a soft decay). No third-party content.

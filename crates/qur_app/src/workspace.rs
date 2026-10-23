@@ -21,6 +21,7 @@ use qur_editor::Point;
 use qur_theme::{Registry, Rgba, ThemeChoice};
 
 use crate::agent_view::{AgentEvent, AgentTask, Layout, Status, View};
+use crate::alerts;
 use crate::changes_view::{ChangesEvent, ChangesView};
 use crate::git_panel::{GitEvent, GitPanel};
 use crate::live::{LiveEvent, LivePane};
@@ -32,6 +33,8 @@ use crate::input::{InputEvent, TextInput};
 use crate::look::Look;
 use crate::picker::{PickItem, Picker, PickerEvent};
 use crate::prompt::{PromptEvent, PromptInput};
+use crate::search_view::{SearchEvent, SearchPanel};
+use crate::setup_view::{SetupEvent, SetupView};
 use crate::terminal::{Kind, PanelEvent, TerminalPanel};
 use crate::tree_view::{TreeEvent, TreeView};
 
@@ -62,6 +65,8 @@ struct TermTask {
     pending_type: Option<String>,
     /// Turn detection (M5): the terminal was busy, and files changed meanwhile.
     was_busy: bool,
+    /// When the current busy stretch began (alerts: only long ones count).
+    busy_since: Option<Instant>,
     wrote: bool,
 }
 
@@ -94,6 +99,8 @@ enum Selected {
     Shell(usize),
     /// The Git panel for the main checkout.
     Git,
+    /// Project search (M6) over `search`'s root.
+    Search,
 }
 
 enum PickKind {
@@ -113,6 +120,8 @@ enum Overlay {
     GoTo(Entity<TextInput>),
     /// Rename Agent…: the selected agent's name.
     Rename(Entity<TextInput>),
+    /// The first-run picker (M6), also Qur > Setup….
+    Setup(Entity<SetupView>),
     Transparency { project_scope: bool },
     NewTask { input: Entity<PromptInput>, agent: usize },
 }
@@ -136,6 +145,8 @@ pub struct Workspace {
     /// Sessions that finished, errored or need you while not selected (Orca's unread).
     unread: HashSet<String>,
     checks: HashMap<String, Check>,
+    /// The status each agent was last alerted for (one alert per change).
+    alerted: HashMap<String, Status>,
     /// Run Project sessions (terminal ids) per task.
     runs: HashMap<String, usize>,
     /// One file tree per root (main checkout and each worktree).
@@ -162,6 +173,7 @@ pub struct Workspace {
     layout: Layout,
     _root_watcher: Option<qur_watch::Watcher>,
     git: Option<Entity<GitPanel>>,
+    search: Option<Entity<SearchPanel>>,
     merge: Option<MergeState>,
     slider: Rc<Cell<Bounds<Pixels>>>,
     sliding: bool,
@@ -205,6 +217,10 @@ impl Workspace {
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
                     this.sync_menus(cx);
+                    // Coming back to the agent you were on counts as seeing it.
+                    if let Some(Selected::Agent(id) | Selected::TermTask(id)) = this.selected.clone() {
+                        this.seen(&id, window, cx);
+                    }
                     // Pick up files created outside Qur (the M3 watcher replaces this).
                     for t in this.trees.values() {
                         t.update(cx, |t, cx| t.refresh(cx));
@@ -215,6 +231,10 @@ impl Workspace {
         ];
         let mut state = qur_config::State::load();
         state.touch_project(&root);
+        // First run (M6): no config.toml yet. A home that already has one
+        // predates the picker and is left alone.
+        let first_run = !state.setup_done && !qur_config::config_path().exists();
+        state.setup_done = true;
         state.save().ok();
         crate::mark("state_saved");
         let mut ws = Workspace {
@@ -233,6 +253,7 @@ impl Workspace {
             selected: None,
             unread: HashSet::new(),
             checks: HashMap::new(),
+            alerted: HashMap::new(),
             runs: HashMap::new(),
             trees: HashMap::new(),
             buffers: Buffers { list: Vec::new() },
@@ -253,6 +274,7 @@ impl Workspace {
             layout: Layout::A,
             _root_watcher: None,
             git: None,
+            search: None,
             merge: None,
             slider: Rc::new(Cell::new(Bounds::default())),
             sliding: false,
@@ -268,6 +290,11 @@ impl Workspace {
         ws.restore_tasks(window, cx);
         // Something must hold focus, or shortcuts have nowhere to go.
         window.focus(&ws.focus, cx);
+        // The first-run picker, once (not in scripted runs, unless asked).
+        let scripted = ["QUR_DEBUG_ACTIONS", "QUR_DEBUG_TASKS", "QUR_BENCH"].iter().any(|v| std::env::var_os(v).is_some());
+        if (first_run && !scripted) || std::env::var_os("QUR_DEBUG_SETUP").is_some() {
+            ws.open_setup(&qur::CheckSetup, window, cx);
+        }
         if let Some(e) = err.or(roster_err) {
             ws.flash(e, cx);
         }
@@ -336,6 +363,8 @@ impl Workspace {
         let wrap = self.config.editor.soft_wrap;
         for b in &self.buffers.list {
             b.update(cx, |b, cx| b.set_soft_wrap(wrap, cx));
+            let vim = self.config.keys.vim;
+            b.update(cx, |b, cx| b.set_vim(vim, cx));
         }
         self.apply_look(window, cx);
         self.sync_menus(cx);
@@ -397,6 +426,7 @@ impl Workspace {
             soft_wrap: self.code.as_ref().map(|e| e.read(cx).soft_wrap()).unwrap_or(self.config.editor.soft_wrap),
             recent: qur_config::State::load().recent_projects,
             merging: self.merge.is_some(),
+            vim: self.config.keys.vim,
         }
     }
 
@@ -446,6 +476,7 @@ impl Workspace {
         match &self.selected {
             Some(Selected::Agent(id)) => self.agent(id).map(|a| a.read(cx).record.worktree.clone()).unwrap_or(self.root.clone()),
             Some(Selected::TermTask(id)) => self.term_task(id).map(|t| t.record.worktree.clone()).unwrap_or(self.root.clone()),
+            Some(Selected::Search) => self.search.as_ref().map(|s| s.read(cx).root.clone()).unwrap_or(self.root.clone()),
             _ => self.root.clone(),
         }
     }
@@ -481,7 +512,8 @@ impl Workspace {
         self.selected = s;
         match &self.selected {
             Some(Selected::Agent(id)) | Some(Selected::TermTask(id)) => {
-                self.unread.remove(id);
+                let id = id.clone();
+                self.seen(&id, window, cx);
             }
             _ => {}
         }
@@ -514,6 +546,11 @@ impl Workspace {
             Some(Selected::Git) => {
                 self.git_panel(window, cx);
                 window.focus(&self.focus, cx);
+            }
+            Some(Selected::Search) => {
+                if let Some(s) = &self.search {
+                    s.update(cx, |s, cx| s.focus_query(window, cx));
+                }
             }
             None => window.focus(&self.focus, cx),
         }
@@ -569,6 +606,7 @@ impl Workspace {
             first_run: None,
             pending_type: None,
             was_busy: false,
+            busy_since: None,
             wrote: false,
         });
         self.refresh_overlaps(cx);
@@ -665,10 +703,27 @@ impl Workspace {
                 let attention = matches!(status, Status::Done | Status::NeedsYou | Status::Error(_));
                 if status == Status::Working {
                     this.checks.remove(&id);
+                    this.alerted.remove(&id);
                 }
-                if attention && this.selected != Some(Selected::Agent(id.clone())) {
-                    this.unread.insert(id);
+                let looking = window.is_window_active() && this.selected == Some(Selected::Agent(id.clone()));
+                if attention && !looking {
+                    this.unread.insert(id.clone());
+                    if this.alerted.get(&id) != Some(&status) {
+                        this.alerted.insert(id.clone(), status.clone());
+                        let (title, last) = {
+                            let a = a.read(cx);
+                            (a.record.title.clone(), a.last_line())
+                        };
+                        let (kind, detail) = match &status {
+                            Status::NeedsYou => (alerts::Kind::NeedsApproval, None),
+                            Status::Error(e) => (alerts::Kind::Failed, Some(e.clone())),
+                            _ => (alerts::Kind::Finished, last),
+                        };
+                        let tag = alert_tag(window, &id);
+                        alerts::fire(cx, &this.config.alerts, tag, &title, kind, detail.as_deref());
+                    }
                 }
+                this.sync_badge(window);
                 this.save_tasks(cx);
                 cx.notify();
             }
@@ -912,6 +967,7 @@ impl Workspace {
     fn terminal_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut turns = Vec::new();
         let mut typed = Vec::new();
+        let mut finished = Vec::new();
         let mut renamed = false;
         {
             let panel = self.terms.read(cx);
@@ -940,14 +996,31 @@ impl Workspace {
                 }
                 if busy {
                     t.was_busy = true;
-                } else if std::mem::take(&mut t.was_busy) && std::mem::take(&mut t.wrote) {
-                    turns.push(t.record.id.clone());
+                    t.busy_since.get_or_insert_with(Instant::now);
+                } else {
+                    // A long busy stretch that went quiet: the agent is
+                    // probably done and waiting for you.
+                    if t.busy_since.take().is_some_and(|b| b.elapsed() >= Duration::from_secs(7)) {
+                        finished.push((t.record.id.clone(), t.record.title.clone()));
+                    }
+                    if std::mem::take(&mut t.was_busy) && std::mem::take(&mut t.wrote) {
+                        turns.push(t.record.id.clone());
+                    }
                 }
             }
         }
         if renamed {
             self.save_tasks(cx);
         }
+        for (id, title) in finished {
+            let looking = window.is_window_active() && self.selected == Some(Selected::TermTask(id.clone()));
+            if !looking {
+                self.unread.insert(id.clone());
+                let tag = alert_tag(window, &id);
+                alerts::fire(cx, &self.config.alerts, tag, &title, alerts::Kind::Finished, Some("Went quiet: probably waiting for you"));
+            }
+        }
+        self.sync_badge(window);
         for (tid, p) in typed {
             self.terms.update(cx, |panel, cx| {
                 panel.type_text(tid, &p, cx);
@@ -959,6 +1032,36 @@ impl Workspace {
                 self.run_checks(&id, false, window, cx);
             }
         }
+    }
+
+    /// You looked at an agent: it no longer needs you (badge, notification).
+    fn seen(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.unread.remove(id) {
+            alerts::dismiss(cx, &alert_tag(window, id));
+        }
+        self.sync_badge(window);
+    }
+
+    fn sync_badge(&self, window: &Window) {
+        let n = self.unread.iter().filter(|id| self.task_exists(id)).count();
+        alerts::set_needs(window.window_handle().window_id().as_u64(), n, self.config.alerts.badge);
+    }
+
+    fn task_exists(&self, id: &str) -> bool {
+        self.agents.iter().any(|a| agent_id_matches(a, id)) || self.term_tasks.iter().any(|t| t.record.id == id)
+    }
+
+    /// A notification was clicked: show that agent (main.rs routes it here).
+    pub fn reveal_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.agent(id).is_some() {
+            self.select(Some(Selected::Agent(id.to_string())), window, cx);
+        } else if self.term_tasks.iter().any(|t| t.record.id == id) {
+            self.select(Some(Selected::TermTask(id.to_string())), window, cx);
+        } else {
+            return false;
+        }
+        window.activate_window();
+        true
     }
 
     fn new_terminal_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -1476,6 +1579,76 @@ impl Workspace {
         .detach();
     }
 
+    /// Find in Project (Cmd+Shift+F), Replace in Project (Cmd+Shift+H), View >
+    /// Search: the Search view over the tree you're looking at (the selected
+    /// agent's worktree, or the main checkout).
+    fn show_search(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.current_root(cx);
+        // Seed the query with a one-line selection in the code modal.
+        let seed = self
+            .code
+            .as_ref()
+            .and_then(|c| c.read(cx).selected_text())
+            .filter(|t| !t.is_empty() && !t.contains('\n'))
+            // Dev/test: QUR_DEBUG_SEARCH=<query> fills the field.
+            .or_else(|| std::env::var("QUR_DEBUG_SEARCH").ok());
+        let panel = match &self.search {
+            Some(s) => s.clone(),
+            None => {
+                let s = cx.new(|cx| SearchPanel::new(root.clone(), window, cx));
+                let sub = cx.subscribe_in(&s, window, |this, panel, ev: &SearchEvent, window, cx| match ev {
+                    SearchEvent::Open(path, line, col) => {
+                        let path = path.clone();
+                        this.open_path_at(&path, Some(Point { line: *line, col: *col }), window, cx);
+                    }
+                    SearchEvent::Message(m) => this.flash(m.clone(), cx),
+                    SearchEvent::ConfirmReplace { files, matches } => {
+                        let detail = format!(
+                            "Replace {matches} match{} in {files} file{} under {}? Open files reload from disk.",
+                            if *matches == 1 { "" } else { "es" },
+                            if *files == 1 { "" } else { "s" },
+                            panel.read(cx).root.display()
+                        );
+                        let answer = ask(window, PromptLevel::Warning, "Replace All", Some(&detail), &["Replace", "Cancel"], cx);
+                        let panel = panel.clone();
+                        cx.spawn_in(window, async move |_, cx| {
+                            if answer.await.ok() == Some(0) {
+                                panel.update(cx, |p, cx| p.replace_all(cx));
+                            }
+                        })
+                        .detach();
+                    }
+                });
+                self._subs.push(sub);
+                self.search = Some(s.clone());
+                s
+            }
+        };
+        panel.update(cx, |p, cx| {
+            if let Some(seed) = seed {
+                p.query.update(cx, |q, cx| q.set_text(&seed, cx));
+                p.run(cx);
+            }
+            p.set_root(root, cx);
+        });
+        self.select(Some(Selected::Search), window, cx);
+        if replace {
+            panel.update(cx, |p, cx| p.focus_replace(window, cx));
+        }
+    }
+
+    fn find_in_project(&mut self, _: &qur::FindInProject, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_search(false, window, cx);
+    }
+
+    fn replace_in_project(&mut self, _: &qur::ReplaceInProject, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_search(true, window, cx);
+    }
+
+    fn search_panel(&mut self, _: &qur::SearchPanel, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_search(false, window, cx);
+    }
+
     fn git_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<GitPanel> {
         if let Some(g) = &self.git {
             return g.clone();
@@ -1820,8 +1993,13 @@ impl Workspace {
             None => {
                 let wrap = self.config.editor.soft_wrap;
                 let tab = self.config.editor.tab_width;
+                let vim = self.config.keys.vim;
                 let view = match EditorView::load(path) {
-                    Ok(loaded) => cx.new(|cx| EditorView::new(loaded, wrap, tab, cx)),
+                    Ok(loaded) => cx.new(|cx| {
+                        let mut v = EditorView::new(loaded, wrap, tab, cx);
+                        v.set_vim(vim, cx);
+                        v
+                    }),
                     Err(e) => {
                         self.flash(format!("Couldn't open {}: {e}", path.display()), cx);
                         return;
@@ -1875,6 +2053,12 @@ impl Workspace {
             Some(Selected::Shell(_)) | Some(Selected::TermTask(_)) => {
                 let f = self.terms.read(cx).focus.clone();
                 window.focus(&f, cx);
+            }
+            Some(Selected::Search) => {
+                if let Some(s) = &self.search {
+                    let f = s.read(cx).query.read(cx).focus.clone();
+                    window.focus(&f, cx);
+                }
             }
             Some(Selected::Git) | None => window.focus(&self.focus, cx),
         }
@@ -2411,6 +2595,59 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Qur > Setup… (and the first launch): the first-run picker.
+    /// Qur > Vim Mode: on/off for every editor, saved as `[keys] vim`.
+    fn toggle_vim(&mut self, _: &qur::VimMode, window: &mut Window, cx: &mut Context<Self>) {
+        let on = !self.config.keys.vim;
+        self.write_setting(false, "keys.vim", Some(Value::Bool(on)), cx);
+        self.reload_settings(window, cx);
+        self.broadcast_reload(cx);
+        self.sync_menus(cx);
+        self.flash(if on { "Vim mode on (Esc for normal mode)" } else { "Vim mode off" }, cx);
+    }
+
+    fn open_setup(&mut self, _: &qur::CheckSetup, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_overlays(window, cx);
+        self.prev_focus = window.focused(cx);
+        let view = cx.new(|cx| SetupView::new(&self.config, &self.roster, cx));
+        let sub = cx.subscribe_in(&view, window, |this, _, ev: &SetupEvent, window, cx| match ev {
+            SetupEvent::PreviewTheme(name) => {
+                this.preview_theme = Some(name.clone());
+                this.apply_look(window, cx);
+            }
+            SetupEvent::Cancel => this.close_overlays(window, cx),
+            SetupEvent::Done(c) => {
+                this.preview_theme = None;
+                this.write_setting(false, "theme", Some(c.theme.as_str().into()), cx);
+                this.write_setting(false, "peek_layout", Some(c.layout.as_str().into()), cx);
+                this.write_setting(false, "keys.vim", Some(Value::Bool(c.vim)), cx);
+                if !c.agents.is_empty() {
+                    // Keep agents added by hand; replace the ones the picker knows.
+                    let mut roster = qur_agents::Roster::load().0;
+                    roster.agents.retain(|a| !matches!(a.id.as_str(), "claude" | "claude-cli" | "aider"));
+                    let mut agents = c.agents.clone();
+                    agents.extend(roster.agents);
+                    roster.agents = agents;
+                    if let Err(e) = roster.save() {
+                        this.flash(format!("Couldn't save agents.toml: {e}"), cx);
+                    }
+                    this.roster = roster;
+                }
+                this.overlay = None;
+                this.reload_settings(window, cx);
+                this.set_layout(Layout::parse(&c.layout), cx);
+                this.broadcast_reload(cx);
+                this.restore_focus(window, cx);
+                this.flash("Setup saved", cx);
+            }
+        });
+        self._subs.push(sub);
+        let f = view.read(cx).focus.clone();
+        window.focus(&f, cx);
+        self.overlay = Some(Overlay::Setup(view));
+        cx.notify();
+    }
+
     fn new_agent_task(&mut self, _: &qur::NewAgentTask, window: &mut Window, cx: &mut Context<Self>) {
         self.close_overlays(window, cx);
         self.prev_focus = window.focused(cx);
@@ -2481,7 +2718,7 @@ impl Workspace {
     }
 
     fn close_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Overlay::Picker(_, PickKind::Themes { .. })) = &self.overlay
+        if matches!(&self.overlay, Some(Overlay::Picker(_, PickKind::Themes { .. })) | Some(Overlay::Setup(_)))
             && self.preview_theme.take().is_some()
         {
             self.apply_look(window, cx);
@@ -2620,6 +2857,7 @@ impl Workspace {
             Some(Selected::TermTask(id)) => self.term_task(id).map(|t| t.record.title.clone()),
             Some(Selected::Shell(s)) => self.terms.read(cx).session_by_id(*s).map(|s| s.label.clone()),
             Some(Selected::Git) => Some("Source control".into()),
+            Some(Selected::Search) => Some("Search".into()),
             None => None,
         }
     }
@@ -2999,6 +3237,11 @@ impl Workspace {
                     return g.clone().into_any_element();
                 }
             }
+            Some(Selected::Search) => {
+                if let Some(s) = &self.search {
+                    return s.clone().into_any_element();
+                }
+            }
             None => {}
         }
         let hint = |label: &'static str, keys: &str| {
@@ -3033,6 +3276,7 @@ impl Workspace {
     fn code_modal(&self, look: &Look, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let code = self.code.clone()?;
         let ui = &look.theme.ui;
+        let vim = code.read(cx).vim_status();
         let (title, dirty, owner) = {
             let c = code.read(cx);
             let path = c.path().map(Path::to_path_buf).unwrap_or_default();
@@ -3085,6 +3329,7 @@ impl Workspace {
                                 .child(div().min_w(px(0.)).truncate().text_color(look.c(ui.text)).child(title))
                                 .when(dirty, |d| d.child(div().size(look.z(6.)).flex_none().rounded(look.z(1.5)).bg(look.c(ui.text_secondary))))
                                 .children(owner.map(|w| div().flex_none().text_color(look.c(ui.text_muted)).child(format!("in {w}"))))
+                                .children(vim.map(|m| div().flex_none().ml(look.z(8.)).px(look.z(5.)).rounded(look.z(3.)).bg(look.c(ui.active_bg)).text_size(look.text(-2.)).font_family(look.code_font.clone()).text_color(look.c(ui.text_secondary)).child(m)))
                                 .child(div().flex_1())
                                 .child(div().flex_none().text_color(look.c(ui.text_muted)).child("esc to close")),
                         )
@@ -3109,6 +3354,7 @@ impl Workspace {
         };
         match self.overlay.as_ref()? {
             Overlay::Picker(p, _) => Some(centered(p.clone().into_any_element())),
+            Overlay::Setup(s) => Some(centered(s.clone().into_any_element())),
             Overlay::GoTo(g) | Overlay::Rename(g) => Some(centered(
                 div()
                     .w(look.z(360.))
@@ -3508,6 +3754,17 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::run_checks_action))
             .on_action(cx.listener(Self::run_project))
             .on_action(cx.listener(Self::rename_agent))
+            .on_action(cx.listener(Self::open_setup))
+            .on_action(cx.listener(Self::toggle_vim))
+            // Scripted runs may reach here before the picker is drawn.
+            .on_action(cx.listener(|this, _: &commands::setup::Done, _, cx| {
+                if let Some(Overlay::Setup(v)) = &this.overlay {
+                    v.clone().update(cx, |v, cx| v.done(cx));
+                }
+            }))
+            .on_action(cx.listener(Self::find_in_project))
+            .on_action(cx.listener(Self::replace_in_project))
+            .on_action(cx.listener(Self::search_panel))
             .on_action(cx.listener(Self::git_stage_all))
             .on_action(cx.listener(Self::git_unstage_all))
             .on_action(cx.listener(Self::git_commit))
@@ -3621,4 +3878,9 @@ mod tests {
         assert_eq!(local_port("http://localhost.evil.com:80"), None);
         assert_eq!(local_port("http://localhost"), None);
     }
+}
+
+/// Notification tag for an agent: `qur:<window>:<task id>` (main.rs parses it).
+fn alert_tag(window: &Window, id: &str) -> String {
+    format!("qur:{}:{id}", window.window_handle().window_id().as_u64())
 }

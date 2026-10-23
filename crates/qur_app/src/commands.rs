@@ -66,6 +66,11 @@ pub mod editor {
     );
 }
 
+/// The first-run picker's keys (Enter saves, Esc cancels).
+pub mod setup {
+    gpui::actions!(setup, [Done, Cancel]);
+}
+
 /// Answers for the permission bar of the selected agent.
 pub mod agent {
     gpui::actions!(agent, [AllowOnce, AllowAlways, Deny]);
@@ -136,14 +141,14 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::HideOthers, "Qur", "Hide Others", "cmd-alt-h", W, R),
     cmd!(qur::ShowAll, "Qur", "Show All", "", W, R),
     cmd!(qur::About, "Qur", "About Qur", "", W, L("M7")),
-    cmd!(qur::CheckSetup, "Qur", "Check Setup…", "", W, L("M6")),
+    cmd!(qur::CheckSetup, "Qur", "Setup…", "", W, R),
     cmd!(qur::OpenConfig, "Qur", "Open config.toml", "cmd-,", W, R),
     cmd!(qur::OpenKeymap, "Qur", "Open keymap.toml", "", W, L("M6")),
     cmd!(qur::OpenAgents, "Qur", "Agents (agents.toml)", "", W, R),
     cmd!(qur::ThemePicker, "Qur", "Theme…", "cmd-k cmd-t", NT, R),
     cmd!(qur::UseDefaultTheme, "Qur", "Use Default Theme for This Project", "", W, R),
     cmd!(qur::Transparency, "Qur", "Transparency…", "", W, R),
-    cmd!(qur::VimMode, "Qur", "Vim Mode", "", W, L("M6")),
+    cmd!(qur::VimMode, "Qur", "Vim Mode", "", W, R),
     cmd!(qur::NewWindow, "File", "New Window", "cmd-n", W, R),
     cmd!(qur::NewAgentTask, "Agent", "New Agent Task…", "cmd-shift-n", W, R),
     cmd!(qur::OpenFolder, "File", "Open Folder…", "cmd-o", W, R),
@@ -238,8 +243,8 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(editor::ToggleCase, "Edit", "Find: Match Case", "cmd-alt-c", W, R),
     cmd!(editor::ToggleWholeWord, "Edit", "Find: Whole Word", "cmd-alt-w", W, R),
     cmd!(editor::ToggleRegex, "Edit", "Find: Regular Expression", "cmd-alt-r", W, R),
-    cmd!(qur::FindInProject, "Edit", "Find in Project", "cmd-shift-f", W, L("M6")),
-    cmd!(qur::ReplaceInProject, "Edit", "Replace in Project", "cmd-shift-h", W, L("M6")),
+    cmd!(qur::FindInProject, "Edit", "Find in Project", "cmd-shift-f", W, R),
+    cmd!(qur::ReplaceInProject, "Edit", "Replace in Project", "cmd-shift-h", W, R),
     // Terminal
     cmd!(qur::NewTerminal, "Terminal", "New Terminal", "cmd-t", W, R),
     cmd!(qur::NewAgentTerminal, "Terminal", "New Agent Terminal", "cmd-shift-t", W, R),
@@ -257,7 +262,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::GitStageAll, "Git", "Stage All Changes", "", W, R),
     cmd!(qur::GitUnstageAll, "Git", "Unstage All Changes", "", W, R),
     cmd!(qur::GitCommit, "Git", "Commit Staged…", "", W, R),
-    cmd!(qur::SearchPanel, "View", "Search", "", W, L("M6")),
+    cmd!(qur::SearchPanel, "View", "Search", "", W, R),
     // Agents and peek
     cmd!(qur::FocusPrompt, "Agent", "Focus Prompt", "cmd-i", W, R),
     cmd!(qur::StopAgent, "Agent", "Stop", "cmd-.", W, R),
@@ -314,6 +319,8 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(input::ConfirmAlt, "Input", "Confirm (Previous)", "shift-enter", I, R),
     cmd!(input::ConfirmAll, "Input", "Confirm All", "cmd-enter", I, R),
     cmd!(input::Cancel, "Input", "Cancel", "escape", I, R),
+    cmd!(setup::Done, "Input", "Setup: Done", "enter", Some("Setup"), R),
+    cmd!(setup::Cancel, "Input", "Setup: Cancel", "escape", Some("Setup"), R),
     cmd!(input::Up, "Input", "Up", "up", I, R),
     cmd!(input::Down, "Input", "Down", "down", I, R),
     cmd!(input::Tab, "Input", "Tab", "tab", I, R),
@@ -392,6 +399,7 @@ pub struct MenuState {
     pub recent: Vec<PathBuf>,
     /// A merge stopped on conflicts: the Merge Conflicts items are enabled.
     pub merging: bool,
+    pub vim: bool,
 }
 
 fn item(action: impl Action) -> MenuItem {
@@ -428,7 +436,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::ThemePicker),
             item(qur::UseDefaultTheme),
             item(qur::Transparency),
-            item(qur::VimMode).checked(false),
+            item(qur::VimMode).checked(s.vim),
             sep(),
             M::os_submenu("Services", SystemMenuType::Services),
             sep(),

@@ -147,6 +147,16 @@ impl Roster {
     pub fn get(&self, id: &str) -> Option<&AgentDef> {
         self.agents.iter().find(|a| a.id == id)
     }
+
+    /// Write `agents.toml` (first-run picker), keeping the header comment.
+    pub fn save(&self) -> std::io::Result<()> {
+        let body = toml_edit::ser::to_string_pretty(self).map_err(std::io::Error::other)?;
+        let path = roster_path();
+        std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, format!("{ROSTER_HEADER}{body}"))?;
+        std::fs::rename(&tmp, &path)
+    }
 }
 
 // ---------------------------------------------------------------------------

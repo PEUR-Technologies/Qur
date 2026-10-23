@@ -6,7 +6,7 @@ Qur is a lightweight, native macOS code editor for running and steering AI codin
 
 It's written in Rust on [GPUI](https://github.com/zed-industries/zed) (Zed's UI framework): no Electron, everything local, and agents use your existing Claude Code login (never an API key).
 
-> **Status: early development (pre-release), macOS only.** M0–M5 (agents in worktrees, Live + heatmap, Changes + Merge + Git panel, terminal agents) and Browser + Inspect are done. See [HANDOFF.md](HANDOFF.md) for the current state.
+> **Status: early development (pre-release), macOS only.** M0–M6 (agents in worktrees, Live + heatmap, Changes + Merge + Git panel, terminal agents, search + alerts + Vim) and Browser + Inspect are done. See [HANDOFF.md](HANDOFF.md) for the current state.
 
 ![Live heatmap: files glow as the agent writes them; Live follows the file](docs/images/heatmap-live.png)
 
@@ -91,9 +91,15 @@ One window is one project. There's no permanent editor area: the window is for a
 - Resolve conflicts in-app (Accept Ours / Theirs / Both, then Finish or Abort; also in Agent > Merge Conflicts), and stage and commit in the Git panel.
 - Discard removes the task's worktree and branch.
 
+### Search and alerts
+
+- **Project search** (`Cmd+Shift+F`): the whole tree you're looking at (an agent's worktree or your checkout) in about 50 ms for 5,000 files, with case, whole-word and regex options and Replace All.
+- **Alerts:** when an agent finishes, errors or needs approval while you're elsewhere: a notification (click it to jump to the agent), a Dock badge and a soft chime. Each can be turned off in `config.toml` (`[alerts]`).
+
 ### Editor and looks
 
-- Code modal with tree-sitter highlighting for 13 languages, multi-cursor, regex find/replace, soft wrap and VS Code keybindings.
+- Code modal with tree-sitter highlighting for 13 languages, multi-cursor, regex find/replace, soft wrap and VS Code keybindings, plus optional Vim mode (Qur > Vim Mode).
+- A first-run picker for agents, layout, keys and theme (Qur > Setup… reopens it).
 - 17 built-in themes plus Auto (follows macOS), a theme per project, and window transparency with blur. Every theme passes a contrast test.
 - Every command is in the macOS menu bar and the command palette (`Cmd+Shift+P`). No toolbars or settings screens.
 
@@ -119,7 +125,7 @@ Everything lives in `~/Library/Application Support/Qur/`. Qur never writes into 
 
 | File | What |
 |---|---|
-| `config.toml` | Theme, window opacity/blur, editor font, soft wrap, peek layout. Qur > Settings opens it; saved changes apply right away. |
+| `config.toml` | Theme, window opacity/blur, editor font, soft wrap, peek layout, `[keys] vim`, `[alerts]`. Qur > Settings opens it; saved changes apply right away. |
 | `agents.toml` | Which agents Qur can start (ACP or terminal mode). Written on first launch. |
 | `projects/<id>.toml` | Per-project theme, opacity, `[worktree] setup = "pnpm install"` (runs in each new worktree before the agent starts), `[checks] command = "cargo check"` (runs after each agent turn that changed files), and `[run] command` / `url` with `$PORT` (Run Project). |
 | `projects/<id>.tasks.toml` | Tasks, so they survive restarts and resume their sessions. |
