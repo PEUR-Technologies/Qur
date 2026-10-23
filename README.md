@@ -6,7 +6,7 @@ Qur is a lightweight, native macOS code editor for running and steering AI codin
 
 It's written in Rust on [GPUI](https://github.com/zed-industries/zed) (Zed's UI framework): no Electron, everything local, and agents use your existing Claude Code login (never an API key).
 
-> **Status: early development (pre-release), macOS only.** M0–M3 and Browser + Inspect are done; M4 (Changes, Merge, Git panel) is in progress. See [HANDOFF.md](HANDOFF.md) for the current state.
+> **Status: early development (pre-release), macOS only.** M0–M4 (agents in worktrees, Live + heatmap, Changes + Merge + Git panel) and Browser + Inspect are done. See [HANDOFF.md](HANDOFF.md) for the current state.
 
 ![Live heatmap: files glow as the agent writes them; Live follows the file](docs/images/heatmap-live.png)
 
@@ -80,11 +80,12 @@ One window is one project. There's no permanent editor area: the window is for a
 
 ![Browser + Inspect: pick an element, ask the agent, see the change](docs/images/browser-inspect.png)
 
-### Review and merge (M4, in progress)
+### Review and merge
 
 - Review the task's diff and comment on lines; comments go back to the agent as one message.
 - A pre-check warns about conflicts. **Merge** never touches your staged changes or stash.
-- Resolve conflicts in-app, and stage and commit in the Git panel.
+- Resolve conflicts in-app (Accept Ours / Theirs / Both, then Finish or Abort; also in Agent > Merge Conflicts), and stage and commit in the Git panel.
+- Discard removes the task's worktree and branch.
 
 ### Editor and looks
 

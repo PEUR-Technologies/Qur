@@ -269,6 +269,27 @@ impl EditorView {
         cx.emit(EditorEvent::Changed);
     }
 
+    /// The conflict at or after the cursor (else the last one).
+    pub fn current_conflict(&mut self) -> usize {
+        let conflicts = self.conflicts();
+        let cur = self.cursor().line;
+        conflicts.iter().position(|c| c.end >= cur).unwrap_or(conflicts.len().saturating_sub(1))
+    }
+
+    /// Resolve the conflict at the cursor (Merge > Accept Ours/Theirs/Both).
+    pub fn resolve_current_conflict(&mut self, r: qur_git::Resolution, cx: &mut Context<Self>) {
+        let i = self.current_conflict();
+        self.resolve_conflict(i, r, cx);
+    }
+
+    /// Move to the next (`forward`) or previous conflict.
+    pub fn step_conflict(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let i = self.current_conflict();
+        let n = self.conflicts().len();
+        let next = if forward { (i + 1).min(n.saturating_sub(1)) } else { i.saturating_sub(1) };
+        self.jump_conflict(next, cx);
+    }
+
     fn jump_conflict(&mut self, i: usize, cx: &mut Context<Self>) {
         if let Some(c) = self.conflicts().get(i).cloned() {
             let p = Point { line: c.start, col: 0 };
@@ -1330,9 +1351,7 @@ impl Render for EditorView {
         });
         let conflict_bar = self.merge_conflicts.then(|| {
             let conflicts = self.conflicts();
-            let cur = self.cursor().line;
-            // The conflict at or after the cursor (else the last one).
-            let i = conflicts.iter().position(|c| c.end >= cur).unwrap_or(conflicts.len().saturating_sub(1));
+            let i = self.current_conflict();
             let n = conflicts.len();
             let act = |label: &'static str, id: &'static str, r: Option<qur_git::Resolution>, primary: bool| {
                 div()
@@ -1346,10 +1365,7 @@ impl Render for EditorView {
                     .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| match r {
                         Some(r) => this.resolve_conflict(i, r, cx),
-                        None => {
-                            let next = if label == "Next" { (i + 1).min(n.saturating_sub(1)) } else { i.saturating_sub(1) };
-                            this.jump_conflict(next, cx);
-                        }
+                        None => this.step_conflict(label == "Next", cx),
                     }))
             };
             div()

@@ -332,7 +332,12 @@ impl Workspace {
     }
 
     fn flash(&mut self, msg: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.message = Some((msg.into(), Instant::now()));
+        let msg = msg.into();
+        // Scripted runs (QUR_DEBUG_ACTIONS) log the top-bar messages.
+        if std::env::var_os("QUR_DEBUG_ACTIONS").is_some() {
+            println!("FLASH {msg}");
+        }
+        self.message = Some((msg, Instant::now()));
         let bg = cx.background_executor().clone();
         self.message_timer = Some(cx.spawn(async move |this, cx| {
             bg.timer(Duration::from_secs(6)).await;
@@ -352,6 +357,7 @@ impl Workspace {
             sidebar: self.sidebar,
             soft_wrap: self.code.as_ref().map(|e| e.read(cx).soft_wrap()).unwrap_or(self.config.editor.soft_wrap),
             recent: qur_config::State::load().recent_projects,
+            merging: self.merge.is_some(),
         }
     }
 
@@ -1092,7 +1098,7 @@ impl Workspace {
                     this.offer_cleanup(&id, window, cx);
                 }
                 Ok(qur_git::MergeOutcome::Refused { reason }) => {
-                    let _ = window.prompt(PromptLevel::Warning, "Merge not started", Some(&reason), &["OK"], cx);
+                    let _ = ask(window, PromptLevel::Warning, "Merge not started", Some(&reason), &["OK"], cx);
                 }
                 Ok(qur_git::MergeOutcome::Conflicts { files }) => {
                     let detail = format!(
@@ -1101,7 +1107,7 @@ impl Workspace {
                         if files.len() == 1 { "" } else { "s" },
                         files.iter().take(5).map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
                     );
-                    let answer = window.prompt(PromptLevel::Warning, "Merge conflicts", Some(&detail), &["Resolve in Qur", "Cancel"], cx);
+                    let answer = ask(window, PromptLevel::Warning, "Merge conflicts", Some(&detail), &["Resolve in Qur", "Cancel"], cx);
                     let (root, branch, title, id) = (root.clone(), branch.clone(), title.clone(), id.clone());
                     cx.spawn_in(window, async move |this, cx| {
                         if answer.await.ok() != Some(0) {
@@ -1115,6 +1121,7 @@ impl Workspace {
                             Err(e) => this.flash(e, cx),
                             Ok(files) => {
                                 this.merge = Some(MergeState { task: id, title, branch, files: files.clone() });
+                                this.sync_menus(cx);
                                 if let Some(f) = files.first() {
                                     let abs = this.root.join(f);
                                     this.open_path(&abs, window, cx);
@@ -1143,7 +1150,7 @@ impl Workspace {
 
     /// After a merge: remove the task's worktree and branch now, or keep it.
     fn offer_cleanup(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let answer = window.prompt(
+        let answer = ask(window, 
             PromptLevel::Info,
             "Merged. Remove the task?",
             Some("This deletes its worktree and branch (the changes are on your branch now)."),
@@ -1219,6 +1226,7 @@ impl Workspace {
             this.update_in(cx, |this, window, cx| match r {
                 Ok(sha) => {
                     let title = this.merge.take().map(|m| m.title).unwrap_or_default();
+                    this.sync_menus(cx);
                     for b in &this.buffers.list {
                         b.update(cx, |b, _| b.merge_conflicts = false);
                     }
@@ -1241,6 +1249,54 @@ impl Workspace {
         .detach();
     }
 
+    /// Merge > Accept Ours/Theirs/Both, Next/Previous Conflict: act on the
+    /// conflicted file open in the code modal.
+    /// The workspace's own focus node (scripted action dispatch, main.rs).
+    pub fn root_focus(&self) -> FocusHandle {
+        self.focus.clone()
+    }
+
+    fn with_conflict_editor(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut EditorView, &mut Context<EditorView>)) {
+        if self.merge.is_none() {
+            return self.flash("No merge in progress", cx);
+        }
+        match self.code.clone().filter(|c| c.read(cx).merge_conflicts) {
+            Some(c) => c.update(cx, f),
+            None => self.flash("Open a conflicted file first (Git panel)", cx),
+        }
+    }
+
+    fn accept_ours(&mut self, _: &qur::AcceptOurs, _: &mut Window, cx: &mut Context<Self>) {
+        self.with_conflict_editor(cx, |e, cx| e.resolve_current_conflict(qur_git::Resolution::Ours, cx));
+    }
+
+    fn accept_theirs(&mut self, _: &qur::AcceptTheirs, _: &mut Window, cx: &mut Context<Self>) {
+        self.with_conflict_editor(cx, |e, cx| e.resolve_current_conflict(qur_git::Resolution::Theirs, cx));
+    }
+
+    fn accept_both(&mut self, _: &qur::AcceptBoth, _: &mut Window, cx: &mut Context<Self>) {
+        self.with_conflict_editor(cx, |e, cx| e.resolve_current_conflict(qur_git::Resolution::Both, cx));
+    }
+
+    fn next_conflict(&mut self, _: &qur::NextConflict, _: &mut Window, cx: &mut Context<Self>) {
+        self.with_conflict_editor(cx, |e, cx| e.step_conflict(true, cx));
+    }
+
+    fn prev_conflict(&mut self, _: &qur::PrevConflict, _: &mut Window, cx: &mut Context<Self>) {
+        self.with_conflict_editor(cx, |e, cx| e.step_conflict(false, cx));
+    }
+
+    fn finish_merge_action(&mut self, _: &qur::FinishMerge, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_merge(window, cx);
+    }
+
+    fn abort_merge_action(&mut self, _: &qur::AbortMerge, _: &mut Window, cx: &mut Context<Self>) {
+        if self.merge.is_none() {
+            return self.flash("No merge in progress", cx);
+        }
+        self.abort_merge(cx);
+    }
+
     fn abort_merge(&mut self, cx: &mut Context<Self>) {
         let root = self.root.clone();
         let bg = cx.background_executor().clone();
@@ -1248,6 +1304,7 @@ impl Workspace {
             let r = bg.spawn(async move { qur_git::abort_merge(&root) }).await;
             let _ = this.update(cx, |this, cx| {
                 this.merge = None;
+                this.sync_menus(cx);
                 for b in this.buffers.list.clone() {
                     b.update(cx, |b, cx| {
                         b.merge_conflicts = false;
@@ -1299,6 +1356,23 @@ impl Workspace {
         let g = self.git_panel(window, cx);
         g.update(cx, |g, cx| g.refresh(cx));
         self.select(Some(Selected::Git), window, cx);
+    }
+
+    fn git_stage_all(&mut self, _: &qur::GitStageAll, window: &mut Window, cx: &mut Context<Self>) {
+        let g = self.git_panel(window, cx);
+        g.update(cx, |g, cx| g.stage_everything(cx));
+    }
+
+    fn git_unstage_all(&mut self, _: &qur::GitUnstageAll, window: &mut Window, cx: &mut Context<Self>) {
+        let g = self.git_panel(window, cx);
+        g.update(cx, |g, cx| g.unstage_everything(cx));
+    }
+
+    fn git_commit(&mut self, _: &qur::GitCommit, window: &mut Window, cx: &mut Context<Self>) {
+        let g = self.git_panel(window, cx);
+        g.update(cx, |g, cx| g.refresh(cx));
+        self.select(Some(Selected::Git), window, cx);
+        g.update(cx, |g, cx| g.commit_or_focus(window, cx));
     }
 
     fn merge_action(&mut self, _: &qur::Merge, window: &mut Window, cx: &mut Context<Self>) {
@@ -1386,7 +1460,7 @@ impl Workspace {
             "This stops the agent and deletes its worktree and branch {branch}.{}",
             if dirty { " Its uncommitted changes will be lost." } else { "" }
         );
-        let answer = window.prompt(PromptLevel::Warning, "Discard this task?", Some(&detail), &["Discard", "Cancel"], cx);
+        let answer = ask(window, PromptLevel::Warning, "Discard this task?", Some(&detail), &["Discard", "Cancel"], cx);
         let root = self.root.clone();
         cx.spawn_in(window, async move |this, cx| {
             if answer.await.ok() != Some(0) {
@@ -1588,7 +1662,7 @@ impl Workspace {
             return cx.quit();
         }
         let msg = format!("Save changes to {} file{} before quitting?", dirty.len(), if dirty.len() == 1 { "" } else { "s" });
-        let answer = window.prompt(PromptLevel::Warning, &msg, None, &["Save All", "Don't Save", "Cancel"], cx);
+        let answer = ask(window, PromptLevel::Warning, &msg, None, &["Save All", "Don't Save", "Cancel"], cx);
         cx.spawn(async move |_, cx| match answer.await {
             Ok(0) => cx.update(|cx| {
                 for b in &dirty {
@@ -1610,7 +1684,7 @@ impl Workspace {
             return true;
         }
         let msg = format!("Save changes to {} file{}?", dirty.len(), if dirty.len() == 1 { "" } else { "s" });
-        let answer = window.prompt(PromptLevel::Warning, &msg, None, &["Save All", "Don't Save", "Cancel"], cx);
+        let answer = ask(window, PromptLevel::Warning, &msg, None, &["Save All", "Don't Save", "Cancel"], cx);
         cx.spawn_in(window, async move |this, cx| {
             let a = answer.await.unwrap_or(2);
             if a == 2 {
@@ -3079,6 +3153,16 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::discard_task))
             .on_action(cx.listener(Self::show_git))
             .on_action(cx.listener(Self::merge_action))
+            .on_action(cx.listener(Self::git_stage_all))
+            .on_action(cx.listener(Self::git_unstage_all))
+            .on_action(cx.listener(Self::git_commit))
+            .on_action(cx.listener(Self::accept_ours))
+            .on_action(cx.listener(Self::accept_theirs))
+            .on_action(cx.listener(Self::accept_both))
+            .on_action(cx.listener(Self::next_conflict))
+            .on_action(cx.listener(Self::prev_conflict))
+            .on_action(cx.listener(Self::finish_merge_action))
+            .on_action(cx.listener(Self::abort_merge_action))
             .on_action(cx.listener(Self::review_changes))
             .on_action(cx.listener(Self::keep_working))
             .on_action(cx.listener(Self::cycle_layout))
@@ -3126,4 +3210,22 @@ impl Render for Workspace {
             })
             .children(self.overlay_el(&look, cx))
     }
+}
+
+/// A native dialog. Dev/test: QUR_DEBUG_PROMPT="0,1" answers dialogs in order
+/// with those button indexes (printed as `PROMPT <message> -> <i>`), so
+/// scripted runs can get past them.
+fn ask(window: &mut Window, level: PromptLevel, message: &str, detail: Option<&str>, answers: &[&str], cx: &mut App) -> futures::channel::oneshot::Receiver<usize> {
+    static QUEUE: std::sync::Mutex<Option<std::collections::VecDeque<usize>>> = std::sync::Mutex::new(None);
+    if let Ok(list) = std::env::var("QUR_DEBUG_PROMPT") {
+        let mut queue = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        let queue = queue.get_or_insert_with(|| list.split(',').filter_map(|v| v.trim().parse().ok()).collect());
+        if let Some(i) = queue.pop_front() {
+            println!("PROMPT {message} -> {i}");
+            let (tx, rx) = futures::channel::oneshot::channel();
+            tx.send(i).ok();
+            return rx;
+        }
+    }
+    window.prompt(level, message, detail, answers, cx)
 }

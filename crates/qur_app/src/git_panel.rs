@@ -118,6 +118,41 @@ impl GitPanel {
         }
     }
 
+    /// Palette/menu: stage or unstage everything, from fresh status (the
+    /// panel's may be stale when it isn't shown).
+    pub fn stage_everything(&mut self, cx: &mut Context<Self>) {
+        self.run(
+            |r| {
+                let st = qur_git::status(r)?;
+                let paths: Vec<PathBuf> = st.unstaged.iter().map(|e| e.path.clone()).chain(st.untracked.iter().cloned()).collect();
+                if paths.is_empty() { Ok(()) } else { qur_git::stage(r, &paths) }
+            },
+            cx,
+        )
+    }
+
+    pub fn unstage_everything(&mut self, cx: &mut Context<Self>) {
+        self.run(
+            |r| {
+                let st = qur_git::status(r)?;
+                let paths: Vec<PathBuf> = st.staged.iter().map(|e| e.path.clone()).collect();
+                if paths.is_empty() { Ok(()) } else { qur_git::unstage(r, &paths) }
+            },
+            cx,
+        )
+    }
+
+    /// Palette/menu Commit: commits with the typed message, or focuses the
+    /// message field when it's empty.
+    pub fn commit_or_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.message.read(cx).text.trim().is_empty() {
+            let f = self.message.read(cx).focus.clone();
+            window.focus(&f, cx);
+            return cx.emit(GitEvent::Error("Write a commit message, then ⌘↩".into()));
+        }
+        self.commit(cx)
+    }
+
     fn commit(&mut self, cx: &mut Context<Self>) {
         let msg = self.message.read(cx).text.trim().to_string();
         if msg.is_empty() {

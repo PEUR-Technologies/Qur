@@ -64,6 +64,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - ---
 - Sidebar `Cmd+B` (checkmark) · Files Dropdown `Cmd+Shift+E`
 - Go to Terminal ``Ctrl+` `` · Git `Ctrl+Shift+G` · Search `Cmd+Shift+F`  (no bottom panel since decision 19)
+- Git ▸ Stage All Changes · Unstage All Changes · Commit Staged…
 - ---
 - Peek Layout ▸ A Watch + side notes · B One view at a time · C Watch + drawer (radio) · Cycle `Cmd+K Cmd+L`
 - Peek ▸ Live `Cmd+1` · To-do `Cmd+2` · Chat `Cmd+3` · Changes `Cmd+4` · Browser `Cmd+5`
@@ -91,6 +92,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Next Agent · Previous Agent · Agent 1–9 `Ctrl+1..9`
 - ---
 - Review Changes `Cmd+4` · Merge into My Branch · Keep Working · Discard Task…
+- Merge Conflicts ▸ Next Conflict · Previous Conflict · Accept Ours · Accept Theirs · Accept Both · Finish Merge · Abort Merge (enabled only during a merge)
 - ---
 - Open Task Worktree in Terminal
 - Reveal Worktree in Finder
