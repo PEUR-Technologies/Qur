@@ -2,7 +2,7 @@
 //! pending permission and status, plus the stage view that shows it:
 //! header, To-do strip, Chat, permission bar and prompt bar.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -213,6 +213,11 @@ pub struct AgentTask {
     pub commands: Vec<qur_acp::AvailableCommand>,
     /// Session settings the agent offers (mode, model…), shown above the prompt.
     pub settings: Vec<ConfigOption>,
+    /// Chat items folded the other way from their default (tool call ids,
+    /// `thought-<ix>`).
+    toggled: HashSet<String>,
+    /// Context tokens used / window, and session cost (USD) if known.
+    usage: Option<(u64, u64, Option<f64>)>,
     /// Setup command still running for a new worktree.
     pub setting_up: bool,
     focus: FocusHandle,
@@ -318,6 +323,8 @@ impl AgentTask {
             turn_wrote: false,
             commands: Vec::new(),
             settings: Vec::new(),
+            toggled: HashSet::new(),
+            usage: None,
             setting_up: false,
             focus: cx.focus_handle(),
             turn_started: None,
@@ -337,9 +344,20 @@ impl AgentTask {
     // -- chat list -------------------------------------------------------------
 
     fn push(&mut self, item: ChatItem) {
+        // The thought before this item stops streaming: fold it.
+        self.remeasure_last_thought();
         let n = self.chat.len();
         self.chat.push(item);
         self.list.splice(n..n, 1);
+    }
+
+    /// Rows are measured once; a thought's open/folded state depends on
+    /// whether it's still the streaming last item, so re-measure it.
+    fn remeasure_last_thought(&mut self) {
+        let last = self.chat.len().wrapping_sub(1);
+        if matches!(self.chat.last(), Some(ChatItem::Thought(_))) {
+            self.list.splice(last..last + 1, 1);
+        }
     }
 
     /// Append streamed text to the last item of the same kind, or start one.
@@ -457,6 +475,8 @@ impl AgentTask {
             cx.emit(AgentEvent::TurnChangedFiles);
         }
         let active = matches!(s, Status::Working | Status::NeedsYou);
+        // A thought that was streaming folds when the turn stops.
+        self.remeasure_last_thought();
         self.monitor.update(cx, |m, _| m.set_turn_active(active));
         if self.status != s {
             self.status = s;
@@ -757,6 +777,11 @@ impl AgentTask {
                     }
                 }
                 SessionUpdate::ConfigOptions(list) => self.replace_settings(list),
+                SessionUpdate::Usage { used, size, cost } => {
+                    // A later update without a cost keeps the last one known.
+                    let cost = cost.or(self.usage.and_then(|u| u.2));
+                    self.usage = Some((used, size, cost));
+                }
                 _ => {}
             },
             Event::Permission { id, tool_call, options, .. } => {
@@ -803,12 +828,30 @@ impl AgentTask {
                 )
                 .into_any_element(),
             ChatItem::Agent(t) => pad(div()).child(markdownish(t, look)).into_any_element(),
-            ChatItem::Thought(t) => pad(div())
-                .text_size(look.text(-1.))
-                .italic()
-                .text_color(look.c(ui.text_muted))
-                .child(t.trim().to_string())
-                .into_any_element(),
+            // Open while it streams (the last item of a working turn), then
+            // folded to its first line; click to toggle (as in Zed).
+            ChatItem::Thought(t) => {
+                let streaming = ix + 1 == self.chat.len() && matches!(self.status, Status::Working);
+                let open = streaming != self.toggled.contains(&format!("thought-{ix}"));
+                let t = t.trim();
+                let first = t.lines().next().unwrap_or("").to_string();
+                pad(div())
+                    .text_size(look.text(-1.))
+                    .text_color(look.c(ui.text_muted))
+                    .child(
+                        div()
+                            .id(("thought", ix))
+                            .flex()
+                            .gap(look.z(6.))
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(look.c(ui.text_secondary)))
+                            .child(div().flex_none().child(if open { "▾ Thinking" } else { "▸ Thinking" }))
+                            .when(!open, |d| d.child(div().min_w(px(0.)).truncate().italic().child(first)))
+                            .on_click(cx.listener(move |t, _, _, cx| t.toggle(format!("thought-{ix}"), ix, cx))),
+                    )
+                    .when(open, |d| d.child(div().pl(look.z(14.)).pt(look.z(2.)).italic().child(t.to_string())))
+                    .into_any_element()
+            }
             ChatItem::Notice(t) => pad(div()).text_size(look.text(-1.)).text_color(look.c(ui.text_muted)).child(t.clone()).into_any_element(),
             ChatItem::Output(t) => pad(div())
                 .child(
@@ -844,16 +887,25 @@ impl AgentTask {
                     ToolKind::SwitchMode => "mode",
                     ToolKind::Other => "tool",
                 };
-                let (mut add, mut del) = (0usize, 0usize);
-                for c in &t.content {
-                    if let ToolContent::Diff { old_text, new_text, .. } = c {
-                        add += new_text.lines().count();
-                        del += old_text.as_deref().map(|o| o.lines().count()).unwrap_or(0);
-                    }
-                }
+                // Real line counts (every line of old and new counted before).
+                let diffs: Vec<(&PathBuf, Vec<(char, &str)>)> = t
+                    .content
+                    .iter()
+                    .filter_map(|c| match c {
+                        ToolContent::Diff { path, old_text, new_text } => Some((path, line_diff(old_text.as_deref().unwrap_or(""), new_text))),
+                        _ => None,
+                    })
+                    .collect();
+                let add = diffs.iter().flat_map(|(_, d)| d).filter(|(k, _)| *k == '+').count();
+                let del = diffs.iter().flat_map(|(_, d)| d).filter(|(k, _)| *k == '-').count();
                 let loc = t.locations.first().cloned();
                 let title = if t.title.is_empty() { kind.to_string() } else { t.title.clone() };
-                let diff = add + del > 0;
+                let body = self.tool_body(t, &diffs, look, cx);
+                // Edits and failures start open; the rest folded (click toggles).
+                let default_open = matches!(t.kind, ToolKind::Edit | ToolKind::Delete | ToolKind::Move) || t.status == ToolStatus::Failed;
+                let open = body.is_some() && default_open != self.toggled.contains(id);
+                let expandable = body.is_some();
+                let tid = id.clone();
                 pad(div())
                     .py(look.z(2.))
                     .child(
@@ -864,23 +916,123 @@ impl AgentTask {
                             .gap(look.z(8.))
                             .text_size(look.text(-1.))
                             .text_color(look.c(ui.text_secondary))
-                            .when(loc.is_some(), |d| d.cursor_pointer().hover(|d| d.text_color(look.c(ui.text))))
+                            .when(expandable || loc.is_some(), |d| d.cursor_pointer().hover(|d| d.text_color(look.c(ui.text))))
                             .child(div().w(look.z(40.)).flex_none().text_color(look.c(ui.text_muted)).child(kind))
                             .child(div().min_w(px(0.)).truncate().child(title))
-                            .when(diff, |d| {
+                            .when(add + del > 0, |d| {
                                 d.child(div().flex_none().text_color(look.c(look.theme.diff.added_text)).child(format!("+{add}")))
                                     .child(div().flex_none().text_color(look.c(look.theme.diff.removed_text)).child(format!("−{del}")))
                             })
+                            .when_some(t.exit.flatten().filter(|c| *c != 0), |d, c| d.child(div().flex_none().text_color(look.c(ui.error)).child(format!("exit {c}"))))
                             .child(div().flex_none().text_color(look.c(color)).child(glyph))
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                if let Some(l) = &loc {
+                            .when(expandable, |d| d.child(div().flex_none().text_color(look.c(ui.text_muted)).child(if open { "▾" } else { "▸" })))
+                            .on_click(cx.listener(move |t, _, _, cx| {
+                                if expandable {
+                                    t.toggle(tid.clone(), ix, cx);
+                                } else if let Some(l) = &loc {
                                     cx.emit(AgentEvent::OpenFile(l.path.clone(), l.line));
                                 }
                             })),
                     )
+                    .when_some(body.filter(|_| open), |d, b| d.child(div().pl(look.z(48.)).pt(look.z(4.)).child(b)))
                     .into_any_element()
             }
         }
+    }
+
+    /// Fold or unfold a chat item (tool call `key` = its id, thought
+    /// `thought-<ix>`) and re-measure its row.
+    fn toggle(&mut self, key: String, ix: usize, cx: &mut Context<Self>) {
+        if !self.toggled.remove(&key) {
+            self.toggled.insert(key);
+        }
+        self.list.splice(ix..ix + 1, 1);
+        cx.notify();
+    }
+
+    /// What an unfolded tool call shows: its text (code blocks in the code
+    /// font), each file's diff, a command's output and exit, or else its raw
+    /// input/output. None when there's nothing to show.
+    fn tool_body(&self, t: &ToolCall, diffs: &[(&PathBuf, Vec<(char, &str)>)], look: &Look, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let ui = &look.theme.ui;
+        let mut parts: Vec<gpui::AnyElement> = Vec::new();
+        for c in &t.content {
+            match c {
+                ToolContent::Text(s) if !s.trim().is_empty() => parts.push(markdownish(s, look).into_any_element()),
+                ToolContent::Terminal(_) => {
+                    let out = t.output.as_deref().unwrap_or("").trim_end();
+                    let status = match t.exit {
+                        None => "running…".to_string(),
+                        Some(Some(0)) => "exit 0".into(),
+                        Some(Some(c)) => format!("exit {c}"),
+                        Some(None) => "ended".into(),
+                    };
+                    let failed = matches!(t.exit, Some(Some(c)) if c != 0);
+                    let block = code_block(&tail_lines(out, MAX_TOOL_LINES), look).when(out.is_empty(), |d| d.child("(no output)"));
+                    parts.push(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(look.z(2.))
+                            .child(block)
+                            .child(div().text_size(look.text(-2.)).text_color(look.c(if failed { ui.error } else { ui.text_muted })).child(status))
+                            .into_any_element(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        for (path, lines) in diffs {
+            let path = (*path).clone();
+            let shown = lines.iter().filter(|(k, _)| *k != ' ').count().min(MAX_TOOL_LINES);
+            let rows = lines.iter().filter(|(k, _)| *k != ' ').take(MAX_TOOL_LINES).map(|(k, l)| {
+                let (bg, fg) = if *k == '+' { (look.theme.diff.added_line, look.theme.diff.added_text) } else { (look.theme.diff.removed_line, look.theme.diff.removed_text) };
+                div().px(look.z(6.)).bg(look.c(bg)).child(div().text_color(look.c(fg)).child(format!("{k} {l}")))
+            });
+            let more = lines.iter().filter(|(k, _)| *k != ' ').count() - shown;
+            parts.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(look.z(2.))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("diff-{}", path.display())))
+                            .text_size(look.text(-2.))
+                            .text_color(look.c(ui.text_muted))
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(look.c(ui.text)))
+                            .child(self.rel(&path))
+                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(AgentEvent::OpenFile(path.clone(), None)))),
+                    )
+                    .child(
+                        div()
+                            .rounded(look.z(4.))
+                            .border_1()
+                            .border_color(look.c(ui.border))
+                            .overflow_hidden()
+                            .font_family(look.code_font.clone())
+                            .text_size(look.text(-2.))
+                            .children(rows)
+                            .when(more > 0, |d| d.child(div().px(look.z(6.)).text_color(look.c(ui.text_muted)).child(format!("… {more} more changed lines")))),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if parts.is_empty() {
+            // Nothing structured: the raw input, then the raw result.
+            for v in [&t.raw_input, &t.raw_output].into_iter().flatten() {
+                let text = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Object(m) if m.is_empty() => continue,
+                    v => serde_json::to_string_pretty(v).unwrap_or_default(),
+                };
+                if !text.trim().is_empty() {
+                    parts.push(code_block(&tail_lines(text.trim_end(), MAX_TOOL_LINES), look).into_any_element());
+                }
+            }
+        }
+        (!parts.is_empty()).then(|| div().flex().flex_col().gap(look.z(6.)).children(parts).into_any_element())
     }
 
     fn plan_strip(&self, look: &Look) -> Option<impl IntoElement> {
@@ -975,6 +1127,74 @@ impl AgentTask {
                 ),
         )
     }
+}
+
+/// Lines an unfolded tool call shows of a diff, output or raw input.
+const MAX_TOOL_LINES: usize = 200;
+
+/// The last `max` lines of `text`, with a note of how many were left out.
+fn tail_lines(text: &str, max: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= max {
+        return text.to_string();
+    }
+    format!("… {} earlier lines\n{}", lines.len() - max, lines[lines.len() - max..].join("\n"))
+}
+
+fn code_block(text: &str, look: &Look) -> gpui::Div {
+    let ui = &look.theme.ui;
+    div()
+        .px(look.z(10.))
+        .py(look.z(6.))
+        .rounded(look.z(4.))
+        .bg(look.c(ui.panel_bg))
+        .border_1()
+        .border_color(look.c(ui.border))
+        .font_family(look.code_font.clone())
+        .text_size(look.text(-2.))
+        .text_color(look.c(ui.text_secondary))
+        .when(!text.is_empty(), |d| d.child(text.to_string()))
+}
+
+/// Line diff of `old` to `new`: ('-', line) removed, ('+', line) added,
+/// (' ', line) kept, in order. Longest common subsequence; past ~4M cells
+/// (two files of 2,000 lines) it just shows all old removed, all new added.
+fn line_diff<'a>(old: &'a str, new: &'a str) -> Vec<(char, &'a str)> {
+    let (a, b): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
+    // Common head and tail first: an edit usually touches a few lines.
+    let head = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let tail = a[head..].iter().rev().zip(b[head..].iter().rev()).take_while(|(x, y)| x == y).count();
+    let (am, bm) = (&a[head..a.len() - tail], &b[head..b.len() - tail]);
+    let mut out: Vec<(char, &str)> = a[..head].iter().map(|l| (' ', *l)).collect();
+    if am.len() * bm.len() > 4_000_000 {
+        out.extend(am.iter().map(|l| ('-', *l)));
+        out.extend(bm.iter().map(|l| ('+', *l)));
+    } else {
+        // lcs[i][j]: common lines of am[i..] and bm[j..].
+        let (n, m) = (am.len(), bm.len());
+        let mut lcs = vec![0u32; (n + 1) * (m + 1)];
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                lcs[i * (m + 1) + j] = if am[i] == bm[j] { lcs[(i + 1) * (m + 1) + j + 1] + 1 } else { lcs[(i + 1) * (m + 1) + j].max(lcs[i * (m + 1) + j + 1]) };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < n || j < m {
+            if i < n && j < m && am[i] == bm[j] {
+                out.push((' ', am[i]));
+                (i, j) = (i + 1, j + 1);
+            // Ties remove first, so a changed line reads `-old` then `+new`.
+            } else if j < m && (i == n || lcs[i * (m + 1) + j + 1] > lcs[(i + 1) * (m + 1) + j]) {
+                out.push(('+', bm[j]));
+                j += 1;
+            } else {
+                out.push(('-', am[i]));
+                i += 1;
+            }
+        }
+    }
+    out.extend(a[a.len() - tail..].iter().map(|l| (' ', *l)));
+    out
 }
 
 /// Plain text with fenced code blocks in the code font (enough for agent
@@ -1223,5 +1443,35 @@ impl Render for AgentTask {
             .bg(look.bg(ui.editor_bg))
             .child(header)
             .child(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn changed(d: &[(char, &str)]) -> Vec<String> {
+        d.iter().filter(|(k, _)| *k != ' ').map(|(k, l)| format!("{k}{l}")).collect()
+    }
+
+    #[test]
+    fn line_diff_counts_only_changed_lines() {
+        // One line edited in a 5-line file: -1 +1, not -5 +5.
+        let d = line_diff("a\nb\nc\nd\ne", "a\nb\nC\nd\ne");
+        assert_eq!(changed(&d), ["-c", "+C"]);
+        assert_eq!(d.len(), 6, "kept lines stay, in order");
+        // A new file is all added; an insertion keeps its neighbours.
+        assert_eq!(changed(&line_diff("", "x\ny")), ["+x", "+y"]);
+        assert_eq!(changed(&line_diff("a\nc", "a\nb\nc")), ["+b"]);
+        assert_eq!(changed(&line_diff("a\nb\nc", "a\nc")), ["-b"]);
+        assert!(changed(&line_diff("same\n", "same\n")).is_empty());
+        // Middle edits around repeated lines.
+        assert_eq!(changed(&line_diff("x\na\nx\nb\nx", "x\nb\nx\na\nx")).len(), 4);
+    }
+
+    #[test]
+    fn tail_lines_keeps_the_end() {
+        assert_eq!(tail_lines("1\n2\n3", 5), "1\n2\n3");
+        assert_eq!(tail_lines("1\n2\n3\n4", 2), "… 2 earlier lines\n3\n4");
     }
 }
