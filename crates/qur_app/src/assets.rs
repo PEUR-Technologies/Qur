@@ -21,6 +21,7 @@ static FILES: &[(&str, &[u8])] = embed![
     "icons/chevron-down.svg",
     "icons/close.svg",
     "icons/check.svg",
+    "icons/plus.svg",
 ];
 
 /// Inter (SIL OFL 1.1, assets/fonts/Inter-LICENSE.txt), subset to Latin,
@@ -61,4 +62,5 @@ pub mod icon {
     pub const CHEVRON_DOWN: &str = "icons/chevron-down.svg";
     pub const CLOSE: &str = "icons/close.svg";
     pub const CHECK: &str = "icons/check.svg";
+    pub const PLUS: &str = "icons/plus.svg";
 }

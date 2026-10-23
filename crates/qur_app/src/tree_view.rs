@@ -9,6 +9,7 @@ use qur_tree::FileTree;
 
 use crate::assets::icon;
 use crate::look::Look;
+use crate::prompt::DraggedFile;
 
 pub enum TreeEvent {
     Open(PathBuf),
@@ -82,6 +83,10 @@ impl Render for TreeView {
                             .children(chevron)
                             .when(!is_dir, |d| d.child(div().w(look.z(12.)).flex_none()))
                             .child(div().min_w(px(0.)).truncate().child(n.name.clone()))
+                            .on_drag(
+                                DraggedFile { abs: this.tree.abs_path(id), label: n.name.clone().into() },
+                                |f, _, _, cx| cx.new(|_| f.clone()),
+                            )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if this.tree.node(id).is_dir() {
                                     this.tree.toggle(id);

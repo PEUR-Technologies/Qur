@@ -35,3 +35,20 @@ Approved (decision 15): idle memory is measured as physical footprint, RSS repor
 Notes:
 - Grammar weight: all 13 grammars ≈ 11.3 MB; Kotlin alone ≈ 5.5 MB (the biggest). See `docs/THIRD_PARTY.md`.
 - Startup work that was moved off the critical path in M1: full parse (now background, ~70 ms after text shows), building the menu bar (after first frame), code-font detection (direct lookup instead of listing every installed font, which cost ~40 ms and ~7 MB).
+
+## M2 (2026-10-23, agents in worktrees, MacBook Air M5, AC power)
+
+| Metric | Target | M2 | |
+|---|---|---|---|
+| Footprint with 3 Claude agents active (Qur process only) | < 150 MB | 81 MB | ✅ |
+| Release binary | < 40 MB (excl. grammars) | 23.1 MB incl. grammars | ✅ |
+| Idle footprint, project + small file | < 80 MB | 70 MB | ✅ |
+| Cold start to first frame | < 250 ms | 113 ms | ✅ |
+| Open 10k-line file, fully highlighted | < 100 ms | 88 ms | ✅ |
+| Keystroke (CPU side) p50 / max | ≤ 8.3 ms | 0.45 / 1.86 ms | ✅ |
+
+M2 acceptance:
+- **Three Claude tasks in parallel:** each in its own worktree, with the tiny prompt "Reply with just the word ok." All three replied "ok" (screenshot `spikes/out/m2-three.png`).
+- **Quit leaves no orphans:** after Quit, `ps` shows no `claude-agent-acp` process.
+- **Permission flow:** "Create hi.txt" → permission bar → Allow once → file written.
+- **Resume:** relaunch → select the task → `session/load` replays the history without a new prompt.

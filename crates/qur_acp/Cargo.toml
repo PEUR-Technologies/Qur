@@ -1,0 +1,17 @@
+[package]
+name = "qur_acp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+futures.workspace = true
+libc.workspace = true
+serde_json = "1"
+
+[[bin]]
+# Test helper: a tiny scripted ACP agent (tests/protocol.rs). Not shipped.
+name = "qur-fake-agent"
+path = "src/bin/fake_agent.rs"
+test = false

@@ -37,3 +37,21 @@ These amend `docs/QUR_HANDOFF.md`. Newest last.
 15. **Idle memory budget is measured as physical footprint** (Activity Monitor "Memory", `footprint <pid>`), with RSS reported alongside. Same targets: idle < 80 MB, 3 agents < 150 MB.
 16. **Section 15 defaults accepted:** repo at `~/qur`; no file tabs (not even as an option for now); "by PEUR Technologies" only in About. The 6-accent palettes are chosen in M1 and shown to the owner with the M1 report.
 17. **"New Claude Task" is now called "New Agent Terminal"** (`Cmd+Shift+T`) in menus, the command palette and the empty-editor hints. Behaviour is unchanged (decision 12).
+18. **No permanent code editor area** (amends handoff sections 7–8). The window is for **files and agent sessions**. Code opens in a **modal** over the window, which keeps full editing, find and save. **Esc** closes it, stepping out one layer at a time: close find, then collapse multi-cursor, then close the modal. Unsaved edits stay in memory: the file shows a dirty dot in the tree, and Cmd+S saves, also from inside the modal. Quitting with unsaved edits still asks first.
+19. **M2 window layout.**
+    - **Left column (resizable, 280 px default):**
+      - AGENTS: ACP tasks and Agent Terminals.
+      - TERMINALS: plain shells, shown only when there are any.
+      - FILES: expanded by default and taking all remaining height. This replaces the earlier "collapsed dropdown".
+      - The tree shows the selected agent's worktree, or the main checkout when no agent is selected.
+    - **Stage (rest of the window):** the selected session.
+      - ACP agent: header (name, status, branch), To-do strip, Chat stream, permission bar, prompt bar.
+      - Agent Terminal or shell: the terminal itself.
+    - The bottom panel is gone (Cmd+J has nothing to toggle and is disabled). Shells live in the stage like agents.
+20. **Automated agent tests use a tiny prompt** to save the owner's Claude usage. The M2 parallel check is three tasks with a one-line prompt.
+21. **Take Orca's ideas where they fit** (owner, 2026-10-23: "take a ton of features from orca"). The inventory is in `docs/research/orca.md`: 125 features, each marked Adopt, Adopt adapted, or Conflicts. Orca is MIT (GPL-compatible), but it's TypeScript/Electron, so we take ideas, not code. Features that conflict with a constraint (browser, hosted-git integrations, cloud/SSH, telemetry, a terminal daemon that outlives the app, push) are **not** adopted unless the owner says so per item.
+22. **Orca features adopted in M2:**
+    - `.worktreeinclude`. A repo-root file the user writes (Qur only reads it) with one gitignore-style path per line. Matching files and folders from the main checkout, like `.env` and `node_modules`, are copied into each new worktree with APFS copy-on-write (`cp -c`): instant and no extra disk.
+    - A per-project setup command: `[worktree] setup = "pnpm install"` in `projects/<id>.toml`. It runs in the new worktree through the login shell before the agent starts. Its output shows in the chat, and the agent starts only on success.
+    - Sidebar rows show the agent's last message, and an unread marker on agents that finished or need you while not selected.
+    - Composer: `/` opens the agent's slash commands (from ACP `available_commands_update`). Messages sent during a turn are queued and sent when it ends.

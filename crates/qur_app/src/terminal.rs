@@ -121,11 +121,12 @@ impl Dimensions for Dims {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Kind {
     Shell,
-    /// Runs `claude` in the worktree of agent task `n`.
-    Claude(usize),
+    /// A terminal-mode agent task: runs `command` in the task's worktree
+    /// (New Agent Terminal, or `mode = "terminal"` agents from agents.toml).
+    Agent { task: String, command: String },
 }
 
 pub struct Session {
@@ -149,15 +150,16 @@ pub fn shell() -> String {
 
 type Spawned = (Arc<FairMutex<Term<Listener>>>, EventLoopSender, i32, futures::channel::mpsc::UnboundedReceiver<()>);
 
-fn spawn_pty(cwd: &Path, run_claude: bool, id: usize) -> std::io::Result<Spawned> {
+fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize) -> std::io::Result<Spawned> {
     let (tx, rx) = unbounded();
     let listener = Listener(tx);
     let (cols, lines) = (100, 12);
     // `env -u` strips vendor API keys so the CLIs use their own logins.
     let mut args = vec!["-u".into(), "ANTHROPIC_API_KEY".into(), "-u".into(), "OPENAI_API_KEY".into(), shell(), "-l".into()];
-    if run_claude {
+    if let Some(cmd) = run {
+        // The shell stays open after the agent exits.
         args.push("-c".into());
-        args.push("claude; exec \"$SHELL\" -l".into());
+        args.push(format!("{cmd}; exec \"$SHELL\" -l"));
     }
     let opts = tty::Options {
         shell: Some(tty::Shell::new("/usr/bin/env".into(), args)),
@@ -269,7 +271,11 @@ impl TerminalPanel {
     pub fn open(&mut self, cwd: &Path, kind: Kind, label: String, cx: &mut Context<Self>) -> Option<usize> {
         let id = self.next_id;
         self.next_id += 1;
-        let (term, sender, pid, mut rx) = match spawn_pty(cwd, matches!(kind, Kind::Claude(_)), id) {
+        let run = match &kind {
+            Kind::Agent { command, .. } => Some(command.clone()),
+            Kind::Shell => None,
+        };
+        let (term, sender, pid, mut rx) = match spawn_pty(cwd, run.as_deref(), id) {
             Ok(x) => x,
             Err(e) => {
                 self.message = Some(format!("terminal failed: {e}"));
@@ -345,10 +351,10 @@ impl TerminalPanel {
         }));
     }
 
-    pub fn label_for(&self, kind: Kind) -> String {
+    pub fn label_for(&self, kind: &Kind) -> String {
         let base = match kind {
             Kind::Shell => shell().rsplit('/').next().unwrap_or("sh").to_string(),
-            Kind::Claude(n) => return format!("claude {n}"),
+            Kind::Agent { task, .. } => return task.clone(),
         };
         let dup = self.sessions.iter().filter(|s| s.kind == Kind::Shell).count();
         if dup == 0 { base } else { format!("{base} {}", dup + 1) }
@@ -388,14 +394,6 @@ impl TerminalPanel {
         }
     }
 
-    pub fn cycle(&mut self, d: isize, cx: &mut Context<Self>) {
-        let n = self.sessions.len() as isize;
-        if n > 0 {
-            self.active = ((self.active as isize + d).rem_euclid(n)) as usize;
-            cx.notify();
-        }
-    }
-
     fn active_session(&self) -> Option<&Session> {
         self.sessions.get(self.active)
     }
@@ -405,7 +403,7 @@ impl TerminalPanel {
         // Typing snaps back to the bottom of the scrollback.
         s.term.lock().scroll_display(Scroll::Bottom);
         // Remember the first line typed (task title).
-        if s.first_line.is_none() && matches!(s.kind, Kind::Claude(_)) {
+        if s.first_line.is_none() && matches!(s.kind, Kind::Agent { .. }) {
             for &b in &bytes {
                 match b {
                     b'\r' => {
@@ -821,50 +819,9 @@ impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
         let ui = look.theme.ui.clone();
-        let tabs = self.sessions.iter().enumerate().map(|(i, s)| {
-            let active = i == self.active;
-            let label = match (&s.kind, &s.first_line) {
-                (Kind::Claude(_), _) => s.label.clone(),
-                _ => s.label.clone(),
-            };
-            div()
-                .id(("tab", s.id))
-                .flex()
-                .items_center()
-                .gap(look.z(6.))
-                .px(look.z(8.))
-                .h_full()
-                .text_size(look.text(-1.))
-                .text_color(look.c(if active { ui.text } else { ui.text_muted }))
-                .when(active, |d| d.bg(look.c(ui.active_bg)))
-                .cursor_pointer()
-                .on_click(cx.listener(move |p, _, window, cx| {
-                    p.active = i;
-                    window.focus(&p.focus, cx);
-                    cx.notify();
-                }))
-                .child(div().whitespace_nowrap().child(label))
-                .child(
-                    div()
-                        .id(("close", s.id))
-                        .child(gpui::svg().path(crate::assets::icon::CLOSE).size(look.z(10.)).text_color(look.c(ui.text_muted)))
-                        .on_click(cx.listener(move |p, _, _, cx| {
-                            cx.stop_propagation();
-                            p.close(i, cx);
-                        })),
-                )
+        let message = self.message.clone().map(|m| {
+            div().flex_none().px(look.z(8.)).py(look.z(4.)).text_size(look.text(-1.)).text_color(look.c(ui.text_muted)).child(m)
         });
-        let strip = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .h(look.z(26.))
-            .border_b_1()
-            .border_color(look.c(ui.border))
-            .children(tabs)
-            .children(self.message.clone().map(|m| {
-                div().px(look.z(8.)).text_size(look.text(-1.)).text_color(look.c(ui.text_muted)).child(m)
-            }));
         div()
             .key_context("Terminal")
             .track_focus(&self.focus)
@@ -880,7 +837,7 @@ impl Render for TerminalPanel {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::close_terminal))
-            .child(strip)
+            .children(message)
             .child(
                 div()
                     .flex_1()

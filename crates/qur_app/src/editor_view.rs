@@ -49,6 +49,8 @@ pub enum EditorEvent {
     Error(String),
     /// Soft wrap toggled (menu checkmark).
     WrapToggled,
+    /// Esc with nothing left to dismiss: close the code modal (decision 18).
+    CloseRequested,
 }
 
 struct FindBar {
@@ -732,11 +734,14 @@ simple! {
 }
 
 impl EditorView {
+    /// Esc steps out one layer at a time: find bar, extra cursors, then the modal.
     fn a_escape(&mut self, _: &ea::Escape, window: &mut Window, cx: &mut Context<Self>) {
-        if self.model.selections().len() > 1 || !self.model.primary().is_empty() {
-            self.run(Command::SingleCursor, cx);
-        } else if self.find.is_some() {
+        if self.find.is_some() {
             self.close_find(window, cx);
+        } else if self.model.selections().len() > 1 {
+            self.run(Command::SingleCursor, cx);
+        } else {
+            cx.emit(EditorEvent::CloseRequested);
         }
     }
 

@@ -4,11 +4,13 @@
 //! Without a path it reopens the most recent project, else asks for a folder.
 
 mod assets;
+mod agent_view;
 mod commands;
 mod editor_view;
 mod input;
 mod look;
 mod picker;
+mod prompt;
 mod terminal;
 mod tree_view;
 mod workspace;
@@ -181,6 +183,7 @@ fn main() {
             .add_fonts(assets::FONTS.iter().map(|b| Cow::Borrowed(*b)).collect())
             .expect("bundled fonts");
         mark("fonts_added");
+        qur_agents::warm_login_path();
         commands::bind_keys(cx);
         mark("keys_bound");
         cx.activate(true);

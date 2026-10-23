@@ -12,7 +12,7 @@ pub mod qur {
         qur,
         [
             Quit, Hide, HideOthers, ShowAll, CloseWindow, Minimize, Zoom, ToggleFullScreen,
-            CommandPalette, ToggleSidebar, ToggleBottomPanel, ToggleTerminal, ZoomIn, ZoomOut,
+            CommandPalette, ToggleSidebar, ToggleTerminal, ZoomIn, ZoomOut,
             ZoomReset, Transparency, GoToLine, RevealInFiles, NewTerminal, NewAgentTerminal,
             NextTerminal, PrevTerminal, CloseTerminal, OpenConfig, ThemePicker, NewWindow,
             OpenFolder, QuickOpen, SaveAll, RevertFile, NavBack, NavForward, RecentFile,
@@ -26,6 +26,13 @@ pub mod qur {
             RunDoctor, ShowLogs, ReportProblem, ExpandSelection, ShrinkSelection,
         ]
     );
+
+    /// Select session N in the sidebar (Ctrl+1..9).
+    #[derive(Clone, PartialEq, gpui::Action)]
+    #[action(namespace = qur, no_json)]
+    pub struct SelectSession {
+        pub index: usize,
+    }
 
     /// File > Open Recent > <project>.
     #[derive(Clone, PartialEq, gpui::Action)]
@@ -56,6 +63,11 @@ pub mod editor {
             ToggleRegex,
         ]
     );
+}
+
+/// Answers for the permission bar of the selected agent.
+pub mod agent {
+    gpui::actions!(agent, [AllowOnce, AllowAlways, Deny]);
 }
 
 pub mod terminal {
@@ -126,13 +138,13 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::CheckSetup, "Qur", "Check Setup…", "", W, L("M6")),
     cmd!(qur::OpenConfig, "Qur", "Open config.toml", "cmd-,", W, R),
     cmd!(qur::OpenKeymap, "Qur", "Open keymap.toml", "", W, L("M6")),
-    cmd!(qur::OpenAgents, "Qur", "Agents (agents.toml)", "", W, L("M2")),
+    cmd!(qur::OpenAgents, "Qur", "Agents (agents.toml)", "", W, R),
     cmd!(qur::ThemePicker, "Qur", "Theme…", "cmd-k cmd-t", NT, R),
     cmd!(qur::UseDefaultTheme, "Qur", "Use Default Theme for This Project", "", W, R),
     cmd!(qur::Transparency, "Qur", "Transparency…", "", W, R),
     cmd!(qur::VimMode, "Qur", "Vim Mode", "", W, L("M6")),
     cmd!(qur::NewWindow, "File", "New Window", "cmd-n", W, R),
-    cmd!(qur::NewAgentTask, "Agent", "New Task…", "cmd-shift-n", W, L("M2")),
+    cmd!(qur::NewAgentTask, "Agent", "New Agent Task…", "cmd-shift-n", W, R),
     cmd!(qur::OpenFolder, "File", "Open Folder…", "cmd-o", W, R),
     cmd!(qur::ProjectSwitcher, "File", "Switch Project…", "cmd-alt-o", W, R),
     cmd!(qur::CloseWindow, "File", "Close Window", "cmd-shift-w", W, R),
@@ -141,7 +153,6 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::ToggleFullScreen, "View", "Enter Full Screen", "ctrl-cmd-f", W, R),
     cmd!(qur::CommandPalette, "View", "Command Palette…", "cmd-shift-p|f1", W, R),
     cmd!(qur::ToggleSidebar, "View", "Sidebar", "cmd-b", W, R),
-    cmd!(qur::ToggleBottomPanel, "View", "Bottom Panel", "cmd-j", W, R),
     cmd!(qur::ZoomIn, "View", "Zoom In", "cmd-=|cmd-+", W, R),
     cmd!(qur::ZoomOut, "View", "Zoom Out", "cmd--", W, R),
     cmd!(qur::ZoomReset, "View", "Reset Zoom", "cmd-0", W, R),
@@ -232,7 +243,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::NewTerminal, "Terminal", "New Terminal", "cmd-t", W, R),
     cmd!(qur::NewAgentTerminal, "Terminal", "New Agent Terminal", "cmd-shift-t", W, R),
     cmd!(qur::CloseTerminal, "Terminal", "Close Terminal", "cmd-w", T, R),
-    cmd!(qur::ToggleTerminal, "View", "Terminal", "ctrl-`", W, R),
+    cmd!(qur::ToggleTerminal, "View", "Go to Terminal", "ctrl-`", W, R),
     cmd!(terminal::Clear, "Terminal", "Clear", "cmd-k", T, R),
     cmd!(qur::PrevTerminal, "Terminal", "Previous Terminal", "cmd-shift-[|cmd-{", W, R),
     cmd!(qur::NextTerminal, "Terminal", "Next Terminal", "cmd-shift-]|cmd-}", W, R),
@@ -243,17 +254,20 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::GitPanel, "View", "Git", "ctrl-shift-g", W, L("M4")),
     cmd!(qur::SearchPanel, "View", "Search", "", W, L("M6")),
     // Agents and peek
-    cmd!(qur::FocusPrompt, "Agent", "Focus Prompt", "cmd-i", W, L("M2")),
-    cmd!(qur::StopAgent, "Agent", "Stop", "cmd-.", W, L("M2")),
+    cmd!(qur::FocusPrompt, "Agent", "Focus Prompt", "cmd-i", W, R),
+    cmd!(qur::StopAgent, "Agent", "Stop", "cmd-.", W, R),
     cmd!(qur::TakeOver, "Agent", "Take Over", "", W, L("M3")),
-    cmd!(qur::NextAgent, "Agent", "Next Agent", "", W, L("M2")),
-    cmd!(qur::PrevAgent, "Agent", "Previous Agent", "", W, L("M2")),
+    cmd!(qur::NextAgent, "Agent", "Next Session", "ctrl-alt-down", W, R),
+    cmd!(qur::PrevAgent, "Agent", "Previous Session", "ctrl-alt-up", W, R),
+    cmd!(agent::AllowOnce, "Agent", "Permission: Allow Once", "", W, R),
+    cmd!(agent::AllowAlways, "Agent", "Permission: Allow for This Task", "", W, R),
+    cmd!(agent::Deny, "Agent", "Permission: Deny", "", W, R),
     cmd!(qur::ReviewChanges, "Agent", "Review Changes", "", W, L("M4")),
     cmd!(qur::Merge, "Agent", "Merge…", "", W, L("M4")),
     cmd!(qur::KeepWorking, "Agent", "Keep Working", "", W, L("M4")),
-    cmd!(qur::DiscardTask, "Agent", "Discard Task…", "", W, L("M4")),
-    cmd!(qur::OpenWorktreeInTerminal, "Agent", "Open Task Worktree in Terminal", "", W, L("M2")),
-    cmd!(qur::RevealWorktree, "Agent", "Reveal Worktree in Finder", "", W, L("M2")),
+    cmd!(qur::DiscardTask, "Agent", "Discard Task…", "", W, R),
+    cmd!(qur::OpenWorktreeInTerminal, "Agent", "Open Task Worktree in Terminal", "", W, R),
+    cmd!(qur::RevealWorktree, "Agent", "Reveal Worktree in Finder", "", W, R),
     cmd!(qur::CyclePeekLayout, "View", "Cycle Peek Layout", "cmd-k cmd-l", NT, L("M3")),
     cmd!(qur::PeekLayoutA, "View", "A Watch + Side Notes", "", W, L("M3")),
     cmd!(qur::PeekLayoutB, "View", "B One View at a Time", "", W, L("M3")),
@@ -305,6 +319,10 @@ pub fn bind_keys(cx: &mut App) {
             bindings.push(KeyBinding::load(keys, (c.action)(), predicate, false, None, cx).unwrap());
         }
     }
+    const SESSION_KEYS: [&str; 9] = ["ctrl-1", "ctrl-2", "ctrl-3", "ctrl-4", "ctrl-5", "ctrl-6", "ctrl-7", "ctrl-8", "ctrl-9"];
+    for (index, keys) in SESSION_KEYS.iter().enumerate() {
+        bindings.push(KeyBinding::new(keys, qur::SelectSession { index }, Some("!Terminal")));
+    }
     cx.bind_keys(bindings);
 }
 
@@ -351,7 +369,6 @@ pub fn display_keys(keys: &str) -> String {
 #[derive(Clone, PartialEq, Eq, Default)]
 pub struct MenuState {
     pub sidebar: bool,
-    pub bottom_panel: bool,
     pub soft_wrap: bool,
     pub recent: Vec<PathBuf>,
 }
@@ -401,7 +418,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::Quit),
         ]),
         Menu::new("File").items([
-            titled("New Agent Task…", qur::NewAgentTask),
+            item(qur::NewAgentTask),
             item(qur::NewTerminal),
             item(qur::NewAgentTerminal),
             item(qur::NewWindow),
@@ -464,7 +481,6 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             sep(),
             item(qur::ToggleSidebar).checked(s.sidebar),
             item(qur::RevealInFiles),
-            item(qur::ToggleBottomPanel).checked(s.bottom_panel),
             item(qur::ToggleTerminal),
             item(qur::GitPanel),
             item(qur::SearchPanel),
@@ -502,9 +518,14 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
         ]),
         Menu::new("Agent").items([
             item(qur::NewAgentTask),
+            item(qur::NewAgentTerminal),
             item(qur::FocusPrompt),
             item(qur::StopAgent),
             item(qur::TakeOver),
+            sep(),
+            item(agent::AllowOnce),
+            item(agent::AllowAlways),
+            item(agent::Deny),
             sep(),
             item(qur::NextAgent),
             item(qur::PrevAgent),

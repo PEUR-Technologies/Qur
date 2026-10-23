@@ -277,6 +277,15 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 pub struct ProjectSettings {
     pub theme: Option<String>,
     pub window: ProjectWindow,
+    pub worktree: ProjectWorktree,
+}
+
+/// New task worktrees (decision 22).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ProjectWorktree {
+    /// Run in each new worktree before the agent starts, e.g. "pnpm install".
+    pub setup: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]

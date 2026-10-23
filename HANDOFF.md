@@ -26,27 +26,34 @@ Summary of the owner decisions so far:
 - **No Codex for now.**
 - Theme (and opacity) per project, stored outside the repo, keyed by root commit (decision 13).
 - `Cmd+Shift+T` = **New Agent Terminal**: a Claude agent task in its own worktree (sidebar row, heatmap), shown as a terminal.
+- **No permanent code editor area:** code opens in a modal (Esc closes). The window is files + agent sessions: a left column (AGENTS, TERMINALS, FILES) and a stage (decisions 18–19).
+- Orca's features are adopted where they fit (`docs/research/orca.md`, decisions 21–22). Conflicting ones (browser, hosted-git, cloud, telemetry, push) need the owner's per-item OK.
+- Automated agent tests use a tiny prompt to save the owner's usage (decision 20).
 - Toolkit is **GPUI**; idle memory is budgeted as physical footprint; repo at `~/qur`; no file tabs; "by PEUR Technologies" in About only.
 - Peek-layout cycle is `Cmd+K Cmd+L`; `Cmd+Shift+L` stays Select All Matches.
 
 ## Status
 
-**M0: done** (commit "M0: spikes"). **M1 (editor shell): done**, committed as "M1: editor shell". Next is M2.
+**M0, M1 and M2 are done.** Commits: "M0: spikes", "M1: editor shell", "M2: agents in worktrees". Next is M3 (peek + heatmap).
 
-M1 delivered (crates in `crates/`):
+M2 delivered:
+- **New crates:**
+  - `qur_acp`: hand-rolled ACP v1 client, with a fake-agent protocol test suite and one ignored real-Claude test.
+  - `qur_worktree`: create and remove worktrees, slugs, `.worktreeinclude` copies with APFS clones, and the setup command.
+  - `qur_agents`: `agents.toml` roster, login-shell `PATH`, and a per-project task store.
+- **App:**
+  - Left column: AGENTS (ACP tasks and Agent Terminals) with accent, status glyph, last-message preview and unread marker; TERMINALS; and FILES, which follows the selected worktree, is resizable and drags into the prompt.
+  - Stage: agent view (header, To-do strip, Chat with tool calls and diff counts, permission bar, prompt bar with `@` mentions, `/` commands and queueing) or a terminal.
+  - Code modal: Esc steps out of find, then extra cursors, then the modal.
+  - New Agent Task dialog.
+  - Stop (Esc / Cmd+.), Discard, Reveal and Worktree terminal.
+  - Tasks persist and resume through `session/load`.
+- **Acceptance** (see `docs/budget.md`, M2):
+  - three Claude tasks ran in parallel, footprint 81 MB;
+  - quit leaves no orphans;
+  - the permission flow and resume were verified with tiny prompts.
 
-| Crate | What |
-|---|---|
-| `qur_app` | The app (binary `qur`). Holds the window, the Zed-style top bar with project switcher, sidebar (agents + Files dropdown), editor view, terminal panel with Cmd+T and Cmd+Shift+T (New Agent Terminal), command palette, Quick Open, theme picker, Go to Line, transparency popover, native menus, Back/Forward and Ctrl+Tab. |
-| `qur_editor` | UI-free editor model: rope, multi-cursor, undo with typing groups, every editing command in `docs/keymap.md`, find/replace (regex, whole word, case), soft wrap. 49 tests. |
-| `qur_syntax` | tree-sitter for 13 languages (TS/TSX, JS, Rust, Python, JSON, CSS, HTML, Markdown, TOML, YAML, Kotlin, Dart), incremental, viewport-only highlighting, injections. |
-| `qur_theme` | 17 built-in themes as embedded TOML, contrast test (WCAG and CIEDE2000), per-theme opacity floor, fallback to Qur Light/Dark. |
-| `qur_config` | `config.toml` (comment-preserving writes), per-project overrides (`projects/<id>.toml`), `state.toml` (recent projects). |
-| `qur_tree` | Lazy, gitignore-aware file tree and the Quick Open file list. |
-
-M1 acceptance: every budget target passes (`docs/budget.md`, M1 table), all themes pass the contrast test, and a theme switch takes about one frame and keeps all state.
-
-Tested by script (scripted actions plus window screenshots), not by hand: menus, palette, pickers, theme preview and switching, transparency, the Files tree, terminals, and Agent Terminal worktree creation and orphan-free quit. The owner should try typing, mouse selection and the menus by hand.
+Tested by script plus screenshots, not by hand: typing in the prompt, drag-to-prompt, `/` commands with a real command list, Discard, and resizing the sidebar. The owner should try these.
 
 ## Key findings so far
 
@@ -103,21 +110,22 @@ Env: `QUR_HOME` (settings folder; **always set it to a scratch dir in tests**, s
 
 ## Next
 
-1. Owner reviews M1 by hand (`target/release/qur`) and the Qur Light/Dark accent swatches.
-2. **M2: agents in worktrees.**
-   - Roster config (`agents.toml`), `+` new task, worktree creation (reuse `create_task_worktree`).
-   - `qur_acp`: a hand-rolled ACP v1 client, using `spikes/acp_spike` as the base.
-   - Prompt bar, Chat and To-do, permission bar, Stop.
-   - Process cleanup (process group, as in the spike).
-   - Accept: three Claude tasks run in parallel, and Stop and quit leave no orphans.
-3. Known gaps to pick up:
+1. Owner reviews M2 by hand: `target/release/qur ~/some/repo`, then Cmd+Shift+N.
+2. **M3: peek + heatmap.** Planned:
+   - The Live view (follow the agent's current file, Take over), probably as the code modal in "follow" mode, since there is no code area now (decision 18).
+   - The peek layouts reinterpreted for the stage, plus the heatmap states in the Files tree (via the FSEvents watcher plus the ACP `toolCallId` state from M0), folder dots, heat levels, and overlap dots on the main tree.
+   - Orca items for M3: never overwrite unseen disk changes; "needs you" ordering options.
+   - Accept: a glow within 100 ms, Live follows across files, and state survives layout switches. Also check the GPUI inactive-window throttle with Qur unfocused.
+3. Known gaps:
    - IME marked text isn't drawn.
-   - End and Cmd+Right go to the end of the buffer line, not of the visual row.
-   - No file watcher yet (M3); the tree refreshes when the window is activated.
-   - Hide/Show and other menu items are untested by hand.
+   - End and Cmd+Right go to the line end, not the visual-row end.
+   - No file watcher yet; trees refresh when the window is activated.
+   - Agent Terminals don't pre-trust the worktree. Claude's "trust this folder?" prompt can appear; see the open question below.
 
 ## Open questions for the owner
 
 - Trademark clearance for "Qur" hasn't been checked (brand README). It needs flagging in the public README at M7.
 - Approve the accent palettes (Qur Dark: #ff7a45 #3ddc97 #5b9bff #f062c0 #f5c04a #a77bff; Qur Light: #d9480f #0e9f6e #2563eb #c026d3 #0891b2 #db2777).
-- Kotlin adds about 5.5 MB to the binary. Keep it (it's on the handoff's list), or load it lazily later?
+- Kotlin adds about 5.5 MB to the binary. Keep it, or load it lazily later?
+- Orca item: pre-trust new worktrees for Claude CLI terminals. That means Qur writing to `~/.claude.json`, which is another app's config. OK or not?
+- Which of Orca's "conflicts" items, if any, should override a non-goal? See the table in `docs/research/orca.md`.

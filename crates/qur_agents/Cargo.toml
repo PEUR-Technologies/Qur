@@ -1,0 +1,12 @@
+[package]
+name = "qur_agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+qur_config.workspace = true
+qur_worktree.workspace = true
+serde.workspace = true
+toml_edit.workspace = true

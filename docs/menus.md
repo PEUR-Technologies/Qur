@@ -63,7 +63,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Command Palette… `Cmd+Shift+P`
 - ---
 - Sidebar `Cmd+B` (checkmark) · Files Dropdown `Cmd+Shift+E`
-- Bottom Panel `Cmd+J` · Terminal ``Ctrl+` `` · Git `Ctrl+Shift+G` · Search `Cmd+Shift+F`
+- Go to Terminal ``Ctrl+` `` · Git `Ctrl+Shift+G` · Search `Cmd+Shift+F`  (no bottom panel since decision 19)
 - ---
 - Peek Layout ▸ A Watch + side notes · B One view at a time · C Watch + drawer (radio) · Cycle `Cmd+K Cmd+L`
 - Peek ▸ Live `Cmd+1` · To-do `Cmd+2` · Chat `Cmd+3` · Changes `Cmd+4`
@@ -81,10 +81,11 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Jump to Matching Bracket
 
 ## Agent
-- New Task… `Cmd+Shift+N`
+- New Agent Task… `Cmd+Shift+N` · New Agent Terminal `Cmd+Shift+T`
 - Focus Prompt `Cmd+I`
 - Stop `Cmd+.`
 - Take Over (Live, when an agent is editing)
+- Permission: Allow Once · Allow for This Task · Deny
 - ---
 - Next Agent · Previous Agent · Agent 1–9 `Ctrl+1..9`
 - ---

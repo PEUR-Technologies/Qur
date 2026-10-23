@@ -12,7 +12,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+H` / `Cmd+Opt+H` | Hide Qur / Hide Others | Qur | S |
 | `Cmd+,` | Open config.toml | Qur > Settings… | M1+ |
 | `Cmd+N` | New Window | File | M1+ |
-| `Cmd+Shift+N` | New Agent Task (same as sidebar `+`) | File | M2 |
+| `Cmd+Shift+N` | New Agent Task (same as sidebar `+`) | File | M2 ✅ |
 | `Cmd+O` | Open Folder… | File | M1+ |
 | `Cmd+Opt+O` | Switch Project… (also: click the project name in the top bar) | File | M1 |
 | `Cmd+Shift+W` | Close Window | File | S |
@@ -21,7 +21,6 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+Shift+P` / `F1` | Command Palette | View | S |
 | `Cmd+K Cmd+T` | Theme Picker | Qur | M1 |
 | `Cmd+B` | Toggle Sidebar | View | S |
-| `Cmd+J` | Toggle Bottom Panel | View | S |
 | `Cmd+=` / `Cmd+-` / `Cmd+0` | Zoom In / Out / Reset (UI + code font) | View | S |
 
 ## Files and navigation
@@ -104,20 +103,25 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Ctrl+Shift+G` | Git panel | M4 |
 | `Cmd+Shift+F` | Search panel | M6 |
 
-## Agents and peek
+## Agents and sessions (M2)
 
 | Keys | Command | Tier |
 |---|---|---|
-| `Cmd+Shift+N` | New agent task | M2 |
-| `Cmd+Opt+Up/Down` (sidebar focused) / `Ctrl+1..9` | Select previous/next agent / agent N | M2 |
-| `Cmd+L` (prompt) / `Cmd+I` | Focus the prompt bar | M2 |
-| `Enter` / `Shift+Enter` | Send / newline (prompt bar) | M2 |
-| `Esc` (prompt) / `Cmd+.` | Stop agent (`session/cancel`) | M2 |
+| `Cmd+Shift+N` | New agent task (dialog: agent + task; `@` mentions a file) | M2 ✅ |
+| `Cmd+Shift+T` | New Agent Terminal | M2 ✅ |
+| `Ctrl+1..9` | Select session N in the sidebar | M2 ✅ |
+| `Ctrl+Opt+Up/Down` | Previous / next session | M2 ✅ |
+| `Cmd+I` | Focus the prompt bar | M2 ✅ |
+| `Enter` / `Shift+Enter` | Send (queues during a turn) / newline | M2 ✅ |
+| `Esc` (prompt) / `Cmd+.` | Stop the agent's turn (`session/cancel`) | M2 ✅ |
+| `@` / `/` in the prompt | Mention a file / pick an agent slash command | M2 ✅ |
+| Agent menu | Permission: Allow Once / Allow for This Task / Deny | M2 ✅ |
+| Agent menu | Discard Task…, Reveal Worktree in Finder, Open Task Worktree in Terminal | M2 ✅ |
 | `Cmd+K Cmd+L` | Cycle peek layout | M3 |
 | `Cmd+1..4` | Live / To-do / Chat / Changes (layout B) | M3 |
 | `Cmd+Shift+Enter` (Changes view) | Merge | M4 |
 
-Note: `Cmd+L` means Select Line in the editor and Focus Prompt only from the agent views; context decides.
+The code modal closes with `Esc`: first the find bar, then extra cursors, then the modal (decision 18).
 
 ## Vim mode (optional, M6)
 

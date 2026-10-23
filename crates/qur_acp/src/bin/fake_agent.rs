@@ -1,0 +1,139 @@
+//! A scripted ACP v1 agent for qur_acp's protocol tests (not shipped).
+//!
+//! Prompt text picks the script:
+//! - default: message, tool call + update, plan, permission request (reports
+//!   the chosen option), an unsupported `fs/read_text_file` call, end_turn
+//! - contains "slow": one chunk, then waits for session/cancel -> cancelled
+//! - contains "crash": prints to stderr and exits 3
+//! - contains "garbage": writes a non-JSON line first
+//!
+//! Env: FAKE_AGENT_CHILD=1 spawns a `sleep 300` child (same process group);
+//! FAKE_AGENT_IGNORE_TERM=1 ignores SIGTERM (tests the SIGKILL path).
+
+use std::io::{BufRead, Write};
+
+use serde_json::{Value, json};
+
+fn send(v: Value) {
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "{v}").unwrap();
+    out.flush().unwrap();
+}
+
+fn update(sid: &str, u: Value) {
+    send(json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": sid, "update": u } }));
+}
+
+fn chunk(sid: &str, text: &str) {
+    update(sid, json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": text } }));
+}
+
+/// Read stdin until a message satisfying `want` arrives; other messages are
+/// handled by `other` (returns true to stop waiting, e.g. on cancel).
+fn wait_for(lines: &mut impl Iterator<Item = String>, mut want: impl FnMut(&Value) -> bool) -> Option<Value> {
+    for line in lines.by_ref() {
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        if want(&v) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn main() {
+    if std::env::var("FAKE_AGENT_IGNORE_TERM").as_deref() == Ok("1") {
+        unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN) };
+    }
+    let _child = (std::env::var("FAKE_AGENT_CHILD").as_deref() == Ok("1"))
+        .then(|| std::process::Command::new("sleep").arg("300").spawn().unwrap());
+    let stdin = std::io::stdin();
+    let mut lines = stdin.lock().lines().map_while(Result::ok);
+    let mut next_out_id = 1000u64;
+    while let Some(line) = lines.next() {
+        let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
+        let id = msg.get("id").cloned();
+        let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+        let p = msg.get("params").cloned().unwrap_or(Value::Null);
+        let reply = |result: Value| send(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+        match method {
+            "initialize" => reply(json!({
+                "protocolVersion": 1,
+                "agentInfo": { "name": "fake-agent", "version": "0.0.1" },
+                "agentCapabilities": { "loadSession": true, "_meta": { "ignored": true } },
+                "authMethods": []
+            })),
+            "session/new" => {
+                send(json!({ "jsonrpc": "2.0", "method": "_fake/extension", "params": {} }));
+                reply(json!({ "sessionId": "s1" }))
+            }
+            "session/load" => {
+                let sid = p["sessionId"].as_str().unwrap_or("s1").to_string();
+                update(&sid, json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": "earlier question" } }));
+                chunk(&sid, "earlier answer");
+                reply(Value::Null)
+            }
+            "session/prompt" => {
+                let sid = p["sessionId"].as_str().unwrap_or("s1").to_string();
+                let text: String = p["prompt"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect();
+                if text.contains("crash") {
+                    eprintln!("fake crash: something went wrong");
+                    std::process::exit(3);
+                }
+                if text.contains("garbage") {
+                    let mut out = std::io::stdout().lock();
+                    writeln!(out, "this is not json").unwrap();
+                    out.flush().unwrap();
+                }
+                if text.contains("slow") {
+                    chunk(&sid, "working…");
+                    wait_for(&mut lines, |v| v["method"] == "session/cancel");
+                    reply(json!({ "stopReason": "cancelled" }));
+                    continue;
+                }
+                chunk(&sid, "hello");
+                update(&sid, json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Preparing file…", "kind": "edit", "status": "pending", "locations": [] }));
+                update(&sid, json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1", "title": "Write a.txt", "locations": [{ "path": "/w/a.txt" }] }));
+                update(&sid, json!({ "sessionUpdate": "plan", "entries": [
+                    { "content": "write a.txt", "priority": "high", "status": "in_progress" },
+                    { "content": "report", "priority": "low", "status": "pending" } ] }));
+                // Permission round trip (string id, to test non-numeric ids).
+                send(json!({ "jsonrpc": "2.0", "id": "perm-1", "method": "session/request_permission", "params": {
+                    "sessionId": sid,
+                    "toolCall": { "toolCallId": "t1", "title": "Write a.txt", "kind": "edit",
+                                  "content": [{ "type": "diff", "path": "/w/a.txt", "oldText": null, "newText": "hi\n" }] },
+                    "options": [
+                        { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+                        { "optionId": "always", "name": "Always allow", "kind": "allow_always" },
+                        { "optionId": "reject", "name": "Reject", "kind": "reject_once" } ] } }));
+                let mut cancelled = false;
+                let resp = wait_for(&mut lines, |v| {
+                    if v["method"] == "session/cancel" {
+                        cancelled = true;
+                    }
+                    v["id"] == "perm-1"
+                });
+                let chosen = resp
+                    .as_ref()
+                    .and_then(|r| r["result"]["outcome"]["optionId"].as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "cancelled".into());
+                chunk(&sid, &format!("chose {chosen}"));
+                if cancelled || chosen == "cancelled" {
+                    reply(json!({ "stopReason": "cancelled" }));
+                    continue;
+                }
+                update(&sid, json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed" }));
+                // An unsupported client method must be refused, not hang.
+                next_out_id += 1;
+                let fs_id = next_out_id;
+                send(json!({ "jsonrpc": "2.0", "id": fs_id, "method": "fs/read_text_file", "params": { "sessionId": sid, "path": "/w/a.txt" } }));
+                let r = wait_for(&mut lines, |v| v["id"] == fs_id);
+                let code = r.and_then(|r| r["error"]["code"].as_i64()).unwrap_or(0);
+                chunk(&sid, &format!("fs refused {code}"));
+                reply(json!({ "stopReason": "end_turn" }));
+            }
+            "session/cancel" => {}
+            _ if id.is_some() => send(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "nope" } })),
+            _ => {}
+        }
+    }
+}
