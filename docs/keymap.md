@@ -123,6 +123,10 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+1..4` | Live / To-do / Chat / Changes (layout B) | M3 ✅ |
 | `Cmd+5` | Browser: show the selected agent's browser (any layout; Agent Terminals too) | Browser ✅ |
 | `Cmd+Shift+C` | Browser: Inspect Element (highlight, click to attach to the prompt, or paste into an Agent Terminal; select text to attach it) | Browser ✅ |
+| `Cmd+R` / `Cmd+L` (browser) | Reload the page / address bar (its text selected) | Browser ✅ |
+| `Cmd+[` `Cmd+]` or `Cmd+Left/Right` (browser) | Back / Forward | Browser ✅ |
+| `Cmd+=` `Cmd+-` `Cmd+0` (browser) | Page zoom in / out / actual size (instead of Qur's zoom while the browser has focus) | Browser ✅ |
+| `Cmd+C/X/V/A/Z`, `Shift+Cmd+Z` (in a page) | Copy, cut, paste, select all, undo, redo in the page | Browser ✅ |
 | Changes view / Agent menu | Merge into My Branch, Keep Working, Discard Task…, Review Changes | M4 ✅ |
 | Agent menu | Run Checks Now, Run Project in Worktree (no default keys) | ✅ |
 | `Cmd+F` (in a terminal) | Find in Terminal (regex; ↩ older, ⇧↩ newer, Esc closes) | M5 ✅ |

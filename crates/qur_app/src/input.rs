@@ -162,6 +162,10 @@ impl TextInput {
         cx.emit(InputEvent::Tab)
     }
     fn select_all(&mut self, _: &edit::SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_text(cx);
+    }
+    /// Select the whole text (Cmd+L in the browser's address bar).
+    pub fn select_text(&mut self, cx: &mut Context<Self>) {
         self.select_all = !self.text.is_empty();
         cx.notify();
     }

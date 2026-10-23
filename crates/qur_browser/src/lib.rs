@@ -9,7 +9,7 @@
 mod event;
 mod url;
 
-pub use event::{BrowserEvent, Picked};
+pub use event::{BrowserEvent, EditCommand, Picked};
 pub use url::normalize_url;
 
 /// Receiving end of a [`Browser`]'s event stream.

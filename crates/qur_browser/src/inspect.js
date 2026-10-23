@@ -27,6 +27,10 @@
   addEventListener("popstate", navChanged, true);
   addEventListener("hashchange", navChanged, true);
 
+  // A click in the page gives it the keyboard; tell Qur so its shortcuts
+  // (Cmd+C, Cmd+R, Cmd+L…) act on the browser.
+  addEventListener("pointerdown", function () { post({ t: "focus" }); }, true);
+
   // ---- inspector ----
   var on = false, accent = "#ff7a45", box = null, label = null, hovered = null;
 

@@ -11,11 +11,12 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use gpui::{
-    Bounds, Context, Entity, EventEmitter, Pixels, SharedString, Subscription, Task, Window, canvas, div, prelude::*, px,
+    Bounds, Context, Entity, EventEmitter, FocusHandle, Pixels, SharedString, Subscription, Task, Window, canvas, div, prelude::*, px,
 };
-use qur_browser::{Browser, BrowserEvent, Picked};
+use qur_browser::{Browser, BrowserEvent, EditCommand, Picked};
 use qur_theme::Rgba;
 
+use crate::commands::{browser as ba, edit};
 use crate::input::{InputEvent, TextInput};
 use crate::look::Look;
 
@@ -39,6 +40,12 @@ pub enum BrowserPaneEvent {
 }
 
 pub struct BrowserPane {
+    /// Focused while you're in the page or its toolbar: the Browser keys
+    /// (Cmd+R, Cmd+L, Cmd+[…) and Cmd+C/V/A act on the page.
+    pub focus: FocusHandle,
+    /// The page was clicked (it has the keyboard): focus this pane at the
+    /// next render, which has the window.
+    want_focus: bool,
     web: Option<Browser>,
     url: Entity<TextInput>,
     title: String,
@@ -75,10 +82,13 @@ impl BrowserPane {
                         w.load(&u);
                         w.focus();
                     }
+                    window.focus(&this.focus, cx);
                 }
             }
         });
         BrowserPane {
+            focus: cx.focus_handle(),
+            want_focus: false,
             web: None,
             url,
             title: String::new(),
@@ -151,6 +161,10 @@ impl BrowserPane {
                 self.error = Some(e);
             }
             BrowserEvent::InspectEnded => self.inspecting = false,
+            BrowserEvent::Focused => {
+                self.want_focus = true;
+                cx.notify();
+            }
             BrowserEvent::Text { text, url } => {
                 let label: SharedString = format!("“{}”", truncate(&text, 40)).into();
                 let context = format!("Text the user selected on {url}:\n\n> {}\n", text.trim().replace('\n', "\n> "));
@@ -183,6 +197,13 @@ impl BrowserPane {
             w.load(url);
         }
         cx.notify();
+    }
+
+    /// Cmd+C, Cmd+V… in the page.
+    fn page_edit(&self, cmd: EditCommand) {
+        if let Some(w) = &self.web {
+            w.edit(cmd);
+        }
     }
 
     /// Take the keyboard back from the page (see `Browser::release_focus`).
@@ -394,7 +415,38 @@ impl Render for BrowserPane {
                         }),
                 )
             });
-        div().size_full().flex().flex_col().bg(look.surface(ui.editor_bg)).child(bar).child(body)
+        if std::mem::take(&mut self.want_focus) {
+            window.focus(&self.focus, cx);
+        }
+        div()
+            .key_context("Browser")
+            .track_focus(&self.focus)
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(look.surface(ui.editor_bg))
+            // The address bar handles these itself; here they go to the page.
+            .on_action(cx.listener(|t, _: &edit::Copy, _, _| t.page_edit(EditCommand::Copy)))
+            .on_action(cx.listener(|t, _: &edit::Cut, _, _| t.page_edit(EditCommand::Cut)))
+            .on_action(cx.listener(|t, _: &edit::Paste, _, _| t.page_edit(EditCommand::Paste)))
+            .on_action(cx.listener(|t, _: &edit::SelectAll, _, _| t.page_edit(EditCommand::SelectAll)))
+            .on_action(cx.listener(|t, _: &edit::Undo, _, _| t.page_edit(EditCommand::Undo)))
+            .on_action(cx.listener(|t, _: &edit::Redo, _, _| t.page_edit(EditCommand::Redo)))
+            .on_action(cx.listener(|t, _: &ba::Reload, _, _| t.reload()))
+            .on_action(cx.listener(|t, _: &ba::Back, _, _| t.web.iter().for_each(|w| w.go_back())))
+            .on_action(cx.listener(|t, _: &ba::Forward, _, _| t.web.iter().for_each(|w| w.go_forward())))
+            .on_action(cx.listener(|t, _: &ba::ZoomIn, _, _| t.web.iter().for_each(|w| w.zoom(1))))
+            .on_action(cx.listener(|t, _: &ba::ZoomOut, _, _| t.web.iter().for_each(|w| w.zoom(-1))))
+            .on_action(cx.listener(|t, _: &ba::ZoomReset, _, _| t.web.iter().for_each(|w| w.zoom(0))))
+            .on_action(cx.listener(|t, _: &ba::FocusAddress, window, cx| {
+                // Out of the page, into the address bar with its text selected.
+                t.release_focus();
+                let f = t.url.read(cx).focus.clone();
+                window.focus(&f, cx);
+                t.url.update(cx, |u, cx| u.select_text(cx));
+            }))
+            .child(bar)
+            .child(body)
     }
 }
 

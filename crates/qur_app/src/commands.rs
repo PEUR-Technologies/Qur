@@ -80,6 +80,11 @@ pub mod terminal {
     gpui::actions!(terminal, [Clear, SendLineStart, SendLineEnd, SendKillLine, SendBackTab, Find]);
 }
 
+/// The Browser view's keys (while it, or the page in it, has focus).
+pub mod browser {
+    gpui::actions!(browser, [Reload, FocusAddress, Back, Forward, ZoomIn, ZoomOut, ZoomReset]);
+}
+
 /// Single-line text fields (find, replace, go to line, pickers).
 pub mod input {
     gpui::actions!(
@@ -128,6 +133,8 @@ const E: Option<&str> = Some("Editor");
 const T: Option<&str> = Some("Terminal");
 const I: Option<&str> = Some("TextInput");
 const W: Option<&str> = None;
+/// The Browser view, but not its address bar (Cmd+Left/Right edit there).
+const B: Option<&str> = Some("Browser && !TextInput");
 /// Global, except where the terminal needs the key itself (Ctrl+G, Ctrl+Tab,
 /// chords that would shadow Cmd+K Clear).
 const NT: Option<&str> = Some("!Terminal");
@@ -302,6 +309,13 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::PeekChanges, "View", "Changes", "cmd-4", W, R),
     cmd!(qur::PeekBrowser, "View", "Browser", "cmd-5", W, R),
     cmd!(qur::ToggleInspect, "View", "Browser: Inspect Element", "cmd-shift-c", NT, R),
+    cmd!(browser::Reload, "Browser", "Reload Page", "cmd-r", B, R),
+    cmd!(browser::FocusAddress, "Browser", "Address Bar", "cmd-l", B, R),
+    cmd!(browser::Back, "Browser", "Back", "cmd-[|cmd-left", B, R),
+    cmd!(browser::Forward, "Browser", "Forward", "cmd-]|cmd-right", B, R),
+    cmd!(browser::ZoomIn, "Browser", "Zoom Page In", "cmd-=|cmd-+", B, R),
+    cmd!(browser::ZoomOut, "Browser", "Zoom Page Out", "cmd--", B, R),
+    cmd!(browser::ZoomReset, "Browser", "Actual Size", "cmd-0", B, R),
     cmd!(qur::FollowAgent, "View", "Follow Agent", "", W, R),
     // Help
     cmd!(qur::KeyboardShortcuts, "Help", "Qur Keyboard Shortcuts", "", W, R),

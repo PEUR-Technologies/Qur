@@ -15,6 +15,19 @@ pub enum BrowserEvent {
     InspectEnded,
     /// A load failed (e.g. connection refused), with a readable message.
     Error(String),
+    /// The user clicked in the page (it has the keyboard now).
+    Focused,
+}
+
+/// Edit commands sent to the page (Cmd+C and friends while it has focus).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditCommand {
+    Copy,
+    Cut,
+    Paste,
+    SelectAll,
+    Undo,
+    Redo,
 }
 
 /// An element the user picked in inspect mode.
@@ -53,6 +66,7 @@ pub(crate) fn parse_message(json: &str) -> Option<BrowserEvent> {
         "nav" => BrowserEvent::Navigated { url: s(&v, "url"), title: s(&v, "title") },
         "text" => BrowserEvent::Text { text: s(&v, "text"), url: s(&v, "url") },
         "esc" => BrowserEvent::InspectEnded,
+        "focus" => BrowserEvent::Focused,
         "pick" => {
             let mut rect = [0.0; 4];
             if let Some(a) = v.get("rect").and_then(Value::as_array) {

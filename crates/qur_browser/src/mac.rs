@@ -382,6 +382,40 @@ impl Browser {
         });
     }
 
+    /// Copy, paste… in the page. Sent down the responder chain from the web
+    /// view (to the page's focused field or selection), giving the page the
+    /// keyboard first if it hasn't got it.
+    pub fn edit(&self, cmd: crate::EditCommand) {
+        use crate::EditCommand::*;
+        let action = match cmd {
+            Copy => sel!(copy:),
+            Cut => sel!(cut:),
+            Paste => sel!(paste:),
+            SelectAll => sel!(selectAll:),
+            Undo => sel!(undo:),
+            Redo => sel!(redo:),
+        };
+        autoreleasepool(|_| unsafe {
+            let Some(window) = self.web_view.window() else { return };
+            let inside = window.firstResponder().and_then(|r| r.downcast_ref::<NSView>().map(|v| v.isDescendantOf(&self.web_view))).unwrap_or(false);
+            if !inside {
+                window.makeFirstResponder(Some(&self.web_view));
+            }
+            // nil target: the first responder (inside the page) and up.
+            let app: *mut objc2::runtime::AnyObject = msg_send![objc2::class!(NSApplication), sharedApplication];
+            let none: *mut objc2::runtime::AnyObject = std::ptr::null_mut();
+            let _: objc2::runtime::Bool = msg_send![app, sendAction: action, to: none, from: none];
+        });
+    }
+
+    /// Page zoom: `delta` steps of 10 % (0 resets to 100 %).
+    pub fn zoom(&self, delta: i32) {
+        autoreleasepool(|_| unsafe {
+            let z = if delta == 0 { 1.0 } else { (self.web_view.pageZoom() + 0.1 * delta as f64).clamp(0.3, 3.0) };
+            self.web_view.setPageZoom(z);
+        });
+    }
+
     /// Make the web view first responder (keyboard into the page).
     pub fn focus(&self) {
         autoreleasepool(|_| {
