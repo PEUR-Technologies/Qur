@@ -6,7 +6,7 @@ Qur is a lightweight, native macOS code editor for running and steering AI codin
 
 It's written in Rust on [GPUI](https://github.com/zed-industries/zed) (Zed's UI framework): no Electron, everything local, and agents use your existing Claude Code login (never an API key).
 
-> **Status: early development (pre-release), macOS only.** M0–M4 (agents in worktrees, Live + heatmap, Changes + Merge + Git panel) and Browser + Inspect are done. See [HANDOFF.md](HANDOFF.md) for the current state.
+> **Status: early development (pre-release), macOS only.** M0–M5 (agents in worktrees, Live + heatmap, Changes + Merge + Git panel, terminal agents) and Browser + Inspect are done. See [HANDOFF.md](HANDOFF.md) for the current state.
 
 ![Live heatmap: files glow as the agent writes them; Live follows the file](docs/images/heatmap-live.png)
 
@@ -63,7 +63,9 @@ One window is one project. There's no permanent editor area: the window is for a
 ### Agents
 
 - **Isolated worktrees.** Each task gets a git worktree outside your repo, on branch `qur/<agent>/<task>`, so your checkout stays untouched. Run several agents at once.
-- **Agent Terminals** (`Cmd+Shift+T`): the interactive `claude` CLI in its own worktree, with the sidebar button, heatmap, review and merge like any other task.
+- **Agent Terminals** (`Cmd+Shift+T`): the interactive `claude` CLI in its own worktree, with the sidebar button, heatmap, review and merge like any other task. Any other CLI agent works too: add it to `agents.toml` with `mode = "terminal"`.
+- **Agents name their own work.** A button shows what the agent says it's doing (Claude Code's terminal title), unless you rename it (Agent > Rename Agent…, or double-click).
+- **Terminal comforts:** Find (`Cmd+F`, regex, through the scrollback) and `Cmd`-click to open URLs and `file:line` paths.
 - **Structured sessions** over the [Agent Client Protocol](https://agentclientprotocol.com):
   - Streaming tool calls, the agent's to-do plan, and a permission bar (Allow once / Allow for this task / Deny).
   - Stop at any time. Messages sent mid-turn are queued; `@` mentions a file and `/` runs agent commands.

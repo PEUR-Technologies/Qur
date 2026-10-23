@@ -2,7 +2,7 @@
 
 Read this first when picking the project up (person or Claude session). It says where things stand, what was decided, and what to do next. Keep it current: update the **Status** and **Next** sections at the end of every work session.
 
-Last updated: 2026-10-23 (M4 done)
+Last updated: 2026-10-23 (M5 done)
 
 ## What Qur is
 
@@ -37,6 +37,8 @@ Summary of the owner decisions so far:
 **M0–M3 and Browser + Inspect are done** and on `main`. Commits: "M0: spikes", "M1: editor shell", "M2: agents in worktrees", "M3: Live view + heatmap", "Browser + Inspect", "Add README". The repo lives at https://github.com/PEUR-Technologies/Qur (private).
 
 **M4 (Changes + Merge + Git panel) is done** and merged into `main` (2026-10-23). All 144 workspace tests pass (qur_git: 16 passed, 1 timing test ignored). Merge, conflicts (Finish and Abort), Discard, and the Git panel's Stage All / Unstage All were verified end to end with scripted runs; see `docs/budget.md` (M4). Still to check by hand: per-file stage/unstage, the file diff and a typed commit in the Git panel.
+
+**M5 (terminal agents) is done** (decision 30, `docs/budget.md` M5): terminal-mode agents from `agents.toml` get their task text and setup, Agent Terminals have "busy then quiet" turns, agents name their own tasks (terminal title) unless you rename them, plus Find in Terminal and Cmd-click links. Still to check by hand: typing in Find, Cmd-click, the rename box.
 
 **After M4 (decision 29, ideas from OpenADE and PandaCode, `docs/research/openade-pandacode.md`):** turn-end checks (`[checks]`, Run Checks Now) and Run Project in Worktree (`[run]`, localhost only), both verified with scripted runs. Binary 24.4 MB; no crates added. 146 tests pass.
 

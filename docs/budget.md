@@ -104,3 +104,17 @@ M4 acceptance, scripted on scratch repos (`QUR_DEBUG_ACTIONS` + `QUR_DEBUG_PROMP
 - **Git panel:** Stage All and Unstage All from the palette update the index; Commit with an empty message focuses the message field. Per-file stage/unstage, the file diff and a typed commit still need a check by hand (synthetic typing would go to whatever app is in front).
 - **Harness finding:** macOS stops drawing a covered window, so a view focused since the last frame (the code modal) isn't in GPUI's dispatch tree, and a scripted action dispatched to it went nowhere (2 of 4 conflict runs before the fix). The `QUR_DEBUG_ACTIONS` driver now falls back to the workspace's own node in that case. A window you're looking at keeps drawing, so users aren't affected.
 
+## M5 (2026-10-23, terminal agents, MacBook Air M5)
+
+| Metric | Target | M5 | |
+|---|---|---|---|
+| Terminal agent's write → glow on screen (`QUR_BENCH=glow`, 20 writes, Qur not focused) | < 100 ms | p50 80 ms, max 84 ms, 0 missed (2 runs) | ✅ |
+| Footprint, 3 Agent Terminals on a big-repo clone (Qur's process; the CLIs are separate) | < 150 MB | 101–133 MB (RSS 115–118 MB), 3 runs | ✅ |
+| Release binary | < 40 MB | 24.4 MB | ✅ |
+
+M5 acceptance, scripted on scratch repos with a fake CLI agent (a bash script; no model, no network):
+- **A non-ACP CLI agent runs in its worktree and its edits light up the tree:** the `agents.toml` agent `mode = "terminal"` received the New Agent Task text (typed in once it went quiet, and with `prompt = "--message"`), wrote its file in its own worktree, and the glow bench above measures the heatmap path for terminal tasks. Quit leaves no agent process.
+- **Setup:** `[worktree] setup` runs first in the agent's terminal; the agent starts only if it succeeds.
+- **Turns:** with `[checks] terminal = true`, a check ran exactly once after the agent's edit (startup and setup don't count; 2 of 2 runs).
+- **Names:** a title set by the agent (OSC 0) became the task name and was saved; generic titles ("Claude Code", shells, paths) are ignored. The real Claude CLI with a one-line prompt named its task too.
+- Find in Terminal and Cmd-click links are covered by unit tests against a real `Term`; typing into the find field and clicking need a check by hand.
