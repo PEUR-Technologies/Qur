@@ -95,8 +95,15 @@ pub struct EditorView {
     content_w: Pixels,
     find: Option<FindBar>,
     dragging: bool,
-    /// Last time the user scrolled or clicked (Live follow in M3 respects it).
+    /// Last time the user scrolled or clicked (Live follow respects it).
     pub last_user_input: Option<Instant>,
+    /// Live view: edits are ignored while the agent is editing this file.
+    pub read_only: bool,
+    /// Lines the agent changed last (Live view), painted in its accent.
+    pub agent_mark: Option<(Range<usize>, qur_theme::Rgba)>,
+    /// The file changed on disk while this buffer had unsaved edits: ask
+    /// before reloading (never overwrite what the user hasn't seen).
+    pub disk_changed: bool,
     bench: Bench,
 }
 
@@ -145,6 +152,9 @@ impl EditorView {
             find: None,
             dragging: false,
             last_user_input: None,
+            read_only: false,
+            agent_mark: None,
+            disk_changed: false,
             bench,
         };
         if view.syntax.is_none() {
@@ -205,6 +215,45 @@ impl EditorView {
         self.model.primary().head
     }
 
+    /// The file changed on disk (watcher). Clean buffers reload and return the
+    /// changed line range; dirty ones get the "changed on disk" banner.
+    pub fn disk_change(&mut self, cx: &mut Context<Self>) -> Option<Range<usize>> {
+        if self.model.is_dirty() {
+            self.disk_changed = true;
+            cx.notify();
+            return None;
+        }
+        let path = self.path()?.to_path_buf();
+        let new = std::fs::read_to_string(&path).ok()?;
+        let old = self.model.rope().to_string();
+        if new.replace("\r\n", "\n") == old {
+            return None;
+        }
+        let range = changed_lines(&old, &new);
+        let scroll = self.scroll_y;
+        self.reload_from_disk(cx);
+        self.scroll_y = scroll;
+        Some(range)
+    }
+
+    /// Scroll so `lines` are visible, centred when they're off screen.
+    pub fn reveal_lines(&mut self, lines: Range<usize>, cx: &mut Context<Self>) {
+        let rope = self.model.rope().clone();
+        let (top, _) = self.model.wrap().point_to_row(&rope, Point { line: lines.start, col: 0 });
+        let (bottom, _) = self.model.wrap().point_to_row(&rope, Point { line: lines.end.max(lines.start), col: 0 });
+        let h = self.viewport_h();
+        let y0 = self.line_h * top as f32;
+        let y1 = self.line_h * (bottom + 1) as f32;
+        if y0 < self.scroll_y || y1 > self.scroll_y + h {
+            self.scroll_y = (y0 - (h - (y1 - y0)).max(px(0.)) / 2.).clamp(px(0.), self.max_scroll_y());
+        }
+        cx.notify();
+    }
+
+    pub fn user_active_within(&self, d: Duration) -> bool {
+        self.last_user_input.is_some_and(|t| t.elapsed() < d)
+    }
+
     pub fn reload_from_disk(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.path().map(Path::to_path_buf) else { return };
         let indent = self.language.map(|l| l.indent_unit()).unwrap_or("    ");
@@ -218,6 +267,7 @@ impl EditorView {
                 self.parse_in_background(cx);
                 self.hl_cache = None;
                 self.wrap_cols = None;
+                self.disk_changed = false;
                 cx.emit(EditorEvent::Changed);
                 cx.notify();
             }
@@ -228,6 +278,9 @@ impl EditorView {
     // -- running commands ---------------------------------------------------
 
     fn run(&mut self, cmd: Command, cx: &mut Context<Self>) {
+        if self.read_only && mutates(&cmd) {
+            return;
+        }
         let clip = matches!(cmd, Command::Paste).then(|| cx.read_from_clipboard().and_then(|c| c.text())).flatten();
         let lang = self.language;
         let page_rows = self.bounds.map(|b| (b.size.height / self.line_h).floor() as usize).unwrap_or(30).max(1);
@@ -261,7 +314,9 @@ impl EditorView {
             }
             cx.notify();
         }
-        if was_dirty != self.model.is_dirty() || out.selections_changed {
+        // The workspace only shows the dirty dot; cursor moves stay local, so
+        // typing doesn't repaint the sidebar and the heatmap tree.
+        if was_dirty != self.model.is_dirty() {
             cx.emit(EditorEvent::Changed);
         }
     }
@@ -1044,6 +1099,14 @@ impl Element for EditorElement {
         let matches = if v.find.is_some() { v.model.find_matches_in_lines(first_line..last_line + 1) } else { Vec::new() };
         for row in &pre.rows {
             let row_rect = |x0: Pixels, x1: Pixels| Bounds::from_corners(point(x0, row.y), point(x1, row.y + lh));
+            if let Some((r, accent)) = &v.agent_mark
+                && r.contains(&row.line)
+            {
+                let mut tint = look.c(*accent);
+                tint.a = 0.16;
+                under.push(fill(Bounds::new(point(bounds.left(), row.y), size(bounds.size.width, lh)), tint));
+                under.push(fill(Bounds::new(point(bounds.left(), row.y), size(px(3.), lh)), look.c(*accent)));
+            }
             if primary.is_empty() && sels.len() == 1 && row.line == primary.head.line {
                 under.push(fill(Bounds::new(point(bounds.left(), row.y), size(bounds.size.width, lh)), look.c(ed.current_line)));
             }
@@ -1107,6 +1170,30 @@ impl Element for EditorElement {
         let handle = window.window_handle();
         cx.defer(move |cx| view.update(cx, |v, cx| v.after_paint(handle, cx)));
     }
+}
+
+/// Commands that change the text (ignored in a read-only Live view).
+fn mutates(cmd: &Command) -> bool {
+    !matches!(
+        cmd,
+        Command::Left { .. } | Command::Right { .. } | Command::Up { .. } | Command::Down { .. }
+            | Command::WordLeft { .. } | Command::WordRight { .. } | Command::LineStart { .. }
+            | Command::LineEnd { .. } | Command::DocStart { .. } | Command::DocEnd { .. }
+            | Command::PageUp { .. } | Command::PageDown { .. } | Command::GoToLine(_)
+            | Command::SelectAll | Command::SelectLine | Command::SingleCursor | Command::AddNextMatch
+            | Command::SelectAllMatches | Command::AddCursorAbove | Command::AddCursorBelow
+            | Command::JumpToMatchingBracket | Command::Copy
+    )
+}
+
+/// The line range (in the new text) that differs from the old text.
+fn changed_lines(old: &str, new: &str) -> Range<usize> {
+    let a: Vec<&str> = old.lines().collect();
+    let b: Vec<&str> = new.lines().collect();
+    let top = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let bottom = a.iter().rev().zip(b.iter().rev()).take_while(|(x, y)| x == y).count();
+    let end = b.len().saturating_sub(bottom).max(top + 1).min(b.len().max(1));
+    top.min(end.saturating_sub(1))..end
 }
 
 /// Display width in cells (CJK and emoji are 2 wide).
@@ -1200,6 +1287,41 @@ impl Render for EditorView {
                         .child(div().flex_none().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child("↩ one · ⌘↩ all"))
                 }))
         });
+        let banner = self.disk_changed.then(|| {
+            let button = |label: &'static str, id: &'static str, reload: bool| {
+                div()
+                    .id(id)
+                    .px(look.z(8.))
+                    .py(look.z(1.))
+                    .rounded(look.z(4.))
+                    .cursor_pointer()
+                    .bg(look.c(if reload { ui.button_primary_bg } else { ui.button_bg }))
+                    .text_color(look.c(if reload { ui.button_primary_text } else { ui.button_text }))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if reload {
+                            this.reload_from_disk(cx);
+                        } else {
+                            this.disk_changed = false;
+                            cx.notify();
+                        }
+                    }))
+            };
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(look.z(8.))
+                .px(look.z(10.))
+                .py(look.z(5.))
+                .bg(look.c(ui.permission_bar_bg))
+                .border_b_1()
+                .border_color(look.c(ui.border))
+                .text_size(look.text(-1.))
+                .child(div().flex_1().child("This file changed on disk while you had unsaved edits."))
+                .child(button("Reload", "disk-reload", true))
+                .child(button("Keep mine", "disk-keep", false))
+        });
         div()
             .key_context("Editor")
             .track_focus(&self.focus)
@@ -1267,6 +1389,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::a_case))
             .on_action(cx.listener(Self::a_word))
             .on_action(cx.listener(Self::a_regex))
+            .children(banner)
             .children(find_bar)
             .child(
                 div()
@@ -1307,5 +1430,15 @@ impl Buffers {
     }
 }
 
-#[allow(dead_code)]
-const _UNUSED: Duration = Duration::from_millis(0);
+#[cfg(test)]
+mod tests {
+    use super::changed_lines;
+
+    #[test]
+    fn changed_line_ranges() {
+        assert_eq!(changed_lines("a\nb\nc\n", "a\nB\nc\n"), 1..2);
+        assert_eq!(changed_lines("a\nc\n", "a\nb1\nb2\nc\n"), 1..3);
+        assert_eq!(changed_lines("a\nb\n", "a\n"), 0..1);
+        assert_eq!(changed_lines("", "x\n"), 0..1);
+    }
+}

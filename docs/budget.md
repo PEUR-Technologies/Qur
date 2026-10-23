@@ -52,3 +52,22 @@ M2 acceptance:
 - **Quit leaves no orphans:** after Quit, `ps` shows no `claude-agent-acp` process.
 - **Permission flow:** "Create hi.txt" → permission bar → Allow once → file written.
 - **Resume:** relaunch → select the task → `session/load` replays the history without a new prompt.
+
+## M3 (2026-10-23, Live + heatmap, MacBook Air M5, AC power)
+
+| Metric | Target | M3 | |
+|---|---|---|---|
+| Agent edit → glow on screen (`QUR_BENCH=glow`, 20 writes; Qur visible, **not focused**) | < 100 ms | p50 81 ms, max 84 ms, 0 missed | ✅ |
+| Live follows the agent across files | yes | followed all 20 probe files | ✅ |
+| Release binary | < 40 MB | 23.6 MB incl. grammars (watcher +0.1 MB) | ✅ |
+| Idle footprint, project + small file | < 80 MB | 71 MB | ✅ |
+| Cold start to first frame | < 250 ms | 108–159 ms | ✅ |
+| Open 10k-line file, fully highlighted | < 100 ms | 86 ms (after moving the root watcher start past the first frame) | ✅ |
+| Keystroke (CPU side) p50 / p99 / max | ≤ 8.3 ms | 1.6 / 3.5 / 8.5 ms | ✅ p99 |
+
+Notes:
+- **Typing is slower than in M2's table (0.45 ms p50), but it's the machine, not M3.** Rebuilding the M2 commit and running both builds back to back gave the same numbers: M2 1.6–1.7 ms p50 and 8–11 ms max; M3 1.6 ms p50 and 8.3–8.5 ms max. An occasional worst-case keystroke goes slightly over 8.3 ms in both builds.
+- **macOS stops drawing a window that is fully covered.** GPUI stops the display link when the window is occluded. The model keeps updating, and the window shows the current state as soon as any part of it is visible. Unattended test runs therefore float the window (`QUR_BENCH`).
+- Bugs found and fixed:
+  - A tree rebuild on every heat update when the agent's focus file didn't exist yet.
+  - A 5 ms repaint timer while a recompute was overdue. Heat timers now repaint at most every 33 ms, and an edit tool's completion schedules its recompute.

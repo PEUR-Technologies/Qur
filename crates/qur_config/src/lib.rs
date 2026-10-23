@@ -38,6 +38,9 @@ pub fn config_path() -> PathBuf {
 pub struct Config {
     /// Theme name, or "Auto" (follow macOS: Qur Light / Qur Dark).
     pub theme: String,
+    /// Agent stage layout: "A" watch + side notes, "B" one view at a time,
+    /// "C" watch + drawer (decision 25).
+    pub peek_layout: String,
     pub window: WindowConfig,
     pub editor: EditorConfig,
     pub ui: UiConfig,
@@ -89,6 +92,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             theme: THEME_AUTO.into(),
+            peek_layout: "A".into(),
             window: WindowConfig::default(),
             editor: EditorConfig::default(),
             ui: UiConfig::default(),
@@ -148,6 +152,9 @@ impl Config {
         self.window.opacity = self.window.opacity.clamp(0.0, 1.0);
         if self.theme.trim().is_empty() {
             self.theme = THEME_AUTO.into();
+        }
+        if !matches!(self.peek_layout.as_str(), "A" | "B" | "C") {
+            self.peek_layout = "A".into();
         }
         self
     }

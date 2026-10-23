@@ -248,3 +248,59 @@ mod tests {
         assert!(which("definitely-not-a-command-qur").is_none());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Claude CLI folder trust (decision 24)
+// ---------------------------------------------------------------------------
+
+/// Mark `folder` trusted for the Claude CLI so a terminal-mode Claude task
+/// doesn't stop at "Do you trust the files in this folder?". Only sets
+/// `projects["<folder>"].hasTrustDialogAccepted = true` in `~/.claude.json`;
+/// everything else (and key order) is preserved; written atomically. A
+/// missing or unreadable file is left alone (the CLI will just ask).
+pub fn trust_folder_for_claude(folder: &Path) -> Result<(), String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or("no HOME")?;
+    trust_folder_in(&home.join(".claude.json"), folder)
+}
+
+fn trust_folder_in(config: &Path, folder: &Path) -> Result<(), String> {
+    use serde_json::{Map, Value};
+    let text = std::fs::read_to_string(config).map_err(|e| format!("{}: {e}", config.display()))?;
+    let mut root: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", config.display()))?;
+    let obj = root.as_object_mut().ok_or("~/.claude.json is not an object")?;
+    let projects = obj.entry("projects").or_insert_with(|| Value::Object(Map::new()));
+    let projects = projects.as_object_mut().ok_or("projects is not an object")?;
+    let key = folder.to_string_lossy().into_owned();
+    let entry = projects.entry(key).or_insert_with(|| Value::Object(Map::new()));
+    let entry = entry.as_object_mut().ok_or("project entry is not an object")?;
+    if entry.get("hasTrustDialogAccepted") == Some(&Value::Bool(true)) {
+        return Ok(());
+    }
+    entry.insert("hasTrustDialogAccepted".into(), Value::Bool(true));
+    let out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    let tmp = config.with_extension(format!("json.qur-{}", std::process::id()));
+    std::fs::write(&tmp, out).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, config).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod trust_tests {
+    use super::*;
+
+    #[test]
+    fn sets_only_the_trust_key() {
+        let d = std::env::temp_dir().join(format!("qur-trust-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("claude.json");
+        std::fs::write(&p, r#"{"zeta":1,"projects":{"/a":{"allowedTools":[],"hasTrustDialogAccepted":false}},"alpha":2}"#).unwrap();
+        trust_folder_in(&p, Path::new("/a")).unwrap();
+        trust_folder_in(&p, Path::new("/b")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(v["projects"]["/a"]["hasTrustDialogAccepted"], true);
+        assert_eq!(v["projects"]["/a"]["allowedTools"], serde_json::json!([]));
+        assert_eq!(v["projects"]["/b"]["hasTrustDialogAccepted"], true);
+        let keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, ["zeta", "projects", "alpha"], "key order preserved");
+        assert!(trust_folder_in(&d.join("missing.json"), Path::new("/c")).is_err());
+    }
+}

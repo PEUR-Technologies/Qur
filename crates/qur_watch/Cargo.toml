@@ -1,0 +1,15 @@
+[package]
+name = "qur_watch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+futures.workspace = true
+ignore.workspace = true
+# FSEvents backend only: no crossbeam/flume/serde, no kqueue.
+notify = { version = "8.2.0", default-features = false, features = ["macos_fsevent"] }
+
+[dev-dependencies]
+futures.workspace = true

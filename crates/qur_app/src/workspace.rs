@@ -20,7 +20,9 @@ use qur_config::{Config, ProjectSettings, Value};
 use qur_editor::Point;
 use qur_theme::{Registry, Rgba, ThemeChoice};
 
-use crate::agent_view::{AgentEvent, AgentTask, Status};
+use crate::agent_view::{AgentEvent, AgentTask, Layout, Status, View};
+use crate::live::{LiveEvent, LivePane};
+use crate::monitor::{MonitorEvent, TaskMonitor};
 use crate::assets::{self, icon};
 use crate::commands::{self, MenuState, agent as aa, edit, editor as ea, qur};
 use crate::editor_view::{Buffers, EditorEvent, EditorView};
@@ -40,10 +42,15 @@ const SIDEBAR_MIN_W: f32 = 200.0;
 const SIDEBAR_MAX_W: f32 = 560.0;
 
 /// A terminal-mode agent task (New Agent Terminal, `mode = "terminal"`).
+/// Heat and Live come from the file watcher only (no ACP).
 struct TermTask {
     record: TaskRecord,
     term_id: Option<usize>,
     accent: Rgba,
+    monitor: Entity<TaskMonitor>,
+    live: Entity<LivePane>,
+    /// Layout B: show Live instead of the terminal.
+    show_live: bool,
 }
 
 /// What the stage shows.
@@ -110,6 +117,8 @@ pub struct Workspace {
     message: Option<(SharedString, Instant)>,
     message_timer: Option<Task<()>>,
     file_lists: HashMap<PathBuf, Vec<PathBuf>>,
+    layout: Layout,
+    _root_watcher: Option<qur_watch::Watcher>,
     slider: Rc<Cell<Bounds<Pixels>>>,
     sliding: bool,
     title_drag: bool,
@@ -182,12 +191,15 @@ impl Workspace {
             message: None,
             message_timer: None,
             file_lists: HashMap::new(),
+            layout: Layout::A,
+            _root_watcher: None,
             slider: Rc::new(Cell::new(Bounds::default())),
             sliding: false,
             title_drag: false,
             first_frame: false,
             _subs: subs,
         };
+        ws.layout = Layout::parse(&ws.config.peek_layout);
         ws.tree_for(&root, window, cx);
         crate::mark("tree_loaded");
         ws.apply_look(window, cx);
@@ -237,12 +249,15 @@ impl Workspace {
         for a in &self.agents {
             let def = a.read(cx).def.clone();
             let accent = accent_for(&def, &theme.accents[slot % n]);
-            a.update(cx, |a, _| a.accent = accent);
+            a.update(cx, |a, cx| a.set_accent(accent, cx));
             slot += 1;
         }
         for t in &mut self.term_tasks {
             let def = self.roster.get(&t.record.agent).cloned();
             t.accent = def.map(|d| accent_for(&d, &theme.accents[slot % n])).unwrap_or(theme.accents[slot % n].base);
+            let accent = t.accent;
+            t.monitor.update(cx, |m, _| m.accent = accent);
+            t.live.update(cx, |l, _| l.accent = accent);
             slot += 1;
         }
         window.refresh();
@@ -310,6 +325,8 @@ impl Workspace {
 
     pub fn menu_state(&self, cx: &App) -> MenuState {
         MenuState {
+            layout: self.layout.as_str(),
+            follow: self.selected_live(cx).map(|l| l.read(cx).follow).unwrap_or(true),
             sidebar: self.sidebar,
             soft_wrap: self.code.as_ref().map(|e| e.read(cx).soft_wrap()).unwrap_or(self.config.editor.soft_wrap),
             recent: qur_config::State::load().recent_projects,
@@ -331,8 +348,30 @@ impl Workspace {
             TreeEvent::Open(p) => this.open_path(p, window, cx),
         });
         self._subs.push(sub);
+        // A task worktree's tree is that task's heatmap.
+        let monitor = self
+            .agents
+            .iter()
+            .map(|a| a.read(cx).monitor.clone())
+            .chain(self.term_tasks.iter().map(|t| t.monitor.clone()))
+            .find(|m| m.read(cx).worktree == root);
+        if let Some(m) = monitor {
+            t.update(cx, |t, cx| t.set_monitor(m, cx));
+        }
         self.trees.insert(root.to_path_buf(), t.clone());
+        self.refresh_overlaps(cx);
         t
+    }
+
+    /// The main checkout's tree shows dots for files any task changed.
+    fn refresh_overlaps(&self, cx: &mut Context<Self>) {
+        let monitors: Vec<_> = self.agents.iter().map(|a| a.read(cx).monitor.clone()).chain(self.term_tasks.iter().map(|t| t.monitor.clone())).collect();
+        if let Some(t) = self.trees.get(&self.root) {
+            t.update(cx, |t, cx| {
+                t.overlaps = monitors;
+                cx.notify();
+            });
+        }
     }
 
     /// The folder the Files tree, Quick Open and mentions work in.
@@ -419,10 +458,86 @@ impl Workspace {
                     let def = self.roster.get(&r.agent).cloned().unwrap_or_else(|| Roster::defaults().agents[0].clone());
                     self.add_agent(r, def, window, cx);
                 }
-                Mode::Terminal => self.term_tasks.push(TermTask { record: r, term_id: None, accent: Rgba(0x888888ff) }),
+                Mode::Terminal => self.add_term_task(r, window, cx),
             }
         }
         self.apply_look(window, cx);
+    }
+
+    fn add_term_task(&mut self, record: TaskRecord, window: &mut Window, cx: &mut Context<Self>) {
+        let accent = Look::of(window, cx).theme.accents[0].base;
+        let monitor = cx.new(|cx| {
+            let mut m = TaskMonitor::new(record.worktree.clone(), record.base.clone(), accent, cx);
+            // No turns in a terminal: every write counts as the agent's edit.
+            m.set_turn_active(true);
+            m
+        });
+        self.watch_monitor(&monitor, window, cx);
+        let (wrap, tab) = (self.config.editor.soft_wrap, self.config.editor.tab_width);
+        let live = cx.new(|cx| LivePane::new(monitor.clone(), "the agent".into(), wrap, tab, window, cx));
+        let sub = cx.subscribe_in(&live, window, |this, _, ev: &LiveEvent, window, cx| {
+            if let LiveEvent::Open(p) = ev {
+                let p = p.clone();
+                this.open_path(&p, window, cx);
+            }
+        });
+        self._subs.push(sub);
+        self.term_tasks.push(TermTask { record, term_id: None, accent, monitor, live, show_live: false });
+        self.refresh_overlaps(cx);
+    }
+
+    /// A task's watcher saw files change: refresh its tree and open copies.
+    fn watch_monitor(&mut self, monitor: &Entity<TaskMonitor>, window: &mut Window, cx: &mut Context<Self>) {
+        let sub = cx.subscribe_in(monitor, window, |this, m, ev: &MonitorEvent, window, cx| match ev {
+            MonitorEvent::Files(paths) => {
+                let root = m.read(cx).worktree.clone();
+                let paths = paths.clone();
+                this.files_changed(&root, &paths, window, cx);
+            }
+            MonitorEvent::Changed => cx.notify(),
+        });
+        self._subs.push(sub);
+    }
+
+    /// Watch the main checkout (FSEvents): tree structure and open buffers.
+    fn watch_root(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Ok((w, mut changes)) = qur_watch::Watcher::new(&self.root, Duration::from_millis(50)) else { return };
+        self._root_watcher = Some(w);
+        let root = self.root.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            use futures::StreamExt;
+            while let Some(batch) = changes.next().await {
+                if this.update_in(cx, |this, window, cx| this.files_changed(&root, &batch, window, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn files_changed(&mut self, root: &Path, paths: &[PathBuf], _window: &mut Window, cx: &mut Context<Self>) {
+        // New or removed files change the tree's shape; plain writes don't.
+        if let Some(tree) = self.trees.get(root).cloned() {
+            let structural = paths.iter().any(|p| {
+                let rel = p.strip_prefix(root).unwrap_or(p);
+                let known = tree.read(cx).tree.find(rel).is_some();
+                known != p.exists()
+            });
+            if structural {
+                tree.update(cx, |t, cx| t.refresh(cx));
+            }
+        }
+        self.file_lists.remove(root);
+        // Open copies: clean ones reload, dirty ones get the banner.
+        for b in self.buffers.list.clone() {
+            let hit = b.read(cx).path().is_some_and(|bp| paths.iter().any(|p| p == bp));
+            if hit {
+                b.update(cx, |b, cx| {
+                    b.disk_change(cx);
+                });
+            }
+        }
+        cx.notify();
     }
 
     fn save_tasks(&self, cx: &App) {
@@ -439,8 +554,11 @@ impl Workspace {
     fn add_agent(&mut self, record: TaskRecord, def: AgentDef, window: &mut Window, cx: &mut Context<Self>) -> Entity<AgentTask> {
         let id = record.id.clone();
         let accent = Look::of(window, cx).theme.accents[0].base;
-        let a = cx.new(|cx| AgentTask::new(record, def, accent, window, cx));
+        let (layout, wrap, tab) = (self.layout, self.config.editor.soft_wrap, self.config.editor.tab_width);
+        let a = cx.new(|cx| AgentTask::new(record, def, accent, layout, wrap, tab, window, cx));
         AGENT_IDS.with(|m| m.borrow_mut().insert(a.entity_id(), id));
+        let monitor = a.read(cx).monitor.clone();
+        self.watch_monitor(&monitor, window, cx);
         let sub = cx.subscribe_in(&a, window, |this, a, ev: &AgentEvent, window, cx| match ev {
             AgentEvent::Changed => {
                 let (id, status) = {
@@ -480,6 +598,7 @@ impl Workspace {
         });
         self._subs.push(sub);
         self.agents.push(a.clone());
+        self.refresh_overlaps(cx);
         a
     }
 
@@ -492,6 +611,7 @@ impl Workspace {
         let dir = qur_agents::worktrees_dir(&self.project_id);
         let bg = cx.background_executor().clone();
         let agent_id = def.id.clone();
+        let terminal_mode = def.mode == Mode::Terminal;
         let setup = self.project.worktree.setup.clone().filter(|s| !s.trim().is_empty());
         self.flash(format!("Creating worktree for “{title}”…"), cx);
         cx.spawn_in(window, async move |this, cx| {
@@ -500,6 +620,9 @@ impl Workspace {
                     let c = qur_worktree::create(&root, &dir, &agent_id, &slug)?;
                     // .worktreeinclude (decision 22): .env, node_modules, … via APFS clones.
                     let copied = qur_worktree::copy_includes(&root, &c.path).unwrap_or_default();
+                    if terminal_mode {
+                        let _ = qur_agents::trust_folder_for_claude(&c.path);
+                    }
                     Ok::<_, String>((c, copied))
                 })
                 .await;
@@ -563,7 +686,7 @@ impl Workspace {
                             this.select(Some(Selected::Agent(c.slug)), window, cx);
                         }
                         Mode::Terminal => {
-                            this.term_tasks.push(TermTask { record, term_id: None, accent: Rgba(0x888888ff) });
+                            this.add_term_task(record, window, cx);
                             this.apply_look(window, cx);
                             this.save_tasks(cx);
                             this.select(Some(Selected::TermTask(c.slug)), window, cx);
@@ -586,7 +709,15 @@ impl Workspace {
         let dir = qur_agents::worktrees_dir(&self.project_id);
         let bg = cx.background_executor().clone();
         cx.spawn_in(window, async move |this, cx| {
-            let created = bg.spawn(async move { qur_worktree::create(&root, &dir, "claude", &slug) }).await;
+            let created = bg
+                .spawn(async move {
+                    let c = qur_worktree::create(&root, &dir, "claude", &slug)?;
+                    let _ = qur_worktree::copy_includes(&root, &c.path);
+                    // Decision 24: skip Claude's "trust this folder?" prompt for the worktree.
+                    let _ = qur_agents::trust_folder_for_claude(&c.path);
+                    Ok::<_, String>(c)
+                })
+                .await;
             this.update_in(cx, |this, window, cx| match created {
                 Ok(c) => {
                     let record = TaskRecord {
@@ -600,7 +731,7 @@ impl Workspace {
                         created: qur_agents::now_secs(),
                         mode: Mode::Terminal,
                     };
-                    this.term_tasks.push(TermTask { record, term_id: None, accent: Rgba(0x888888ff) });
+                    this.add_term_task(record, window, cx);
                     this.apply_look(window, cx);
                     this.save_tasks(cx);
                     this.select(Some(Selected::TermTask(c.slug)), window, cx);
@@ -730,6 +861,89 @@ impl Workspace {
                 let f = a.read(cx).prompt.read(cx).focus.clone();
                 window.focus(&f, cx);
             }
+        }
+    }
+
+    fn set_layout(&mut self, l: Layout, cx: &mut Context<Self>) {
+        self.layout = l;
+        for a in &self.agents {
+            a.update(cx, |a, cx| a.set_layout(l, cx));
+        }
+        self.config.peek_layout = l.as_str().into();
+        self.write_setting(false, "peek_layout", Some(l.as_str().into()), cx);
+        let name = match l {
+            Layout::A => "A · watch + side notes",
+            Layout::B => "B · one view at a time",
+            Layout::C => "C · watch + drawer",
+        };
+        self.flash(format!("Peek layout {name}"), cx);
+        self.sync_menus(cx);
+        cx.notify();
+    }
+    fn cycle_layout(&mut self, _: &qur::CyclePeekLayout, _: &mut Window, cx: &mut Context<Self>) {
+        let l = self.layout.next();
+        self.set_layout(l, cx)
+    }
+    fn layout_a(&mut self, _: &qur::PeekLayoutA, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_layout(Layout::A, cx)
+    }
+    fn layout_b(&mut self, _: &qur::PeekLayoutB, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_layout(Layout::B, cx)
+    }
+    fn layout_c(&mut self, _: &qur::PeekLayoutC, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_layout(Layout::C, cx)
+    }
+    /// Cmd+1..4 (layout B): switches the selected agent's view; Live/terminal for terminal tasks.
+    fn peek(&mut self, v: View, cx: &mut Context<Self>) {
+        if self.layout != Layout::B {
+            self.set_layout(Layout::B, cx);
+        }
+        match self.selected.clone() {
+            Some(Selected::Agent(id)) => {
+                if let Some(a) = self.agent(&id).cloned() {
+                    a.update(cx, |a, cx| a.set_view(v, cx));
+                }
+            }
+            Some(Selected::TermTask(id)) => {
+                if let Some(t) = self.term_tasks.iter_mut().find(|t| t.record.id == id) {
+                    t.show_live = v == View::Live;
+                }
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+    fn peek_live(&mut self, _: &qur::PeekLive, _: &mut Window, cx: &mut Context<Self>) {
+        self.peek(View::Live, cx)
+    }
+    fn peek_todo(&mut self, _: &qur::PeekTodo, _: &mut Window, cx: &mut Context<Self>) {
+        self.peek(View::Todo, cx)
+    }
+    fn peek_chat(&mut self, _: &qur::PeekChat, _: &mut Window, cx: &mut Context<Self>) {
+        self.peek(View::Chat, cx)
+    }
+    fn peek_changes(&mut self, _: &qur::PeekChanges, _: &mut Window, cx: &mut Context<Self>) {
+        self.peek(View::Changes, cx)
+    }
+    fn selected_live(&self, cx: &App) -> Option<Entity<LivePane>> {
+        match &self.selected {
+            Some(Selected::Agent(id)) => self.agent(id).map(|a| a.read(cx).live.clone()),
+            Some(Selected::TermTask(id)) => self.term_task(id).map(|t| t.live.clone()),
+            _ => None,
+        }
+    }
+    fn follow_agent(&mut self, _: &qur::FollowAgent, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(l) = self.selected_live(cx) {
+            l.update(cx, |l, cx| {
+                l.follow = !l.follow;
+                cx.notify();
+            });
+        }
+        self.sync_menus(cx);
+    }
+    fn take_over(&mut self, _: &qur::TakeOver, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(a) = self.selected_agent() {
+            a.update(cx, |a, cx| a.stop(cx));
         }
     }
 
@@ -1074,7 +1288,9 @@ impl Workspace {
         let root = self.current_root(cx);
         let tree = self.tree_for(&root, window, cx);
         if let Some(p) = self.code.as_ref().and_then(|a| a.read(cx).path().map(Path::to_path_buf)) {
-            tree.update(cx, |t, cx| t.reveal(&p, cx));
+            tree.update(cx, |t, cx| {
+                t.reveal(&p, cx);
+            });
         }
         self.sync_menus(cx);
         cx.notify();
@@ -1521,6 +1737,62 @@ impl Workspace {
         self.set_opacity(min + (1. - min) * t, blur, window, cx);
     }
 
+    /// QUR_BENCH=glow: a terminal task's worktree gets 20 probe writes from a
+    /// background thread (like a formatter or codegen); each is timed from the
+    /// write until its row is painted glowing (acceptance: < 100 ms).
+    fn bench_glow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.root.clone();
+        let dir = qur_agents::worktrees_dir(&self.project_id);
+        let bg = cx.background_executor().clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let created = bg.spawn(async move { qur_worktree::create(&root, &dir, "bench", "glow") }).await;
+            let Ok(c) = created else { return };
+            let wt = c.path.clone();
+            this.update_in(cx, |this, window, cx| {
+                let record = TaskRecord {
+                    id: c.slug.clone(),
+                    agent: "bench".into(),
+                    title: "glow bench".into(),
+                    branch: c.branch.clone(),
+                    worktree: c.path.clone(),
+                    base: c.base.clone(),
+                    session_id: None,
+                    created: 0,
+                    mode: Mode::Terminal,
+                };
+                this.add_term_task(record, window, cx);
+                // Show the tree without starting a terminal process.
+                this.selected = Some(Selected::TermTask(c.slug.clone()));
+                let root = this.current_root(cx);
+                this.tree_for(&root, window, cx);
+                cx.notify();
+            })
+            .ok();
+            bg.timer(Duration::from_millis(1500)).await;
+            for i in 0..20 {
+                let p = wt.join(format!("glow-{i}.txt"));
+                std::fs::write(&p, "x\n").ok();
+                crate::tree_view::GLOW_WRITES.lock().unwrap().push((p, Instant::now()));
+                bg.timer(Duration::from_millis(400)).await;
+            }
+            bg.timer(Duration::from_millis(800)).await;
+            let mut v = crate::tree_view::GLOW_SEEN.lock().unwrap().clone();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            if !v.is_empty() {
+                println!("METRIC glow_n={}", v.len());
+                println!("METRIC glow_p50_ms={:.1}", v[v.len() / 2]);
+                println!("METRIC glow_max_ms={:.1}", v[v.len() - 1]);
+            }
+            println!("METRIC glow_missed={}", 20 - v.len());
+            this.update(cx, |this, cx| {
+                let _ = qur_worktree::remove(&this.root, &c.path, &c.branch, true);
+                cx.quit();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// QUR_BENCH=theme: switch through every theme, one per frame.
     fn bench_theme_step(&mut self, i: usize, mut samples: Vec<f64>, window: &mut Window, cx: &mut Context<Self>) {
         let themes = Registry::global().all();
@@ -1793,7 +2065,29 @@ impl Workspace {
                     return a.clone().into_any_element();
                 }
             }
-            Some(Selected::TermTask(_)) | Some(Selected::Shell(_)) => {
+            Some(Selected::TermTask(id)) => {
+                if let Some(t) = self.term_task(id) {
+                    let term = div().size_full().bg(look.bg(ui.panel_bg)).pt(look.z(6.)).child(self.terms.clone());
+                    return match self.layout {
+                        Layout::A => div()
+                            .size_full()
+                            .flex()
+                            .child(div().flex_1().min_w(px(0.)).child(t.live.clone()))
+                            .child(div().w(gpui::relative(0.45)).flex_none().h_full().border_l_1().border_color(look.c(ui.border)).child(term))
+                            .into_any_element(),
+                        Layout::B if t.show_live => div().size_full().child(t.live.clone()).into_any_element(),
+                        Layout::B => term.into_any_element(),
+                        Layout::C => div()
+                            .size_full()
+                            .flex()
+                            .flex_col()
+                            .child(div().flex_1().min_h(px(0.)).child(t.live.clone()))
+                            .child(div().h(gpui::relative(0.42)).flex_none().border_t_1().border_color(look.c(ui.border)).child(term))
+                            .into_any_element(),
+                    };
+                }
+            }
+            Some(Selected::Shell(_)) => {
                 return div().size_full().bg(look.bg(ui.panel_bg)).pt(look.z(6.)).child(self.terms.clone()).into_any_element();
             }
             None => {}
@@ -2194,16 +2488,22 @@ impl Render for Workspace {
             self.first_frame = true;
             let handle: AnyWindowHandle = window.window_handle();
             let me = cx.entity();
-            window.on_next_frame(move |_, cx| {
+            window.on_next_frame(move |window, cx| {
                 crate::first_frame(handle, cx);
-                // The menu bar is built after the first frame (~20 ms off startup).
-                me.update(cx, |ws, cx| ws.sync_menus(cx));
+                // Menus and the main-checkout watcher start after the first frame.
+                me.update(cx, |ws, cx| {
+                    ws.sync_menus(cx);
+                    ws.watch_root(window, cx);
+                });
             });
             // Dev/test: QUR_DEBUG_TASKS="prompt one|prompt two" starts agent tasks at launch.
             if let Ok(list) = std::env::var("QUR_DEBUG_TASKS") {
                 for p in list.split('|').map(str::trim).filter(|p| !p.is_empty()) {
                     self.start_task(0, p.to_string(), Vec::new(), window, cx);
                 }
+            }
+            if std::env::var("QUR_BENCH").as_deref() == Ok("glow") {
+                self.bench_glow(window, cx);
             }
             if std::env::var("QUR_BENCH").as_deref() == Ok("theme") {
                 let me = cx.entity();
@@ -2283,6 +2583,16 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::reveal_worktree))
             .on_action(cx.listener(Self::worktree_terminal))
             .on_action(cx.listener(Self::discard_task))
+            .on_action(cx.listener(Self::cycle_layout))
+            .on_action(cx.listener(Self::layout_a))
+            .on_action(cx.listener(Self::layout_b))
+            .on_action(cx.listener(Self::layout_c))
+            .on_action(cx.listener(Self::peek_live))
+            .on_action(cx.listener(Self::peek_todo))
+            .on_action(cx.listener(Self::peek_chat))
+            .on_action(cx.listener(Self::peek_changes))
+            .on_action(cx.listener(Self::follow_agent))
+            .on_action(cx.listener(Self::take_over))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::Transparency { .. })) {
                     this.save_transparency(cx);

@@ -18,6 +18,8 @@ qur_tree = { path = "crates/qur_tree" }
 qur_acp = { path = "crates/qur_acp" }
 qur_worktree = { path = "crates/qur_worktree" }
 qur_agents = { path = "crates/qur_agents" }
+qur_watch = { path = "crates/qur_watch" }
+qur_heat = { path = "crates/qur_heat" }
 alacritty_terminal = { version = "0.26.0", default-features = false }
 futures = "0.3"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "9e84b066b55bc3609a30dd965075c12255b38b45", default-features = false }

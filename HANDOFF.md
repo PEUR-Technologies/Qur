@@ -34,26 +34,20 @@ Summary of the owner decisions so far:
 
 ## Status
 
-**M0, M1 and M2 are done.** Commits: "M0: spikes", "M1: editor shell", "M2: agents in worktrees". Next is M3 (peek + heatmap).
+**M0–M3 are done.** Commits: "M0: spikes", "M1: editor shell", "M2: agents in worktrees", "M3: Live view + heatmap". The repo lives at https://github.com/PEUR-Technologies/Qur (private). Next is the **Browser + Inspect** milestone (decision 26), then M4.
 
-M2 delivered:
+M3 delivered:
 - **New crates:**
-  - `qur_acp`: hand-rolled ACP v1 client, with a fake-agent protocol test suite and one ignored real-Claude test.
-  - `qur_worktree`: create and remove worktrees, slugs, `.worktreeinclude` copies with APFS clones, and the setup command.
-  - `qur_agents`: `agents.toml` roster, login-shell `PATH`, and a per-project task store.
+  - `qur_watch`: FSEvents watcher via `notify` 8.2, debounced per path at 50 ms, filtering `.git` and `.gitignore`.
+  - `qur_heat`: the heatmap model (states and priorities, heat levels, fades, folder rollup, diff stats via git, focus).
 - **App:**
-  - Left column: AGENTS (ACP tasks and Agent Terminals) with accent, status glyph, last-message preview and unread marker; TERMINALS; and FILES, which follows the selected worktree, is resizable and drags into the prompt.
-  - Stage: agent view (header, To-do strip, Chat with tool calls and diff counts, permission bar, prompt bar with `@` mentions, `/` commands and queueing) or a terminal.
-  - Code modal: Esc steps out of find, then extra cursors, then the modal.
-  - New Agent Task dialog.
-  - Stop (Esc / Cmd+.), Discard, Reveal and Worktree terminal.
-  - Tasks persist and resume through `session/load`.
-- **Acceptance** (see `docs/budget.md`, M2):
-  - three Claude tasks ran in parallel, footprint 81 MB;
-  - quit leaves no orphans;
-  - the permission flow and resume were verified with tiny prompts.
-
-Tested by script plus screenshots, not by hand: typing in the prompt, drag-to-prompt, `/` commands with a real command list, Discard, and resizing the sidebar. The owner should try these.
+  - `TaskMonitor`, one per task: watcher, heatmap, recompute 150 ms after writes, and repaint timers.
+  - The Files tree as heatmap: approval outline, pulsing edit glow (30 fps cap), fading read glow, "new", +n −m tinted by heat level, folder dots, auto-reveal (never within 5 s of user input), and overlap dots on the main tree.
+  - `LivePane`: follows the agent's file; read-only while it edits, with "<agent> is editing · Take over"; Follow toggle; accent mark on changed lines.
+  - Peek layouts A/B/C in the stage (decision 25), cycled with Cmd+K Cmd+L, with Cmd+1..4 in layout B.
+  - The main checkout is watched too, with "changed on disk" protection for unsaved edits.
+  - Pre-trusting worktrees for Claude CLI terminals (decision 24).
+- **Acceptance** (`docs/budget.md`, M3): a glow 81–84 ms after a write while Qur is unfocused, and Live followed every file.
 
 ## Key findings so far
 
@@ -67,7 +61,7 @@ Tested by script plus screenshots, not by hand: typing in the prompt, drag-to-pr
 - The owner's Mac (MacBook Air M5, Mac17,3) has a **60 Hz** panel. The "one frame at 120 Hz" typing target is judged on CPU-side key-to-draw time (8.3 ms or less), not on observed vsync.
 - Idle RSS counts about 40 MB of shared macOS framework pages, so memory is budgeted as physical footprint (decision 15).
 - Kotlin's grammar is about 5.5 MB of the about 11 MB that grammars add to the binary.
-- GPUI throttles unfocused or occluded windows by default. Qur sets `inactive_frame_interval` to 16 ms; verify in M3 that a glow lands within 100 ms while the user is in another app.
+- GPUI throttles unfocused windows (Qur sets `inactive_frame_interval` to 16 ms) and stops drawing fully covered ones. Verified in M3: a glow lands within 84 ms while Qur is unfocused but visible. Unattended tests float the window.
 - Screenshots of a background window can lag by a few frames; wait 6–7 s or bring it to the front.
 - Running on battery capped the display at 60 Hz in these runs; on AC, frames paced at 120 Hz.
 - GPUI is pinned to Zed git rev `9e84b066`, and building it needs the Xcode Metal toolchain (installed). Zed source for reference: `~/src-ref/zed` (sparse clone).
@@ -110,17 +104,18 @@ Env: `QUR_HOME` (settings folder; **always set it to a scratch dir in tests**, s
 
 ## Next
 
-1. Owner reviews M2 by hand: `target/release/qur ~/some/repo`, then Cmd+Shift+N.
-2. **M3: peek + heatmap.** Planned:
-   - The Live view (follow the agent's current file, Take over), probably as the code modal in "follow" mode, since there is no code area now (decision 18).
-   - The peek layouts reinterpreted for the stage, plus the heatmap states in the Files tree (via the FSEvents watcher plus the ACP `toolCallId` state from M0), folder dots, heat levels, and overlap dots on the main tree.
-   - Orca items for M3: never overwrite unseen disk changes; "needs you" ordering options.
-   - Accept: a glow within 100 ms, Live follows across files, and state survives layout switches. Also check the GPUI inactive-window throttle with Qur unfocused.
+1. **Browser + Inspect** (decision 26). Plan:
+   - A "Browser" tab next to Live in the agent stage: a WKWebView embedded as a child NSView of GPUI's window, through `raw-window-handle` and `objc2-web-kit`.
+   - The URL is remembered per task; the page is freed after a few idle minutes.
+   - Inspect mode: an injected script highlights elements on hover and selects on click. The selection (selector, outerHTML, key computed styles, URL, and a screenshot from `takeSnapshot`) goes into the prompt as a chip and is sent as text plus an image block.
+   - Hide the native view while GPUI overlays are open.
+   - Measure the memory cost (M3 probe: +8 MB in Qur, about +55 MB in WebKit's own processes for a simple page).
+2. **M4: Changes + Merge + Git panel.** It includes Orca's line comments sent back to the agent, the conflict pre-check (`merge-tree`), and +n −m on agent rows.
 3. Known gaps:
    - IME marked text isn't drawn.
    - End and Cmd+Right go to the line end, not the visual-row end.
-   - No file watcher yet; trees refresh when the window is activated.
-   - Agent Terminals don't pre-trust the worktree. Claude's "trust this folder?" prompt can appear; see the open question below.
+   - The watcher honours only the root `.gitignore`.
+   - Deleted files don't appear as rows in the tree; their state shows only in the folder dots.
 
 ## Open questions for the owner
 

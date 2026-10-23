@@ -55,3 +55,16 @@ These amend `docs/QUR_HANDOFF.md`. Newest last.
     - A per-project setup command: `[worktree] setup = "pnpm install"` in `projects/<id>.toml`. It runs in the new worktree through the login shell before the agent starts. Its output shows in the chat, and the agent starts only on success.
     - Sidebar rows show the agent's last message, and an unread marker on agents that finished or need you while not selected.
     - Composer: `/` opens the agent's slash commands (from ACP `available_commands_update`). Messages sent during a turn are queued and sent when it ends.
+23. **Defaults accepted (2026-10-23):** the Qur Light/Dark accent palettes as proposed; Kotlin stays bundled; none of Orca's "conflicts" items are adopted.
+24. **Pre-trust task worktrees for the Claude CLI** (Orca item, owner approved). When Qur creates a worktree for a terminal-mode Claude task, it marks that folder trusted in `~/.claude.json` (`projects["<worktree>"].hasTrustDialogAccepted = true`), so "Do you trust this folder?" doesn't stall the agent. Qur only adds or updates that one key, writes atomically, and never touches anything else in the file.
+25. **Live view lives in the agent stage, as a split** (owner choice for M3). The handoff's peek layouts apply inside the stage:
+    - **A Watch + side notes** (default): Live on the left; To-do, Chat and the prompt on the right.
+    - **B One view at a time:** Live / To-do / Chat / Changes segments, `Cmd+1..4`.
+    - **C Watch + drawer:** Live fills the stage; a bottom drawer shows the current step and latest chat line, and expands to the chat.
+
+    Cycle with `Cmd+K Cmd+L` or View > Peek Layout; the choice is saved in `config.toml` (`peek_layout`). The code modal (decision 18) stays for opening any file yourself; Live is only the agent's current file.
+26. **Embedded browser with Inspect** (owner, 2026-10-23). This overrides the handoff non-goal "embedded browser, design mode" and the no-webview rule, for this feature only.
+    - **What:** a Browser view in the agent stage, next to Live, like VS Code's Simple Browser. Inspect highlights and selects elements, and "ask an agent to adjust" sends the selection's context to that task's agent.
+    - **How:** the system WKWebView (no bundled engine). Pages run in WebKit's own processes. It's opt-in per task and freed when idle.
+    - **Measured cost** on the owner's Mac (M3 probe): +8 MB in Qur's own process and about +55 MB in WebKit's processes for a simple page. Those processes exit when the page closes.
+    - Modelled on Orca's Design Mode (`docs/research/orca.md`, item P8).

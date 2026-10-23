@@ -18,7 +18,9 @@ use qur_acp::{
 use qur_agents::{AgentDef, TaskRecord};
 use qur_theme::Rgba;
 
+use crate::live::{LiveEvent, LivePane};
 use crate::look::Look;
+use crate::monitor::{TaskMonitor, heat_kind, heat_status};
 use crate::prompt::{PromptEvent, PromptInput};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -89,8 +91,57 @@ struct Permission {
     options: Vec<PermissionOption>,
 }
 
+/// Stage layout (decision 25).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Layout {
+    /// Watch + side notes.
+    A,
+    /// One view at a time.
+    B,
+    /// Watch + pull-up drawer.
+    C,
+}
+
+impl Layout {
+    pub fn parse(s: &str) -> Layout {
+        match s {
+            "B" => Layout::B,
+            "C" => Layout::C,
+            _ => Layout::A,
+        }
+    }
+    pub fn next(self) -> Layout {
+        match self {
+            Layout::A => Layout::B,
+            Layout::B => Layout::C,
+            Layout::C => Layout::A,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Layout::A => "A",
+            Layout::B => "B",
+            Layout::C => "C",
+        }
+    }
+}
+
+/// Layout B's segments.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum View {
+    Live,
+    Todo,
+    Chat,
+    Changes,
+}
+
 pub struct AgentTask {
     pub record: TaskRecord,
+    pub monitor: Entity<TaskMonitor>,
+    pub live: Entity<LivePane>,
+    pub layout: Layout,
+    pub view: View,
+    drawer_open: bool,
     pub def: AgentDef,
     pub accent: Rgba,
     pub status: Status,
@@ -120,8 +171,17 @@ pub struct AgentTask {
 impl EventEmitter<AgentEvent> for AgentTask {}
 
 impl AgentTask {
-    pub fn new(record: TaskRecord, def: AgentDef, accent: Rgba, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(record: TaskRecord, def: AgentDef, accent: Rgba, layout: Layout, wrap: bool, tab: usize, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let wt = record.worktree.clone();
+        let monitor = cx.new(|cx| TaskMonitor::new(record.worktree.clone(), record.base.clone(), accent, cx));
+        let label = def.label.clone();
+        let live = cx.new(|cx| LivePane::new(monitor.clone(), label, wrap, tab, window, cx));
+        let live_sub = cx.subscribe_in(&live, window, |this, _, ev: &LiveEvent, _, cx| match ev {
+            LiveEvent::TakeOver => this.stop(cx),
+            LiveEvent::Open(p) => cx.emit(AgentEvent::OpenFile(p.clone(), None)),
+        });
+        let monitor_sub = cx.observe(&monitor, |_, _, cx| cx.notify());
         let prompt = cx.new(|cx| PromptInput::new(format!("Ask {}…  (@ to mention a file)", def.label), wt, cx));
         let sub = cx.subscribe_in(&prompt, window, |this, _, ev: &PromptEvent, _, cx| match ev {
             PromptEvent::Submit => this.submit(cx),
@@ -134,6 +194,11 @@ impl AgentTask {
         list.set_follow_mode(gpui::FollowMode::Tail);
         AgentTask {
             record,
+            monitor,
+            live,
+            layout,
+            view: View::Chat,
+            drawer_open: false,
             def,
             accent,
             status: Status::Stopped,
@@ -153,8 +218,15 @@ impl AgentTask {
             focus: cx.focus_handle(),
             turn_started: None,
             _events: None,
-            _subs: vec![sub],
+            _subs: vec![sub, live_sub, monitor_sub],
         }
+    }
+
+    /// Theme change: the accent also colours the heatmap and the Live mark.
+    pub fn set_accent(&mut self, accent: Rgba, cx: &mut Context<Self>) {
+        self.accent = accent;
+        self.monitor.update(cx, |m, _| m.accent = accent);
+        self.live.update(cx, |l, _| l.accent = accent);
     }
 
     // -- chat list -------------------------------------------------------------
@@ -263,6 +335,8 @@ impl AgentTask {
     }
 
     fn set_status(&mut self, s: Status, cx: &mut Context<Self>) {
+        let active = matches!(s, Status::Working | Status::NeedsYou);
+        self.monitor.update(cx, |m, _| m.set_turn_active(active));
         if self.status != s {
             self.status = s;
             cx.emit(AgentEvent::Changed);
@@ -309,7 +383,7 @@ impl AgentTask {
     /// One line for the sidebar: the agent's latest words.
     pub fn last_line(&self) -> Option<String> {
         self.chat.iter().rev().find_map(|c| match c {
-            ChatItem::Agent(t) => t.lines().map(str::trim).rfind(|l| !l.is_empty()).map(str::to_string),
+            ChatItem::Agent(t) => t.lines().map(str::trim).rfind(|l| !l.is_empty() && !l.starts_with("```")).map(str::to_string),
             ChatItem::Notice(t) => Some(t.clone()),
             _ => None,
         })
@@ -394,6 +468,8 @@ impl AgentTask {
 
     pub fn answer_permission(&mut self, kind: PermissionKind, cx: &mut Context<Self>) {
         let Some(p) = self.permission.take() else { return };
+        let paths: Vec<PathBuf> = p.tool.locations.iter().flatten().map(|l| l.path.clone()).collect();
+        self.monitor.update(cx, |m, cx| m.on_permission(&paths, false, cx));
         let outcome = match p.options.iter().find(|o| o.kind == kind) {
             Some(o) => PermissionOutcome::Selected(o.id.clone()),
             None => PermissionOutcome::Cancelled,
@@ -422,11 +498,29 @@ impl AgentTask {
                 }
                 SessionUpdate::ToolCall(t) => {
                     let id = t.id.clone();
+                    let paths: Vec<PathBuf> = t.locations.iter().map(|l| l.path.clone()).collect();
+                    let (k, st) = (heat_kind(t.kind), heat_status(t.status));
+                    let lines: Vec<(PathBuf, u32)> = t.locations.iter().filter_map(|l| Some((l.path.clone(), l.line?))).collect();
+                    self.monitor.update(cx, |m, cx| {
+                        m.on_tool(&id, Some(k), Some(st), &paths, cx);
+                        for (p, l) in &lines {
+                            m.tool_line(&id, p, *l);
+                        }
+                    });
                     self.tools.insert(id.clone(), t);
                     self.push(ChatItem::Tool(id));
                 }
                 SessionUpdate::ToolCallUpdate(u) => {
                     let id = u.id.clone();
+                    let paths: Vec<PathBuf> = u.locations.iter().flatten().map(|l| l.path.clone()).collect();
+                    let (k, st) = (u.kind.map(heat_kind), u.status.map(heat_status));
+                    let lines: Vec<(PathBuf, u32)> = u.locations.iter().flatten().filter_map(|l| Some((l.path.clone(), l.line?))).collect();
+                    self.monitor.update(cx, |m, cx| {
+                        m.on_tool(&id, k, st, &paths, cx);
+                        for (p, l) in &lines {
+                            m.tool_line(&id, p, *l);
+                        }
+                    });
                     match self.tools.get_mut(&id) {
                         Some(t) => t.apply(&u),
                         None => {
@@ -451,6 +545,8 @@ impl AgentTask {
                 _ => {}
             },
             Event::Permission { id, tool_call, options, .. } => {
+                let paths: Vec<PathBuf> = tool_call.locations.iter().flatten().map(|l| l.path.clone()).collect();
+                self.monitor.update(cx, |m, cx| m.on_permission(&paths, true, cx));
                 self.permission = Some(Permission { id, tool: tool_call, options });
                 self.set_status(Status::NeedsYou, cx);
             }
@@ -638,20 +734,25 @@ impl AgentTask {
                 .border_color(look.c(self.accent))
                 .bg(look.c(ui.permission_bar_bg))
                 .flex()
-                .items_center()
-                .gap(look.z(8.))
+                .flex_col()
+                .gap(look.z(6.))
                 .child(
                     div()
-                        .flex_1()
                         .min_w(px(0.))
                         .flex()
                         .flex_col()
-                        .child(div().truncate().text_color(look.c(ui.text)).child(format!("{} wants to {what}", self.def.label)))
+                        .child(div().text_color(look.c(ui.text)).child(format!("{} wants to {what}", self.def.label)))
                         .children(file.map(|f| div().truncate().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(f))),
                 )
-                .when(has(PermissionKind::AllowOnce), |d| d.child(button("Allow once", PermissionKind::AllowOnce, true, "perm-once")))
-                .when(has(PermissionKind::AllowAlways), |d| d.child(button("Allow for this task", PermissionKind::AllowAlways, false, "perm-always")))
-                .when(has(PermissionKind::RejectOnce), |d| d.child(button("Deny", PermissionKind::RejectOnce, false, "perm-deny"))),
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(look.z(6.))
+                        .when(has(PermissionKind::AllowOnce), |d| d.child(button("Allow once", PermissionKind::AllowOnce, true, "perm-once")))
+                        .when(has(PermissionKind::AllowAlways), |d| d.child(button("Allow for this task", PermissionKind::AllowAlways, false, "perm-always")))
+                        .when(has(PermissionKind::RejectOnce), |d| d.child(button("Deny", PermissionKind::RejectOnce, false, "perm-deny"))),
+                ),
         )
     }
 }
@@ -703,50 +804,16 @@ impl Focusable for AgentTask {
     }
 }
 
-impl Render for AgentTask {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let look = Look::of(window, cx);
+impl AgentTask {
+    /// To-do + Chat + permission bar + prompt (the "side notes").
+    fn notes(&self, show_plan: bool, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
         let ui = look.theme.ui.clone();
         let me = cx.entity();
         let look2 = look.clone();
-        let chat = list(self.list.clone(), move |ix, window, cx| {
-            let _ = window;
-            me.update(cx, |t, cx| t.render_item(ix, &look2, cx))
-        })
-        .flex_1()
-        .min_h(px(0.));
+        let chat = list(self.list.clone(), move |ix, _, cx| me.update(cx, |t, cx| t.render_item(ix, &look2, cx)))
+            .flex_1()
+            .min_h(px(0.));
         let working = matches!(self.status, Status::Working | Status::NeedsYou);
-        let elapsed = self.turn_started.filter(|_| working).map(|t| format!("  {}s", t.elapsed().as_secs())).unwrap_or_default();
-        let header = div()
-            .flex_none()
-            .h(look.z(36.))
-            .px(look.z(16.))
-            .flex()
-            .items_center()
-            .gap(look.z(10.))
-            .border_b_1()
-            .border_color(look.c(ui.border))
-            .child(div().flex_none().size(look.z(10.)).rounded(look.z(2.5)).bg(look.c(self.accent)))
-            .child(div().min_w(px(0.)).truncate().font_weight(gpui::FontWeight::MEDIUM).child(self.record.title.clone()))
-            .child(div().flex_none().text_size(look.text(-1.)).text_color(look.c(if matches!(self.status, Status::Error(_)) { ui.error } else { ui.text_muted })).child(format!("{}{elapsed}", self.status.label())))
-            .child(div().flex_1())
-            .child(div().flex_none().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(self.record.branch.clone()))
-            .when(working, |d| {
-                d.child(
-                    div()
-                        .id("stop")
-                        .flex_none()
-                        .px(look.z(8.))
-                        .py(look.z(2.))
-                        .rounded(look.z(4.))
-                        .border_1()
-                        .border_color(look.c(ui.border_strong))
-                        .cursor_pointer()
-                        .text_size(look.text(-1.))
-                        .child("Stop")
-                        .on_click(cx.listener(|t, _, _, cx| t.stop(cx))),
-                )
-            });
         let empty = self.chat.is_empty();
         let prompt_bar = div()
             .flex_none()
@@ -767,14 +834,10 @@ impl Render for AgentTask {
             })
             .child(div().flex_none().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(if working { "↩ queue · esc to stop" } else { "↩ send" }));
         div()
-            .key_context("AgentView")
-            .track_focus(&self.focus)
             .size_full()
             .flex()
             .flex_col()
-            .bg(look.bg(ui.editor_bg))
-            .child(header)
-            .children(self.plan_strip(&look))
+            .when(show_plan, |d| d.children(self.plan_strip(look)))
             .when(empty, |d| {
                 d.child(
                     div()
@@ -782,17 +845,236 @@ impl Render for AgentTask {
                         .flex()
                         .items_center()
                         .justify_center()
+                        .px(look.z(16.))
                         .text_color(look.c(ui.text_muted))
                         .child(match self.status {
                             _ if self.setting_up => "Setting up the worktree…".to_string(),
                             Status::Starting => "Starting the agent…".to_string(),
                             Status::Stopped => format!("{} is stopped. Send a message to resume.", self.def.label),
-                            _ => format!("Worktree: {}", self.record.worktree.display()),
+                            _ => "No messages yet.".to_string(),
                         }),
                 )
             })
             .when(!empty, |d| d.child(chat))
-            .children(self.permission_bar(&look, cx))
+            .children(self.permission_bar(look, cx))
             .child(prompt_bar)
+    }
+
+    fn header(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = look.theme.ui.clone();
+        let working = matches!(self.status, Status::Working | Status::NeedsYou);
+        let elapsed = self.turn_started.filter(|_| working).map(|t| format!("  {}s", t.elapsed().as_secs())).unwrap_or_default();
+        let segment = |label: &'static str, view: View, id: &'static str, keys: &'static str| {
+            let on = self.view == view;
+            div()
+                .id(id)
+                .px(look.z(8.))
+                .py(look.z(2.))
+                .rounded(look.z(4.))
+                .cursor_pointer()
+                .text_size(look.text(-1.))
+                .text_color(look.c(if on { ui.text } else { ui.text_muted }))
+                .when(on, |d| d.bg(look.c(ui.active_bg)))
+                .child(label)
+                .tooltip(move |_, cx| cx.new(|_| TipText(keys)).into())
+                .on_click(cx.listener(move |t, _, _, cx| t.set_view(view, cx)))
+        };
+        div()
+            .flex_none()
+            .h(look.z(36.))
+            .px(look.z(16.))
+            .flex()
+            .items_center()
+            .gap(look.z(10.))
+            .border_b_1()
+            .border_color(look.c(ui.border))
+            .child(div().flex_none().size(look.z(10.)).rounded(look.z(2.5)).bg(look.c(self.accent)))
+            .child(div().min_w(px(0.)).truncate().font_weight(gpui::FontWeight::MEDIUM).child(self.record.title.clone()))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(look.text(-1.))
+                    .text_color(look.c(if matches!(self.status, Status::Error(_)) { ui.error } else { ui.text_muted }))
+                    .child(format!("{}{elapsed}", self.status.label())),
+            )
+            .child(div().flex_1())
+            .when(self.layout == Layout::B, |d| {
+                d.child(segment("Live", View::Live, "seg-live", "⌘1"))
+                    .child(segment("To-do", View::Todo, "seg-todo", "⌘2"))
+                    .child(segment("Chat", View::Chat, "seg-chat", "⌘3"))
+                    .child(segment("Changes", View::Changes, "seg-changes", "⌘4"))
+            })
+            .when(self.layout != Layout::B, |d| d.child(div().flex_none().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(self.record.branch.clone())))
+            .when(working, |d| {
+                d.child(
+                    div()
+                        .id("stop")
+                        .flex_none()
+                        .px(look.z(8.))
+                        .py(look.z(2.))
+                        .rounded(look.z(4.))
+                        .border_1()
+                        .border_color(look.c(ui.border_strong))
+                        .cursor_pointer()
+                        .text_size(look.text(-1.))
+                        .child("Stop")
+                        .on_click(cx.listener(|t, _, _, cx| t.stop(cx))),
+                )
+            })
+    }
+
+    pub fn set_view(&mut self, v: View, cx: &mut Context<Self>) {
+        self.view = v;
+        cx.notify();
+    }
+
+    pub fn set_layout(&mut self, l: Layout, cx: &mut Context<Self>) {
+        self.layout = l;
+        cx.notify();
+    }
+
+    /// One line for layout C's closed drawer: current step, then latest words.
+    fn drawer_line(&self) -> String {
+        let step = self.plan.iter().find(|p| p.status == PlanStatus::InProgress).map(|p| p.content.clone());
+        match (step, self.last_line()) {
+            (Some(s), Some(l)) => format!("{s}  ·  {l}"),
+            (Some(s), None) => s,
+            (None, Some(l)) => l,
+            (None, None) => self.status.label(),
+        }
+    }
+}
+
+/// Minimal tooltip view (segment shortcuts).
+struct TipText(&'static str);
+
+impl Render for TipText {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let look = Look::of(window, cx);
+        let ui = &look.theme.ui;
+        div()
+            .px(look.z(6.))
+            .py(look.z(2.))
+            .rounded(look.z(4.))
+            .bg(look.c(ui.overlay_bg))
+            .border_1()
+            .border_color(look.c(ui.border_strong))
+            .text_size(look.text(-2.))
+            .text_color(look.c(ui.text))
+            .font_family(look.ui_font.clone())
+            .child(self.0)
+    }
+}
+
+impl Render for AgentTask {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let look = Look::of(window, cx);
+        let ui = look.theme.ui.clone();
+        let header = self.header(&look, cx);
+        let body: gpui::AnyElement = match self.layout {
+            Layout::A => div()
+                .flex_1()
+                .min_h(px(0.))
+                .flex()
+                .child(div().flex_1().min_w(px(0.)).child(self.live.clone()))
+                .child(div().w(look.z(400.)).flex_none().h_full().border_l_1().border_color(look.c(ui.border)).child(self.notes(true, &look, cx)))
+                .into_any_element(),
+            Layout::B => match self.view {
+                View::Live => div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .flex()
+                    .flex_col()
+                    .child(div().flex_1().min_h(px(0.)).child(self.live.clone()))
+                    .children(self.permission_bar(&look, cx))
+                    .into_any_element(),
+                View::Todo => div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .flex()
+                    .flex_col()
+                    .children(self.plan_strip(&look))
+                    .when(self.plan.is_empty(), |d| {
+                        d.child(div().flex_1().flex().items_center().justify_center().text_color(look.c(ui.text_muted)).child("No plan yet."))
+                    })
+                    .child(div().flex_1())
+                    .children(self.permission_bar(&look, cx))
+                    .into_any_element(),
+                View::Chat => div().flex_1().min_h(px(0.)).child(self.notes(false, &look, cx)).into_any_element(),
+                View::Changes => div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(look.c(ui.text_muted))
+                    .child("Changes and Merge arrive in M4. The Files tree shows +n −m per file now.")
+                    .into_any_element(),
+            },
+            Layout::C => {
+                let open = self.drawer_open;
+                let drawer = div()
+                    .flex_none()
+                    .border_t_1()
+                    .border_color(look.c(ui.border))
+                    .when(open, |d| d.h(gpui::relative(0.55)).child(self.notes(true, &look, cx)))
+                    .when(!open, |d| {
+                        d.child(
+                            div()
+                                .id("drawer")
+                                .h(look.z(30.))
+                                .px(look.z(16.))
+                                .flex()
+                                .items_center()
+                                .gap(look.z(8.))
+                                .cursor_pointer()
+                                .text_size(look.text(-1.))
+                                .text_color(look.c(ui.text_secondary))
+                                .child(div().flex_none().text_color(look.c(ui.text_muted)).child("▴"))
+                                .child(div().min_w(px(0.)).truncate().child(self.drawer_line()))
+                                .on_click(cx.listener(|t, _, _, cx| {
+                                    t.drawer_open = true;
+                                    cx.notify();
+                                })),
+                        )
+                        .children(self.permission_bar(&look, cx))
+                    });
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .flex()
+                    .flex_col()
+                    .child(div().flex_1().min_h(px(0.)).child(self.live.clone()))
+                    .child(drawer)
+                    .when(open, |d| {
+                        d.child(
+                            div()
+                                .id("drawer-close")
+                                .absolute()
+                                .right(look.z(12.))
+                                .bottom(gpui::relative(0.55))
+                                .px(look.z(8.))
+                                .cursor_pointer()
+                                .text_size(look.text(-2.))
+                                .text_color(look.c(ui.text_muted))
+                                .child("▾ close")
+                                .on_click(cx.listener(|t, _, _, cx| {
+                                    t.drawer_open = false;
+                                    cx.notify();
+                                })),
+                        )
+                    })
+                    .relative()
+                    .into_any_element()
+            }
+        };
+        div()
+            .key_context("AgentView")
+            .track_focus(&self.focus)
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(look.bg(ui.editor_bg))
+            .child(header)
+            .child(body)
     }
 }
