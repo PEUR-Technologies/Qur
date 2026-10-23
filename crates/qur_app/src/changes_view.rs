@@ -469,6 +469,6 @@ impl Render for ChangesView {
             .text_size(look.text(-2.))
             .text_color(look.c(ui.text_muted))
             .child("Click a line to comment · ⌘-click to open the file · comments go to the agent in one message");
-        div().size_full().flex().flex_col().bg(look.bg(ui.editor_bg)).child(header).child(body).child(hint)
+        div().size_full().flex().flex_col().bg(look.surface(ui.editor_bg)).child(header).child(body).child(hint)
     }
 }

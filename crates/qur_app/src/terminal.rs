@@ -100,14 +100,45 @@ fn hex(c: u32) -> gpui::Hsla {
 /// of what it's working on.
 type TitleCell = Arc<std::sync::Mutex<Option<String>>>;
 
+/// The PTY's input side, for answers the terminal owes the program.
+type Reply = Arc<std::sync::Mutex<Option<EventLoopSender>>>;
+
+/// The theme's terminal colors as last drawn, for color queries (OSC 10/11/4).
+static THEME_COLORS: std::sync::Mutex<Option<TerminalColors>> = std::sync::Mutex::new(None);
+
 #[derive(Clone)]
-pub struct Listener(UnboundedSender<()>, TitleCell);
+pub struct Listener(UnboundedSender<()>, TitleCell, Reply);
+
+impl Listener {
+    fn reply(&self, text: String) {
+        if let Some(s) = self.2.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            let _ = s.send(Msg::Input(text.into_bytes().into()));
+        }
+    }
+}
 
 impl EventListener for Listener {
     fn send_event(&self, ev: TermEvent) {
         match &ev {
             TermEvent::Title(t) => *self.1.lock().unwrap_or_else(|e| e.into_inner()) = Some(t.clone()),
             TermEvent::ResetTitle => *self.1.lock().unwrap_or_else(|e| e.into_inner()) = None,
+            // Status and cursor reports (DSR, DA…) the program asked for.
+            TermEvent::PtyWrite(text) => self.reply(text.clone()),
+            // "What's your background?": programs such as Claude Code pick their
+            // light or dark palette from this, so answer with the theme's colors.
+            TermEvent::ColorRequest(index, format) => {
+                let colors = THEME_COLORS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                if let Some(t) = colors {
+                    let v = match *index {
+                        i if i < 256 => indexed(i as u8, &t),
+                        257 => rgb(t.background),
+                        258 => rgb(t.cursor),
+                        _ => rgb(t.foreground),
+                    };
+                    let c = alacritty_terminal::vte::ansi::Rgb { r: (v >> 16) as u8, g: (v >> 8) as u8, b: v as u8 };
+                    self.reply(format(c));
+                }
+            }
             _ => {}
         }
         if matches!(ev, TermEvent::Wakeup | TermEvent::ChildExit(_) | TermEvent::Exit | TermEvent::Title(_) | TermEvent::ResetTitle) {
@@ -154,6 +185,7 @@ pub struct Session {
     pub last_output: Option<Instant>,
     /// Text typed since the last Enter (for the task title).
     typed: String,
+    in_escape: bool,
     pub first_line: Option<String>,
     title: TitleCell,
     _reader: Task<()>,
@@ -167,7 +199,8 @@ type Spawned = (Arc<FairMutex<Term<Listener>>>, EventLoopSender, i32, futures::c
 
 fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize, title: TitleCell) -> std::io::Result<Spawned> {
     let (tx, rx) = unbounded();
-    let listener = Listener(tx, title);
+    let reply = Reply::default();
+    let listener = Listener(tx, title, reply.clone());
     let (cols, lines) = (100, 12);
     // `env -u` strips vendor API keys so the CLIs use their own logins.
     let mut args = vec!["-u".into(), "ANTHROPIC_API_KEY".into(), "-u".into(), "OPENAI_API_KEY".into(), shell(), "-l".into()];
@@ -184,6 +217,9 @@ fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize, title: TitleCell) -> std:
             ("TERM".into(), "xterm-256color".into()),
             ("COLORTERM".into(), "truecolor".into()),
             ("TERM_PROGRAM".into(), "qur".into()),
+            // The user's full shell PATH (qur_agents::login_path), so `claude`
+            // and friends are found even when Qur was opened from Finder.
+            ("PATH".into(), qur_agents::login_path().into()),
         ]),
     };
     let term = Arc::new(FairMutex::new(Term::new(TermConfig::default(), &Dims { cols, lines }, listener.clone())));
@@ -191,6 +227,7 @@ fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize, title: TitleCell) -> std:
     let pid = pty.child().id() as i32;
     let ev = EventLoop::new(term.clone(), listener, pty, false, false)?;
     let sender = ev.channel();
+    *reply.lock().unwrap_or_else(|e| e.into_inner()) = Some(sender.clone());
     ev.spawn();
     Ok((term, sender, pid, rx))
 }
@@ -359,6 +396,7 @@ impl TerminalPanel {
             size: (100, 12),
             last_output: None,
             typed: String::new(),
+            in_escape: false,
             first_line: None,
             title,
             _reader: reader,
@@ -467,6 +505,18 @@ impl TerminalPanel {
         // Remember the first line typed (task title).
         if s.first_line.is_none() && matches!(s.kind, Kind::Agent { .. }) {
             for &b in &bytes {
+                // Skip escape sequences (arrow keys, focus reports…): only
+                // what you typed names the task.
+                if s.in_escape {
+                    if (0x40..=0x7e).contains(&b) && b != b'[' && b != b'O' {
+                        s.in_escape = false;
+                    }
+                    continue;
+                }
+                if b == 0x1b {
+                    s.in_escape = true;
+                    continue;
+                }
                 match b {
                     b'\r' => {
                         let t = s.typed.trim().to_string();
@@ -843,6 +893,7 @@ impl Element for GridElement {
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) -> GridPrepaint {
         let look = Look::of(window, cx);
         let tc = look.theme.terminal.clone();
+        *THEME_COLORS.lock().unwrap_or_else(|e| e.into_inner()) = Some(tc.clone());
         let fs = look.z(look.code_size - 1.);
         let f = font(look.code_font.clone());
         let ts = window.text_system().clone();

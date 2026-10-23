@@ -53,7 +53,8 @@ pub fn run() -> Vec<Check> {
 /// One agent: found on the login PATH, then a real start. ACP agents get an
 /// `initialize`; terminal agents `--version`.
 pub fn agent(def: &AgentDef) -> Check {
-    let name = format!("{} ({})", def.label, if def.mode == Mode::Acp { "ACP" } else { "terminal" });
+    let mode = if def.mode == Mode::Acp { "ACP" } else { "terminal" };
+    let name = if def.label.to_lowercase().contains(&mode.to_lowercase()) { def.label.clone() } else { format!("{} ({mode})", def.label) };
     let Some(program) = qur_agents::which(&def.command) else {
         return check(Level::Fail, name, format!("{} not found on PATH", def.command));
     };

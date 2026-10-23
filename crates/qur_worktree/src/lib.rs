@@ -82,6 +82,11 @@ pub fn create(root: &Path, dir: &Path, agent: &str, slug: &str) -> Result<Create
 /// Remove a task's worktree and delete its branch (Discard). `force` also
 /// drops uncommitted changes in the worktree.
 pub fn remove(root: &Path, path: &Path, branch: &str, force: bool) -> Result<(), String> {
+    // Never the project itself (an agent working in the project folder).
+    let same = |a: &Path, b: &Path| std::fs::canonicalize(a).ok().zip(std::fs::canonicalize(b).ok()).is_some_and(|(a, b)| a == b) || a == b;
+    if same(root, path) {
+        return Err("refusing to remove the project folder".into());
+    }
     if path.exists() {
         let p = path.to_str().ok_or("non-UTF-8 path")?;
         let mut args = vec!["worktree", "remove"];
@@ -333,6 +338,8 @@ mod tests {
         assert!(ok, "{out}");
         assert!(out.contains("setting up"));
         assert!(!run_setup(&c.path, "exit 3", "/usr/bin:/bin").0);
+        assert!(remove(&r, &r, "main", true).is_err(), "the project folder itself is never removed");
+        assert!(r.join(".git").exists());
         let (ok, out) = run_check(&c.path, "echo checking; test -f .env", "/usr/bin:/bin", std::time::Duration::from_secs(10));
         assert!(ok, "{out}");
         assert!(out.contains("checking"));

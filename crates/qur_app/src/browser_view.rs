@@ -387,7 +387,7 @@ impl Render for BrowserPane {
                         }),
                 )
             });
-        div().size_full().flex().flex_col().bg(look.bg(ui.editor_bg)).child(bar).child(body)
+        div().size_full().flex().flex_col().bg(look.surface(ui.editor_bg)).child(bar).child(body)
     }
 }
 

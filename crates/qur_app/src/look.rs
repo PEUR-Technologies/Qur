@@ -83,10 +83,19 @@ impl Look {
     }
 
     /// A large background fill: honours window opacity.
+    /// A region's background (top bar, sidebar, whatever fills the stage):
+    /// translucent with the window (decision 8).
     pub fn bg(&self, c: Rgba) -> Hsla {
         let mut h = hsla(c);
         h.a *= self.opacity;
         h
+    }
+
+    /// A surface inside a region (Live, Changes, an editor…). While the window
+    /// is translucent it paints nothing: two translucent layers on one pixel
+    /// would let less of the desktop through than the slider says.
+    pub fn surface(&self, c: Rgba) -> Hsla {
+        if self.opacity < 1.0 { gpui::transparent_black() } else { hsla(c) }
     }
 
     pub fn background_appearance(&self) -> WindowBackgroundAppearance {

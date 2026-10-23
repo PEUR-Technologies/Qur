@@ -121,6 +121,8 @@ enum Overlay {
     Setup(Entity<SetupView>),
     /// Qur > Accent Color….
     Accent,
+    /// Right-click on an agent's button: its commands, at the pointer.
+    AgentMenu { id: String, at: gpui::Point<Pixels> },
     /// View > Choose Stage Layout….
     Layouts,
     /// About Qur (M7).
@@ -825,6 +827,7 @@ impl Workspace {
                         // Dev/test: QUR_DEBUG_BROWSER_URL="http://localhost:8765/{slug}/index.html".
                         browser_url: std::env::var("QUR_DEBUG_BROWSER_URL").ok().map(|u| u.replace("{slug}", &c.slug)),
                         renamed: false,
+                        in_root: false,
                     };
                     let debug_browser = std::env::var_os("QUR_DEBUG_BROWSER_URL").is_some();
                     match def.mode {
@@ -897,6 +900,34 @@ impl Workspace {
     /// Claude task in its own worktree, titled by its first typed line.
     fn new_agent_terminal(&mut self, _: &qur::NewAgentTerminal, window: &mut Window, cx: &mut Context<Self>) {
         let n = self.term_tasks.len() + 1;
+        // Like a normal terminal, the first one works in the project folder
+        // itself. While one does, more get their own worktree so two agents
+        // never edit the same files.
+        let root_busy = self.term_tasks.iter().any(|t| t.record.in_root) || self.agents.iter().any(|a| a.read(cx).record.in_root);
+        if !root_busy {
+            let root = self.root.clone();
+            let git = |args: &[&str]| qur_worktree::git(&root, args).ok();
+            let record = TaskRecord {
+                id: format!("root-{n}"),
+                agent: "claude-terminal".into(),
+                title: format!("agent terminal {n}"),
+                branch: git(&["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default(),
+                worktree: root.clone(),
+                base: git(&["rev-parse", "HEAD"]).unwrap_or_default(),
+                session_id: None,
+                created: qur_agents::now_secs(),
+                mode: Mode::Terminal,
+                browser_url: None,
+                renamed: false,
+                in_root: true,
+            };
+            let id = record.id.clone();
+            self.add_term_task(record, window, cx);
+            self.apply_look(window, cx);
+            self.save_tasks(cx);
+            self.select(Some(Selected::TermTask(id)), window, cx);
+            return;
+        }
         let slug = format!("term-{n}");
         let root = self.root.clone();
         let dir = qur_agents::worktrees_dir(&self.project_id);
@@ -925,6 +956,7 @@ impl Workspace {
                         mode: Mode::Terminal,
                         browser_url: None,
                         renamed: false,
+                        in_root: false,
                     };
                     this.add_term_task(record, window, cx);
                     this.apply_look(window, cx);
@@ -1329,6 +1361,9 @@ impl Workspace {
     /// touching the user's index or stash. Conflicts open in the editor.
     fn merge_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some((wt, branch, title, changes)) = self.task_parts(id, cx) else { return };
+        if self.in_root(id, cx) {
+            return self.flash("This agent works in your project folder: its changes are already there (commit them in Source Control)", cx);
+        }
         if self.merge.is_some() {
             return self.flash("A merge is already in progress: finish or abort it first (Git panel)", cx);
         }
@@ -1455,10 +1490,19 @@ impl Workspace {
         handle
     }
 
+    fn in_root(&self, id: &str, cx: &App) -> bool {
+        self.agent(id).is_some_and(|a| a.read(cx).record.in_root) || self.term_task(id).is_some_and(|t| t.record.in_root)
+    }
+
     fn remove_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some((wt, branch, _, _)) = self.task_parts(id, cx) else { return };
+        let in_root = self.in_root(id, cx);
         let handle = self.stop_task(id, &wt, cx);
         self.save_tasks(cx);
+        if in_root {
+            // Its work is your folder: close it, delete nothing.
+            return cx.notify();
+        }
         let root = self.root.clone();
         let bg = cx.background_executor().clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -1954,6 +1998,22 @@ impl Workspace {
     /// Discard: stop the agent, remove its worktree and branch (asks first).
     fn discard_task(&mut self, _: &qur::DiscardTask, window: &mut Window, cx: &mut Context<Self>) {
         let Some((id, wt, branch)) = self.selected_worktree(cx) else { return };
+        if self.in_root(&id, cx) {
+            // Works in the project folder: closing it stops it; files stay.
+            let answer = ask(window, PromptLevel::Info, "Close this agent?", Some("It stops the agent. Its edits stay in your project folder."), &["Close Agent", "Cancel"], cx);
+            cx.spawn_in(window, async move |this, cx| {
+                if answer.await.ok() == Some(0) {
+                    this.update_in(cx, |this, window, cx| {
+                        this.remove_task(&id, window, cx);
+                        let next = this.session_order().into_iter().next();
+                        this.select(next, window, cx);
+                    })
+                    .ok();
+                }
+            })
+            .detach();
+            return;
+        }
         let dirty = qur_worktree::is_dirty(&wt);
         let detail = format!(
             "This stops the agent and deletes its worktree and branch {branch}.{}",
@@ -2658,6 +2718,82 @@ impl Workspace {
         }
     }
 
+    fn open_agent_menu(&mut self, which: Selected, at: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let id = match &which {
+            Selected::Agent(id) | Selected::TermTask(id) => id.clone(),
+            _ => return,
+        };
+        self.close_overlays(window, cx);
+        self.select(Some(which), window, cx);
+        self.prev_focus = window.focused(cx);
+        self.overlay = Some(Overlay::AgentMenu { id, at });
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn agent_menu(&self, id: &str, at: gpui::Point<Pixels>, look: &Look, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let ui = &look.theme.ui;
+        let in_root = self.in_root(id, cx);
+        let acp = self.agent(id).is_some();
+        type Make = fn() -> Box<dyn gpui::Action>;
+        let mut items: Vec<(&'static str, Make, bool, bool)> = vec![
+            ("Rename…", || Box::new(qur::RenameAgent), true, false),
+            ("Review Changes", || Box::new(qur::ReviewChanges), true, false),
+            ("Merge into My Branch", || Box::new(qur::Merge), !in_root, false),
+            ("Run Checks Now", || Box::new(qur::RunChecks), true, false),
+            ("Run Project", || Box::new(qur::RunProject), true, false),
+            ("Reveal in Finder", || Box::new(qur::RevealWorktree), true, false),
+            ("Open Folder in Terminal", || Box::new(qur::OpenWorktreeInTerminal), true, false),
+        ];
+        if acp {
+            items.push(("Stop", || Box::new(qur::StopAgent), true, false));
+        }
+        items.push((if in_root { "Close Agent…" } else { "Delete Agent…" }, || Box::new(qur::DiscardTask), true, true));
+        let n = items.len();
+        div()
+            .absolute()
+            .left(at.x)
+            .top(at.y)
+            .child(
+                div()
+                    .id("agent-menu")
+                    .occlude()
+                    .min_w(look.z(210.))
+                    .py(look.z(4.))
+                    .flex()
+                    .flex_col()
+                    .bg(look.c(ui.overlay_bg))
+                    .border_1()
+                    .border_color(look.c(ui.border_strong))
+                    .rounded(look.z(6.))
+                    .shadow_md()
+                    .children(items.into_iter().enumerate().flat_map(|(i, (label, make, enabled, danger))| {
+                        let sep = (danger && i + 1 == n).then(|| div().my(look.z(4.)).h(px(1.)).bg(look.c(ui.border)).into_any_element());
+                        let row = div()
+                            .id(("agent-menu-item", i))
+                            .mx(look.z(4.))
+                            .px(look.z(10.))
+                            .py(look.z(4.))
+                            .rounded(look.z(4.))
+                            .text_size(look.text(-1.))
+                            .text_color(look.c(if !enabled { ui.text_muted } else if danger { ui.error } else { ui.text }))
+                            .when(enabled, |d| d.cursor_pointer().hover(|d| d.bg(look.c(ui.hover_bg))))
+                            .child(label)
+                            .when(enabled, |d| {
+                                d.on_click(cx.listener(move |this, _, window, cx| {
+                                    this.overlay = None;
+                                    this.restore_focus(window, cx);
+                                    window.dispatch_action(make(), cx);
+                                    cx.notify();
+                                }))
+                            })
+                            .into_any_element();
+                        sep.into_iter().chain(std::iter::once(row))
+                    })),
+            )
+            .into_any_element()
+    }
+
     /// Qur > Accent Color…: pick which of the theme's accents leads (hover to
     /// preview, click to keep).
     fn accent_color(&mut self, _: &qur::AccentColor, window: &mut Window, cx: &mut Context<Self>) {
@@ -3026,6 +3162,7 @@ impl Workspace {
                     mode: Mode::Terminal,
                     browser_url: None,
                     renamed: false,
+                    in_root: false,
                 };
                 this.add_term_task(record, window, cx);
                 // Show the tree without starting a terminal process.
@@ -3295,6 +3432,10 @@ impl Workspace {
             let unread = self.unread.contains(&id);
             let row = self
                 .agent_button(format!("agent-{id}").into(), t.accent, t.record.title.clone(), badge, active, sel, look)
+                .on_mouse_down(MouseButton::Right, {
+                    let id = id.clone();
+                    cx.listener(move |this, ev: &gpui::MouseDownEvent, window, cx| this.open_agent_menu(Selected::Agent(id.clone()), ev.position, window, cx))
+                })
                 .when(unread, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
                 .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
                     this.select(Some(Selected::Agent(id.clone())), window, cx);
@@ -3314,6 +3455,10 @@ impl Workspace {
             let badge = with_check(if s.is_some() { String::new() } else { "stopped".to_string() }, self.checks.get(&id));
             let row = self
                 .agent_button(format!("tt-{id}").into(), t.accent, title, badge, busy, sel, look)
+                .on_mouse_down(MouseButton::Right, {
+                    let id = id.clone();
+                    cx.listener(move |this, ev: &gpui::MouseDownEvent, window, cx| this.open_agent_menu(Selected::TermTask(id.clone()), ev.position, window, cx))
+                })
                 .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
                     this.select(Some(Selected::TermTask(id.clone())), window, cx);
                     if ev.click_count() == 2 {
@@ -3447,18 +3592,20 @@ impl Workspace {
             }
             Some(Selected::TermTask(id)) => {
                 if let Some(t) = self.term_task(id) {
-                    let term = div().size_full().bg(look.bg(ui.panel_bg)).pt(look.z(6.)).child(self.terms.clone());
+                    let term = div().size_full().bg(look.surface(ui.panel_bg)).pt(look.z(6.)).child(self.terms.clone());
                     // The agent's terminal is the whole stage (decision 27). Review
                     // Changes still swaps it for the diff until Keep Working.
                     // An arrangeable dock too (dock.rs); by default the
                     // terminal fills it (decision 27).
                     let mut term = Some(term);
-                    return dock::render(dock::Kind::Terminal, look, cx, &mut |p, _| match p {
+                    let dock = dock::render(dock::Kind::Terminal, look, cx, &mut |p, _| match p {
                         dock::Panel::Session => term.take().map(|t| t.into_any_element()).unwrap_or_else(|| div().into_any_element()),
                         dock::Panel::Live => div().size_full().child(t.live.clone()).into_any_element(),
                         dock::Panel::Changes => div().size_full().child(t.changes.clone()).into_any_element(),
                         _ => div().into_any_element(),
                     });
+                    // The stage region's one translucent layer.
+                    return div().size_full().bg(look.bg(ui.panel_bg)).child(dock).into_any_element();
                 }
             }
             Some(Selected::Shell(_)) => {
@@ -3589,6 +3736,7 @@ impl Workspace {
             Overlay::Setup(s) => Some(centered(s.clone().into_any_element())),
             Overlay::About => Some(centered(self.about_box(look, cx))),
             Overlay::Accent => Some(centered(self.accent_box(look, cx))),
+            Overlay::AgentMenu { id, at } => Some(self.agent_menu(id, *at, look, cx)),
             Overlay::Layouts => Some(centered(self.layouts_box(look, cx))),
             Overlay::GoTo(g) | Overlay::Rename(g) => Some(centered(
                 div()
@@ -3619,7 +3767,7 @@ impl Workspace {
                             .text_size(look.text(-1.))
                             .text_color(look.c(if i == chosen { ui.text } else { ui.text_muted }))
                             .when(i == chosen, |d| d.bg(look.c(ui.active_bg)))
-                            .child(format!("{}{}", a.label, if a.mode == Mode::Terminal { " (terminal)" } else { "" }))
+                            .child(if a.mode == Mode::Terminal && !a.label.to_lowercase().contains("terminal") { format!("{} (terminal)", a.label) } else { a.label.clone() })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(Overlay::NewTask { agent, .. }) = &mut this.overlay {
                                     *agent = i;
@@ -3927,7 +4075,8 @@ impl Render for Workspace {
             .flex_col()
             .font_family(look.ui_font.clone())
             .text_color(look.c(ui.text))
-            .bg(look.bg(ui.window_bg))
+            // Regions paint their own (translucent) backgrounds.
+            .bg(look.surface(ui.window_bg))
             .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(Self::hide))
             .on_action(cx.listener(Self::hide_others))

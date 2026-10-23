@@ -1302,7 +1302,7 @@ impl Element for EditorElement {
 
         window.handle_input(&focus, ElementInputHandler::new(bounds, self.view.clone()), cx);
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            window.paint_quad(fill(bounds, look.bg(look.theme.ui.editor_bg)));
+            window.paint_quad(fill(bounds, look.surface(look.theme.ui.editor_bg)));
             for q in under {
                 window.paint_quad(q);
             }
@@ -1401,7 +1401,7 @@ impl Render for EditorView {
                 .gap(look.z(4.))
                 .px(look.z(8.))
                 .py(look.z(6.))
-                .bg(look.bg(ui.panel_bg))
+                .bg(look.surface(ui.panel_bg))
                 .border_b_1()
                 .border_color(look.c(ui.border))
                 .text_size(look.text(0.))

@@ -214,6 +214,6 @@ impl Render for LivePane {
                 .child(format!("Waiting for {} to open a file…", self.agent))
                 .into_any_element(),
         };
-        div().size_full().flex().flex_col().bg(look.bg(ui.editor_bg)).child(header).child(body)
+        div().size_full().flex().flex_col().bg(look.surface(ui.editor_bg)).child(header).child(body)
     }
 }

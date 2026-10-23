@@ -19,10 +19,33 @@ pub fn login_path() -> &'static str {
     static PATH: OnceLock<String> = OnceLock::new();
     PATH.get_or_init(|| {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-        let out = std::process::Command::new(&shell).args(["-l", "-c", "printf %s \"$PATH\""]).output();
-        match out {
-            Ok(o) if o.status.success() && !o.stdout.is_empty() => String::from_utf8_lossy(&o.stdout).into_owned(),
-            _ => std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".into()),
+        // Interactive too (-i): many setups add ~/.local/bin, nvm or Homebrew in
+        // ~/.zshrc, which a plain login shell skips; launched from Finder, Qur
+        // would then not find `claude`. Markers keep startup chatter out.
+        let out = std::process::Command::new(&shell)
+            .args(["-l", "-i", "-c", "printf '\\n__QUR_PATH__%s__QUR_END__' \"$PATH\""])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output();
+        let found = out.ok().and_then(|o| {
+            let text = String::from_utf8_lossy(&o.stdout).into_owned();
+            let start = text.rfind("__QUR_PATH__")? + "__QUR_PATH__".len();
+            let end = text[start..].find("__QUR_END__")? + start;
+            Some(text[start..end].to_string()).filter(|p| !p.is_empty())
+        });
+        let fallback = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".into());
+        match found {
+            // Keep anything the app's own PATH has that the shell's lacks.
+            Some(p) => {
+                let mut dirs: Vec<&str> = p.split(':').collect();
+                for d in fallback.split(':') {
+                    if !dirs.contains(&d) {
+                        dirs.push(d);
+                    }
+                }
+                dirs.join(":")
+            }
+            None => fallback,
         }
     })
 }
@@ -187,6 +210,10 @@ pub struct TaskRecord {
     /// the agent's terminal title.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub renamed: bool,
+    /// Works in the project folder itself, not a worktree (the first Agent
+    /// Terminal, like a normal terminal). Nothing to merge or delete.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_root: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -280,6 +307,7 @@ mod tests {
             mode: Mode::Acp,
             browser_url: None,
             renamed: false,
+            in_root: false,
         });
         let body = toml_edit::ser::to_string_pretty(&s).unwrap();
         let back: TaskStore = toml_edit::de::from_str(&body).unwrap();
