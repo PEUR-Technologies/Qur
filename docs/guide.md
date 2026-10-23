@@ -75,7 +75,7 @@ One window is one project. There's no permanent editor area: the window is for a
 - **Browser with Inspect.** Open your dev server next to the agent, pick elements or text, and ask the agent to adjust them. It gets the selector, HTML, key CSS, the source location when available, and a screenshot. Uses the system WebKit, freed when idle.
 - **Run Project in Worktree.** Starts your dev server in the agent's worktree on its own port and opens it in that agent's Browser, so parallel agents never collide. Localhost only; stopped on Discard, Merge cleanup or quit.
 
-![Browser + Inspect on peur.ph: pick an element, ask the agent](images/browser-inspect.jpg)
+![Browser + Inspect on peur.ph: pick an element, ask the agent](images/browser-inspect.png)
 
 ### Review and merge
 

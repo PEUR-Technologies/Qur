@@ -14,7 +14,7 @@ Rust + GPUI · no Electron · runs locally · uses your Claude Code login, not a
 
 ![Sidebar with agents, terminals, git and the file heatmap; the stage shows the agent's session and the file it's editing](docs/images/window.svg)
 
-![Browser + Inspect: pick an element, ask the agent](docs/images/browser-inspect.jpg)
+![Browser + Inspect: pick an element, ask the agent](docs/images/browser-inspect.png)
 
 ## Light
 

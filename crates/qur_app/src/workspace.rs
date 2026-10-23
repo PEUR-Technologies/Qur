@@ -334,7 +334,7 @@ impl Workspace {
             t.accents.rotate_left(k);
             theme = std::sync::Arc::new(t);
         }
-        let min = theme.min_opacity().max(qur_theme::MIN_OPACITY);
+        let min = qur_theme::MIN_OPACITY;
         let code_font = if self.config.editor.font_family.is_empty() { default_code_font(cx) } else { self.config.editor.font_family.clone() };
         let look = Look {
             opacity: eff.opacity.clamp(min, 1.0),
@@ -3100,7 +3100,7 @@ impl Workspace {
 
     fn set_opacity(&mut self, opacity: f32, blur: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Overlay::Transparency { project_scope }) = self.overlay else { return };
-        let min = Look::of(window, cx).theme.min_opacity().max(qur_theme::MIN_OPACITY);
+        let min = qur_theme::MIN_OPACITY;
         let opacity = ((opacity.clamp(min, 1.0)) * 100.).round() / 100.;
         if project_scope {
             self.project.window.opacity = Some(opacity);
@@ -3132,7 +3132,7 @@ impl Workspace {
         if b.size.width <= px(0.) {
             return;
         }
-        let min = Look::of(window, cx).theme.min_opacity().max(qur_theme::MIN_OPACITY);
+        let min = qur_theme::MIN_OPACITY;
         let t = ((x - b.left()) / b.size.width).clamp(0., 1.);
         let blur = self.effective().blur;
         self.set_opacity(min + (1. - min) * t, blur, window, cx);
@@ -3835,7 +3835,7 @@ impl Workspace {
 
     fn transparency_popover(&self, project_scope: bool, look: &Look, cx: &mut Context<Self>) -> gpui::AnyElement {
         let ui = &look.theme.ui;
-        let min = look.theme.min_opacity().max(qur_theme::MIN_OPACITY);
+        let min = qur_theme::MIN_OPACITY;
         let pct = (look.opacity * 100.).round() as i32;
         let t = if min < 1. { (look.opacity - min) / (1. - min) } else { 1. };
         let slider = self.slider.clone();
@@ -3995,7 +3995,7 @@ const CONFIG_TEMPLATE: &str = r#"# Qur settings. Saved changes apply right away.
 # theme = "Auto"            # Auto follows macOS: Qur Light / Qur Dark
 
 [window]
-# opacity = 1.0             # 0.5 to 1.0
+# opacity = 1.0             # 0.6 to 1.0
 # blur = true
 
 [editor]

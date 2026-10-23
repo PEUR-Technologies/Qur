@@ -16,11 +16,11 @@ use std::sync::{Arc, OnceLock};
 mod color;
 mod schema;
 
-/// Absolute floor of the window opacity slider (decision 8). Each theme has
-/// its own, usually higher, floor: [`Theme::min_opacity`], the lowest opacity
-/// that keeps its text at 4.5:1 over a pure white and a pure black desktop.
-/// The app clamps to `max(MIN_OPACITY, theme.min_opacity())`.
-pub const MIN_OPACITY: f32 = 0.5;
+/// Floor of the window opacity slider: 60% to 100% on every theme (owner,
+/// decision 38). [`Theme::min_opacity`] still reports each theme's lowest
+/// opacity that keeps text at 4.5:1 over a pure white and a pure black
+/// desktop, but the slider no longer stops there.
+pub const MIN_OPACITY: f32 = 0.6;
 
 /// sRGB color with alpha, `0xRRGGBBAA`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -279,7 +279,7 @@ fn opacity_floor(ui: &UiColors, editor_text: Rgba) -> f32 {
             })
         })
     };
-    let steps = (MIN_OPACITY * 100.0).round() as u32..=100;
+    let steps = 50u32..=100;
     steps.map(|i| i as f32 / 100.0).find(|&op| readable(op)).unwrap_or(1.0)
 }
 
