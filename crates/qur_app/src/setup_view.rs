@@ -1,15 +1,18 @@
-//! The first-run picker (handoff section 13, M6): agents found on PATH (with
-//! a Check), the stage layout, keys (VS Code or + Vim), and the theme with
-//! live previews. Saves config.toml and agents.toml. Shown once on a new
-//! install; Qur > Setup… reopens it.
+//! The first-run picker (handoff section 13, M6): AI accounts to connect
+//! (install, sign in, agents found on PATH with a Check; decision 45), the
+//! stage layout, keys (VS Code or + Vim), and the theme with live previews.
+//! Saves config.toml and agents.toml. Shown once on a new install; Qur >
+//! Setup… reopens it.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use gpui::{Context, EventEmitter, FocusHandle, Window, div, prelude::*, px, svg};
+use gpui::{Context, EventEmitter, FocusHandle, Task, Window, div, prelude::*, px, svg};
 use qur_agents::{AgentDef, Mode};
 use qur_theme::{Registry, Theme};
 
 use crate::assets;
+use crate::doctor::Login;
 use crate::look::Look;
 
 /// Agents Qur knows how to run (Codex since decision 44). Others can be
@@ -22,6 +25,42 @@ const KNOWN: &[(&str, &str, Mode, &str, Option<&str>)] = &[
     ("codex-cli", "Codex (terminal)", Mode::Terminal, "codex", Some("arg")),
     ("aider", "Aider (terminal)", Mode::Terminal, "aider", Some("--message")),
 ];
+
+/// An AI account Setup connects (decision 45): a CLI the user signs in to,
+/// and Qur's ACP adapter for it, both installed with npm.
+struct Service {
+    name: &'static str,
+    plan: &'static str,
+    cli: &'static str,
+    /// (command, npm package): the CLI, then the adapter, pinned as tested.
+    packages: [(&'static str, &'static str); 2],
+    /// Its agents in `KNOWN`: over ACP, then in a terminal.
+    agents: [&'static str; 2],
+}
+
+const SERVICES: [Service; 2] = [
+    Service {
+        name: "Claude",
+        plan: "Uses your Claude Pro or Max plan",
+        cli: "claude",
+        packages: [("claude", "@anthropic-ai/claude-code"), ("claude-agent-acp", "@agentclientprotocol/claude-agent-acp@0.94.0")],
+        agents: ["claude", "claude-cli"],
+    },
+    Service {
+        name: "ChatGPT (Codex)",
+        plan: "Uses your ChatGPT Plus, Pro or Business plan",
+        cli: "codex",
+        packages: [("codex", "@openai/codex"), ("codex-acp", "@zed-industries/codex-acp@0.16.0")],
+        agents: ["codex", "codex-cli"],
+    },
+];
+
+/// What Setup waits for while an install or sign-in runs in a terminal.
+#[derive(Clone, Copy, PartialEq)]
+enum Wait {
+    Install,
+    SignIn,
+}
 
 #[derive(Clone, PartialEq)]
 enum Check {
@@ -47,6 +86,10 @@ pub struct Choices {
 }
 
 pub enum SetupEvent {
+    /// Install or sign in: Setup steps aside while this runs in a terminal.
+    RunInTerminal { label: String, command: String },
+    /// That step finished: show Setup again.
+    Ready(String),
     /// Live preview while choosing.
     PreviewTheme(String),
     PreviewAccent(usize),
@@ -61,6 +104,11 @@ pub struct SetupView {
     vim: bool,
     theme: String,
     accent: usize,
+    /// Each service's sign-in; `None` while checking.
+    logins: [Option<Login>; 2],
+    npm: bool,
+    waiting: Option<(usize, Wait)>,
+    _watch: Option<Task<()>>,
 }
 
 impl EventEmitter<SetupEvent> for SetupView {}
@@ -71,9 +119,12 @@ impl SetupView {
             .iter()
             .map(|(id, label, mode, command, prompt)| {
                 let existing = roster.get(id).cloned();
-                let path = qur_agents::which(command);
+                let path = qur_agents::which(existing.as_ref().map_or(*command, |d| d.command.as_str()));
                 Found {
-                    enabled: existing.is_some() || (path.is_some() && *id == "claude"),
+                    // Only what's installed: agents.toml starts out listing
+                    // Claude Code whether or not it is. Signing in or
+                    // installing later ticks the account's agent (`set_login`).
+                    enabled: path.is_some() && (existing.is_some() || *id == "claude"),
                     def: existing.unwrap_or(AgentDef {
                         id: id.to_string(),
                         label: label.to_string(),
@@ -93,7 +144,148 @@ impl SetupView {
         let custom = crate::dock::Docks::get(cx, crate::dock::Kind::Acp) != crate::dock::Dock::preset(crate::dock::Kind::Acp, preset)
             || crate::dock::Docks::get(cx, crate::dock::Kind::Terminal) != crate::dock::Dock::preset(crate::dock::Kind::Terminal, preset);
         let layout = if custom { "yours".to_string() } else { config.peek_layout.clone() };
-        SetupView { focus: cx.focus_handle(), agents, layout, vim: config.keys.vim, theme: config.theme.clone(), accent: config.ui.accent % 6 }
+        let mut this = SetupView {
+            focus: cx.focus_handle(),
+            agents,
+            layout,
+            vim: config.keys.vim,
+            theme: config.theme.clone(),
+            accent: config.ui.accent % 6,
+            logins: [None, None],
+            npm: false,
+            waiting: None,
+            _watch: None,
+        };
+        this.refresh(cx);
+        this
+    }
+
+    pub fn theme(&self) -> &str {
+        &self.theme
+    }
+
+    /// Look again: what's installed, and each sign-in.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.refresh_paths();
+        for ix in 0..SERVICES.len() {
+            self.check_login(ix, cx);
+        }
+    }
+
+    fn refresh_paths(&mut self) {
+        for f in &mut self.agents {
+            f.path = qur_agents::which(&f.def.command);
+        }
+        self.npm = qur_agents::which("npm").is_some();
+    }
+
+    /// Installed: from the agents' paths (refreshed by `refresh_paths`).
+    fn found(&self, bin: &str) -> bool {
+        self.agents.iter().find(|f| f.def.command == bin).map(|f| f.path.is_some()).unwrap_or_else(|| qur_agents::which(bin).is_some())
+    }
+
+    fn missing(&self, ix: usize) -> Vec<(&'static str, &'static str)> {
+        SERVICES[ix].packages.iter().copied().filter(|(bin, _)| !self.found(bin)).collect()
+    }
+
+    fn check_login(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let cli = SERVICES[ix].cli;
+        if qur_agents::which(cli).is_none() {
+            self.logins[ix] = None;
+            return;
+        }
+        self.logins[ix] = None;
+        let bg = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let login = bg.spawn(async move { crate::doctor::login(cli) }).await;
+            this.update(cx, |this, cx| this.set_login(ix, login, cx)).ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// A sign-in found: with no agent chosen yet, use this account's ACP one.
+    fn set_login(&mut self, ix: usize, login: Login, cx: &mut Context<Self>) {
+        if matches!(login, Login::In(_))
+            && !self.agents.iter().any(|f| f.enabled)
+            && let Some(f) = self.agents.iter_mut().find(|f| f.def.id == SERVICES[ix].agents[0] && f.path.is_some())
+        {
+            f.enabled = true;
+        }
+        self.logins[ix] = Some(login);
+        cx.notify();
+    }
+
+    fn connected(&self, ix: usize) -> bool {
+        self.missing(ix).is_empty() && matches!(self.logins[ix], Some(Login::In(_)))
+    }
+
+    fn install(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let packages = self.missing(ix).iter().map(|(_, p)| *p).collect::<Vec<_>>().join(" ");
+        self.run(ix, Wait::Install, format!("Install {}", SERVICES[ix].name), format!("npm install -g {packages}"), cx);
+    }
+
+    fn sign_in(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let cli = SERVICES[ix].cli;
+        self.run(ix, Wait::SignIn, format!("Sign in to {}", SERVICES[ix].name), crate::doctor::login_command(cli).to_string(), cx);
+    }
+
+    /// Run a step in a Qur terminal, where the user can see it (and answer
+    /// it), then watch for it to take effect and come back.
+    fn run(&mut self, ix: usize, wait: Wait, label: String, command: String, cx: &mut Context<Self>) {
+        self.waiting = Some((ix, wait));
+        cx.emit(SetupEvent::RunInTerminal { label, command });
+        let bg = cx.background_executor().clone();
+        self._watch = Some(cx.spawn(async move |this, cx| {
+            // Ten minutes, then the user reopens Setup by hand.
+            for _ in 0..200 {
+                bg.timer(Duration::from_secs(3)).await;
+                let Ok(still) = this.update(cx, |t, cx| {
+                    t.refresh_paths();
+                    cx.notify();
+                    t.waiting == Some((ix, wait))
+                }) else {
+                    return;
+                };
+                if !still {
+                    return;
+                }
+                let done = match wait {
+                    Wait::Install => this.update(cx, |t, _| t.missing(ix).is_empty()).unwrap_or(false),
+                    Wait::SignIn => {
+                        let cli = SERVICES[ix].cli;
+                        let login = bg.spawn(async move { crate::doctor::login(cli) }).await;
+                        let signed = matches!(login, Login::In(_));
+                        if signed {
+                            this.update(cx, |t, cx| t.set_login(ix, login, cx)).ok();
+                        }
+                        signed
+                    }
+                };
+                if done {
+                    this.update(cx, |t, cx| {
+                        t.waiting = None;
+                        let name = SERVICES[ix].name;
+                        let msg = match wait {
+                            Wait::Install => {
+                                t.check_login(ix, cx);
+                                format!("{name} is installed. Next: sign in.")
+                            }
+                            Wait::SignIn => format!("{name} is connected"),
+                        };
+                        cx.emit(SetupEvent::Ready(msg));
+                    })
+                    .ok();
+                    return;
+                }
+            }
+            this.update(cx, |t, cx| {
+                t.waiting = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     /// ACP agents: start them and run `initialize` on the user's own login.
@@ -194,10 +386,46 @@ impl Render for SetupView {
                 .text_color(look.c(if on { ui.text } else { ui.text_secondary }))
                 .child(label)
         };
-        // 1. Agents
-        let agents = self.agents.iter().enumerate().map(|(i, f)| {
+        // 1. AI accounts (decision 45): install, sign in, then which agents.
+        let primary = |id: (&'static str, usize), label: String| {
+            div()
+                .id(id)
+                .flex_none()
+                .px(look.z(12.))
+                .py(look.z(4.))
+                .rounded(look.z(5.))
+                .cursor_pointer()
+                .text_size(look.text(-1.))
+                .bg(look.c(ui.button_primary_bg))
+                .text_color(look.c(ui.button_primary_text))
+                .child(label)
+        };
+        let note = |text: String, color| div().flex_1().min_w(px(0.)).truncate().text_size(look.text(-2.)).text_color(look.c(color)).child(text);
+        let step = |n: &'static str, title: &'static str, done: bool| {
+            div()
+                .flex()
+                .items_center()
+                .gap(look.z(8.))
+                .py(look.z(3.))
+                .child(
+                    div()
+                        .flex_none()
+                        .size(look.z(16.))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(look.text(-3.))
+                        .border_1()
+                        .border_color(look.c(if done { ui.text_secondary } else { ui.border_strong }))
+                        .text_color(look.c(if done { ui.text } else { ui.text_secondary }))
+                        .child(if done { "✓" } else { n }),
+                )
+                .child(div().w(look.z(140.)).flex_none().text_size(look.text(-1.)).text_color(look.c(ui.text)).child(title))
+        };
+        let agent_row = |i: usize, f: &Found| {
             let status = match (&f.path, &f.check) {
-                (None, _) => format!("{} not found on PATH", f.def.command),
+                (None, _) => format!("needs {}", f.def.command),
                 (Some(_), Check::NotRun) => f.def.command.clone(),
                 (Some(_), Check::Running) => "checking…".into(),
                 (Some(_), Check::Ok(s)) => format!("✓ {s}"),
@@ -231,13 +459,82 @@ impl Render for SetupView {
                 .child(div().w(look.z(190.)).flex_none().text_size(look.text(-1.)).text_color(look.c(if f.path.is_some() { ui.text } else { ui.text_muted })).child(f.def.label.clone()))
                 .child(div().flex_1().min_w(px(0.)).truncate().text_size(look.text(-2.)).text_color(look.c(match f.check {
                     Check::Failed(_) => ui.error,
-                    Check::Ok(_) => ui.success,
+                    Check::Ok(_) => ui.text_secondary,
                     _ => ui.text_muted,
                 })).child(status))
                 .when(f.path.is_some(), |d| {
                     d.child(pill(("agent-check", i), "Check".into(), false).on_click(cx.listener(move |this, _, _, cx| this.check(i, cx))))
                 })
+        };
+        let cards = SERVICES.iter().enumerate().map(|(ix, svc)| {
+            let missing = self.missing(ix);
+            let installed = missing.is_empty();
+            let waiting = self.waiting.filter(|(w, _)| *w == ix).map(|(_, wait)| wait);
+            // ① Install
+            let mut install = step("1", "Install", installed);
+            install = if installed {
+                install.child(note("Installed".into(), ui.text_secondary))
+            } else if waiting == Some(Wait::Install) {
+                install.child(note("Installing in a terminal… Setup comes back when it's done".into(), ui.text_muted))
+            } else if !self.npm {
+                install
+                    .child(note("Needs Node.js first (it comes with npm)".into(), ui.text_muted))
+                    .child(pill(("svc-recheck", ix), "Check again".into(), false).on_click(cx.listener(|this, _, _, cx| this.refresh(cx))))
+                    .child(primary(("svc-node", ix), "Get Node.js".into()).on_click(cx.listener(|_, _, _, cx| cx.open_url("https://nodejs.org/en/download"))))
+            } else {
+                let packages = missing.iter().map(|(_, p)| *p).collect::<Vec<_>>().join(" ");
+                install
+                    .child(note(format!("Runs npm install -g {packages}"), ui.text_muted))
+                    .child(primary(("svc-install", ix), "Install".into()).on_click(cx.listener(move |this, _, _, cx| this.install(ix, cx))))
+            };
+            // ② Sign in
+            let mut sign = step("2", "Sign in", self.connected(ix));
+            let cli_found = self.found(svc.cli);
+            sign = match (&self.logins[ix], waiting) {
+                _ if !cli_found => sign.child(note("Install first".into(), ui.text_muted)),
+                (_, Some(Wait::SignIn)) => sign.child(note("Finish signing in in your browser… Setup comes back when it's done".into(), ui.text_muted)),
+                (None, _) => sign.child(note("Checking…".into(), ui.text_muted)),
+                (Some(Login::In(who)), _) => sign.child(note(who.clone(), ui.text_secondary)),
+                (Some(Login::Out), _) => sign
+                    .child(note("Not signed in. Opens your browser, where you may already be signed in.".into(), ui.text_muted))
+                    .child(primary(("svc-sign-in", ix), "Sign in".into()).on_click(cx.listener(move |this, _, _, cx| this.sign_in(ix, cx)))),
+                (Some(Login::Unknown(e)), _) => sign
+                    .child(note(e.clone(), ui.error))
+                    .child(pill(("svc-login-again", ix), "Check again".into(), false).on_click(cx.listener(move |this, _, _, cx| this.check_login(ix, cx))))
+                    .child(pill(("svc-sign-in-anyway", ix), "Sign in".into(), false).on_click(cx.listener(move |this, _, _, cx| this.sign_in(ix, cx)))),
+            };
+            let rows = self.agents.iter().enumerate().filter(|(_, f)| svc.agents.contains(&f.def.id.as_str())).map(|(i, f)| agent_row(i, f)).collect::<Vec<_>>();
+            div()
+                .mb(look.z(8.))
+                .p(look.z(10.))
+                .rounded(look.z(6.))
+                .border_1()
+                .border_color(look.c(ui.border))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap(look.z(8.))
+                        .mb(look.z(4.))
+                        .child(div().text_size(look.text(0.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(look.c(ui.text)).child(svc.name))
+                        .child(div().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(svc.plan)),
+                )
+                .child(install)
+                .child(sign)
+                .child(div().mt(look.z(4.)).text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child("Use in Qur"))
+                .children(rows)
         }).collect::<Vec<_>>();
+        // Agents outside the two accounts (Aider): only when installed or chosen.
+        let others = self
+            .agents
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| !SERVICES.iter().any(|s| s.agents.contains(&f.def.id.as_str())) && (f.path.is_some() || f.enabled))
+            .map(|(i, f)| agent_row(i, f))
+            .collect::<Vec<_>>();
+        let any_connected = (0..SERVICES.len()).any(|ix| self.connected(ix));
         // 3. Layout: drawn as the panes they give you.
         let layout_row = crate::dock::layout_cards(&self.layout, &look, cx, |this: &mut SetupView, key, cx| {
             this.layout = key.to_string();
@@ -357,8 +654,10 @@ impl Render for SetupView {
                     )
                     .child(div().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child("by PEUR Technologies")),
             )
-            .child(heading("Agents"))
-            .children(agents)
+            .child(heading("Connect an AI account"))
+            .child(div().mb(look.z(6.)).text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child("Qur's agents run on a subscription you already have. No API keys, nothing extra to pay. Connect at least one."))
+            .children(cards)
+            .when(!others.is_empty(), |d| d.child(heading("Other agents")).children(others))
             .child(heading("Agent stage layout"))
             .child(layout_row)
             .child(heading("Keys"))
@@ -373,7 +672,11 @@ impl Render for SetupView {
                     .flex()
                     .items_center()
                     .gap(look.z(8.))
-                    .child(div().flex_1().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child("Saved to config.toml and agents.toml; edit them any time. Reopen with Qur > Setup…"))
+                    .child(div().flex_1().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(if any_connected {
+                        "Saved to config.toml and agents.toml; edit them any time. Reopen with Qur > Setup…"
+                    } else {
+                        "No AI account connected yet: agents won't run until you do. Connect one any time from Qur > Setup…"
+                    }))
                     .child(pill(("setup-skip", 0), "Cancel".into(), false).on_click(cx.listener(|_, _, _, cx| cx.emit(SetupEvent::Cancel))))
                     .child(
                         div()
@@ -385,7 +688,7 @@ impl Render for SetupView {
                             .text_size(look.text(-1.))
                             .bg(look.c(ui.button_primary_bg))
                             .text_color(look.c(ui.button_primary_text))
-                            .child("Done")
+                            .child(if any_connected { "Done" } else { "Skip for now" })
                             .on_click(cx.listener(|this, _, _, cx| this.done(cx))),
                     ),
             )

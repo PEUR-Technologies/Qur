@@ -180,6 +180,8 @@ pub struct Workspace {
     /// File picker shown over the New Agent Task dialog (`@` mentions).
     mention_over_dialog: Option<Entity<Picker>>,
     prev_focus: Option<FocusHandle>,
+    /// Setup, set aside while its install or sign-in runs in a terminal.
+    parked_setup: Option<Entity<SetupView>>,
     /// Back/forward history of files opened in the modal: (file, cursor).
     nav: Vec<(PathBuf, Point)>,
     nav_ix: usize,
@@ -287,6 +289,7 @@ impl Workspace {
             overlay: None,
             mention_over_dialog: None,
             prev_focus: None,
+            parked_setup: None,
             nav: Vec::new(),
             nav_ix: 0,
             message: None,
@@ -3195,8 +3198,40 @@ impl Workspace {
     fn open_setup(&mut self, _: &qur::CheckSetup, window: &mut Window, cx: &mut Context<Self>) {
         self.close_overlays(window, cx);
         self.prev_focus = window.focused(cx);
+        // Back from an install or sign-in: the same choices, looked at again.
+        if let Some(view) = self.parked_setup.take() {
+            view.update(cx, |v, cx| v.refresh(cx));
+            let theme = view.read(cx).theme().to_string();
+            if theme != self.config.theme {
+                self.preview_theme = Some(theme);
+                self.apply_look(window, cx);
+            }
+            let f = view.read(cx).focus.clone();
+            window.focus(&f, cx);
+            self.overlay = Some(Overlay::Setup(view));
+            cx.notify();
+            return;
+        }
         let view = cx.new(|cx| SetupView::new(&self.config, &self.roster, cx));
-        let sub = cx.subscribe_in(&view, window, |this, _, ev: &SetupEvent, window, cx| match ev {
+        let sub = cx.subscribe_in(&view, window, |this, view, ev: &SetupEvent, window, cx| match ev {
+            // Install or sign in, in a terminal of its own; Setup steps aside
+            // and comes back by itself when the step has worked.
+            SetupEvent::RunInTerminal { label, command } => {
+                this.close_overlays(window, cx);
+                this.parked_setup = Some(view.clone());
+                let root = this.root.clone();
+                let kind = Kind::Agent { task: label.clone(), command: command.clone() };
+                let Some(tid) = this.terms.update(cx, |p, cx| p.open(&root, kind, label.clone(), cx)) else { return };
+                this.shells.push(tid);
+                this.select(Some(Selected::Shell(tid)), window, cx);
+                this.flash(format!("{label}: Setup comes back when it's done (or Qur > Setup…)"), cx);
+            }
+            SetupEvent::Ready(msg) => {
+                if this.parked_setup.is_some() && this.overlay.is_none() {
+                    this.open_setup(&qur::CheckSetup, window, cx);
+                }
+                this.flash(msg.clone(), cx);
+            }
             SetupEvent::PreviewTheme(name) => {
                 this.preview_theme = Some(name.clone());
                 this.apply_look(window, cx);
@@ -3205,8 +3240,12 @@ impl Workspace {
                 this.preview_accent = Some(*k);
                 this.apply_look(window, cx);
             }
-            SetupEvent::Cancel => this.close_overlays(window, cx),
+            SetupEvent::Cancel => {
+                this.parked_setup = None;
+                this.close_overlays(window, cx);
+            }
             SetupEvent::Done(c) => {
+                this.parked_setup = None;
                 this.preview_theme = None;
                 this.write_setting(false, "theme", Some(c.theme.as_str().into()), cx);
                 let preset = matches!(c.layout.as_str(), "A" | "B" | "C");
