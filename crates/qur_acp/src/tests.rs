@@ -170,6 +170,12 @@ fn json_shapes_we_send() {
     assert_eq!(init.auth_methods.iter().map(|m| (m.id.as_str(), m.name.as_str(), m.terminal.is_some())).collect::<Vec<_>>(), [("chat-gpt", "ChatGPT", false)]);
     let e = AcpError::from_rpc(&json!({ "code": -32603, "message": "Internal error", "data": "boom" }));
     assert_eq!(e.to_string(), "Internal error: \"boom\" (-32603)");
+    assert_eq!(e.summary(), "boom");
+    // codex-acp: the API's error JSON as a string inside `data.message`.
+    let api = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.","code":"model_not_found"}}"#;
+    let e = AcpError::from_rpc(&json!({ "code": -32603, "message": "Internal error", "data": { "message": api, "codex_error_info": "other" } }));
+    assert_eq!(e.summary(), "The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.");
+    assert_eq!(AcpError::from_rpc(&json!({ "code": -32603, "message": "Internal error" })).summary(), "Internal error");
 }
 
 #[test]

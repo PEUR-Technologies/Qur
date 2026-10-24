@@ -127,6 +127,8 @@ enum ChatItem {
 #[derive(Clone)]
 struct Failure {
     title: String,
+    /// The readable reason, when the raw detail buries it (`AcpError::summary`).
+    summary: Option<String>,
     detail: Option<String>,
     resend: Option<Outgoing>,
 }
@@ -789,7 +791,7 @@ impl AgentTask {
 
     fn fail(&mut self, msg: String, cx: &mut Context<Self>) {
         self.sign_in = None;
-        self.push(ChatItem::Failure(Failure { title: "The agent couldn't start.".into(), detail: Some(msg.clone()), resend: None }));
+        self.push(ChatItem::Failure(Failure { title: "The agent couldn't start.".into(), summary: None, detail: Some(msg.clone()), resend: None }));
         self.set_status(Status::Error(msg), cx);
         if let Some(c) = self.client.take() {
             std::thread::spawn(move || c.shutdown(Duration::from_secs(2)));
@@ -1010,7 +1012,7 @@ impl AgentTask {
                     // Cut short (length limit, refusal, too many steps…): say so, offer Retry.
                     Ok(Ok(other)) => {
                         let title = other.describe(&t.def.label).unwrap_or_default();
-                        t.push(ChatItem::Failure(Failure { title, detail: None, resend: Some(sent) }));
+                        t.push(ChatItem::Failure(Failure { title, summary: None, detail: None, resend: Some(sent) }));
                         t.set_status(Status::Done, cx)
                     }
                     // Not signed in: the message waits at the front of the queue.
@@ -1024,8 +1026,11 @@ impl AgentTask {
                     Ok(Err(e)) if e.is_agent_exited() => {}
                     Ok(Err(e)) => {
                         let title = format!("{} couldn't finish this turn.", t.def.label);
-                        t.push(ChatItem::Failure(Failure { title, detail: Some(e.to_string()), resend: Some(sent) }));
-                        t.set_status(Status::Error(e.to_string()), cx)
+                        let summary = e.summary();
+                        // The raw text only when it says more than the summary.
+                        let detail = Some(e.to_string()).filter(|d| !d.starts_with(&summary));
+                        t.push(ChatItem::Failure(Failure { title, summary: Some(summary.clone()), detail, resend: Some(sent) }));
+                        t.set_status(Status::Error(summary), cx)
                     }
                     Err(_) => t.set_status(Status::Error("agent exited".into()), cx),
                 }
@@ -1281,7 +1286,7 @@ impl AgentTask {
                     // Mid-turn, Retry sends that turn's message again (restarting the agent).
                     let resend = self.last_sent.clone().filter(|_| matches!(self.status, Status::Working | Status::NeedsYou));
                     let detail = Some(tail_lines(stderr_tail.trim_end(), MAX_STDERR_LINES)).filter(|d| !d.is_empty());
-                    self.push(ChatItem::Failure(Failure { title: format!("{} exited ({how}).", self.def.label), detail, resend }));
+                    self.push(ChatItem::Failure(Failure { title: format!("{} exited ({how}).", self.def.label), summary: None, detail, resend }));
                     self.set_status(Status::Error(msg), cx);
                 }
             }
@@ -1507,10 +1512,7 @@ impl AgentTask {
                 .hover(|d| d.bg(look.c(ui.hover_bg)))
                 .child(label)
         };
-        let copy = match &f.detail {
-            Some(d) => format!("{}\n\n{d}", f.title),
-            None => f.title.clone(),
-        };
+        let copy = [Some(f.title.clone()), f.summary.clone(), f.detail.clone()].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
         let (retry, edit) = (f.resend.clone(), f.resend.clone());
         div()
             .px(look.z(12.))
@@ -1523,10 +1525,12 @@ impl AgentTask {
             .gap(look.z(6.))
             .text_size(look.text(0.))
             .child(div().text_color(look.c(ui.error)).child(f.title.clone()))
+            .children(f.summary.clone().map(|t| div().text_color(look.c(ui.text)).child(t)))
+            // The raw error, small and scrollable, for when the summary isn't enough.
             .children(f.detail.clone().map(|d| {
                 div()
                     .id(("failure-detail", ix))
-                    .max_h(look.z(180.))
+                    .max_h(look.z(if f.summary.is_some() { 90. } else { 180. }))
                     .overflow_y_scroll()
                     .child(code_block(&d, look))
             }))
@@ -2156,6 +2160,8 @@ impl AgentTask {
                 .mx(look.z(12.))
                 .mb(look.z(3.))
                 .flex()
+                // Codex has three settings (mode, model, effort): wrap, don't clip.
+                .flex_wrap()
                 .items_center()
                 .gap(look.z(2.))
                 .text_size(look.text(0.))
