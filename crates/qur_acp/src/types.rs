@@ -263,6 +263,28 @@ impl AcpError {
         }
         AcpError { code: e.get("code").and_then(Value::as_i64), message }
     }
+
+    /// The sentence worth showing. Agents wrap the real reason in layers
+    /// (codex-acp: "Internal error" with `data.message` holding the API's JSON
+    /// as a string, whose `error.message` says what's wrong), so this digs to
+    /// the innermost `message`. The full text stays in `Display` for Copy.
+    pub fn summary(&self) -> String {
+        let raw = self.message.split_once(": ").map(|(_, d)| d).unwrap_or("");
+        serde_json::from_str::<Value>(raw).ok().and_then(|v| innermost_message(&v)).unwrap_or_else(|| self.message.clone())
+    }
+}
+
+/// The deepest `message` in `v`, looking inside JSON-in-a-string too.
+fn innermost_message(v: &Value) -> Option<String> {
+    match v {
+        Value::String(t) => serde_json::from_str::<Value>(t).ok().and_then(|inner| innermost_message(&inner)).or_else(|| Some(t.clone())).filter(|t| !t.trim().is_empty()),
+        Value::Object(o) => o
+            .get("error")
+            .and_then(innermost_message)
+            .or_else(|| o.get("message").and_then(innermost_message))
+            .or_else(|| o.get("detail").and_then(innermost_message)),
+        _ => None,
+    }
 }
 
 impl std::fmt::Display for AcpError {
