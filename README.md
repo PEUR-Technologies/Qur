@@ -47,4 +47,4 @@ Open a folder, press `⌘⇧T`, describe the task.
 
 ## More
 
-[Guide](docs/guide.md) (every feature, config, comparisons) · [Keys](docs/keymap.md) · [Menus](docs/menus.md) · [Status](HANDOFF.md) · [GPL-3.0-or-later](LICENSE) © PEUR Technologies
+[Guide](docs/guide.md) (every feature, config, comparisons) · [Keys](docs/keymap.md) · [Menus](docs/menus.md) · [Releasing](docs/release.md) · [Status](HANDOFF.md) · [GPL-3.0-or-later](LICENSE) © PEUR Technologies

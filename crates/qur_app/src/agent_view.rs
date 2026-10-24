@@ -755,6 +755,9 @@ impl AgentTask {
                     None if self.auth_methods.is_empty() && self.def.command.contains("claude") => {
                         format!("{}. Run `claude /login` in a terminal, then click Continue.", s.message.trim_end_matches('.'))
                     }
+                    None if self.auth_methods.is_empty() && self.def.command.contains("codex") => {
+                        format!("{}. Run `codex login` in a terminal (it signs in with ChatGPT), then click Continue.", s.message.trim_end_matches('.'))
+                    }
                     None if self.auth_methods.is_empty() => format!("{}. Sign in with {}'s own login, then click Continue.", s.message.trim_end_matches('.'), self.def.label),
                     None => s.message.clone(),
                 }))

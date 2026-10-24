@@ -3219,7 +3219,7 @@ impl Workspace {
                 if !c.agents.is_empty() {
                     // Keep agents added by hand; replace the ones the picker knows.
                     let mut roster = qur_agents::Roster::load().0;
-                    roster.agents.retain(|a| !matches!(a.id.as_str(), "claude" | "claude-cli" | "aider"));
+                    roster.agents.retain(|a| !matches!(a.id.as_str(), "claude" | "claude-cli" | "codex" | "codex-cli" | "aider"));
                     let mut agents = c.agents.clone();
                     agents.extend(roster.agents);
                     roster.agents = agents;
