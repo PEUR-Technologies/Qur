@@ -6,9 +6,12 @@
 //! - contains "slow": one chunk, then waits for session/cancel -> cancelled
 //! - contains "crash": prints to stderr and exits 3
 //! - contains "garbage": writes a non-JSON line first
+//! - contains "picture": a session title, an image and a file link, max_tokens
 //!
 //! Env: FAKE_AGENT_CHILD=1 spawns a `sleep 300` child (same process group);
-//! FAKE_AGENT_IGNORE_TERM=1 ignores SIGTERM (tests the SIGKILL path).
+//! FAKE_AGENT_IGNORE_TERM=1 ignores SIGTERM (tests the SIGKILL path);
+//! FAKE_AGENT_AUTH=1 refuses session/new and prompts with -32000 until
+//! `authenticate` with method "token".
 
 use std::io::{BufRead, Write};
 
@@ -49,6 +52,8 @@ fn main() {
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines().map_while(Result::ok);
     let mut next_out_id = 1000u64;
+    let auth = std::env::var("FAKE_AGENT_AUTH").as_deref() == Ok("1");
+    let mut signed_in = false;
     while let Some(line) = lines.next() {
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
         let id = msg.get("id").cloned();
@@ -60,12 +65,58 @@ fn main() {
                 "protocolVersion": 1,
                 "agentInfo": { "name": "fake-agent", "version": "0.0.1" },
                 "agentCapabilities": { "loadSession": true, "_meta": { "ignored": true } },
-                "authMethods": []
+                // Shaped like claude-agent-acp's, plus one `authenticate` method.
+                "authMethods": if auth { json!([
+                    { "id": "token", "name": "Token", "description": "Sign in with a token" },
+                    { "id": "claude-ai-login", "name": "Claude Subscription", "description": "Use Claude subscription ",
+                      "type": "terminal", "args": ["--cli", "auth", "login", "--claudeai"],
+                      "_meta": { "terminal-auth": { "command": "/usr/bin/node", "args": ["/x/index.js", "--cli", "auth", "login", "--claudeai"], "label": "Claude Login" } } }
+                ]) } else { json!([]) }
             })),
+            "authenticate" => {
+                signed_in = p["methodId"] == "token";
+                if signed_in {
+                    reply(json!({}))
+                } else {
+                    send(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32603, "message": "Method not implemented." } }))
+                }
+            }
+            "session/new" | "session/prompt" if auth && !signed_in => {
+                send(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": "Authentication required" } }))
+            }
             "session/new" => {
                 send(json!({ "jsonrpc": "2.0", "method": "_fake/extension", "params": {} }));
-                reply(json!({ "sessionId": "s1" }))
+                // Modes the old way, the model as a config option (in a group).
+                reply(json!({
+                    "sessionId": "s1",
+                    "modes": {
+                        "currentModeId": "default",
+                        "availableModes": [
+                            { "id": "default", "name": "Default" },
+                            { "id": "acceptEdits", "name": "Accept Edits" },
+                            { "id": "plan", "name": "Plan Mode", "description": "Read only" }
+                        ]
+                    },
+                    "configOptions": [
+                        { "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "sonnet",
+                          "options": [{ "group": "all", "name": "All", "options": [
+                              { "value": "sonnet", "name": "Sonnet" }, { "value": "opus", "name": "Opus" }
+                          ] }] },
+                        { "id": "fast", "name": "Fast", "type": "boolean", "currentValue": false }
+                    ]
+                }))
             }
+            "session/set_mode" => {
+                let sid = p["sessionId"].as_str().unwrap_or("s1").to_string();
+                update(&sid, json!({ "sessionUpdate": "current_mode_update", "currentModeId": p["modeId"] }));
+                reply(json!({}))
+            }
+            "session/set_config_option" => reply(json!({
+                "configOptions": [
+                    { "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": p["value"],
+                      "options": [{ "value": "sonnet", "name": "Sonnet" }, { "value": "opus", "name": "Opus" }] }
+                ]
+            })),
             "session/load" => {
                 let sid = p["sessionId"].as_str().unwrap_or("s1").to_string();
                 update(&sid, json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": "earlier question" } }));
@@ -83,6 +134,14 @@ fn main() {
                     let mut out = std::io::stdout().lock();
                     writeln!(out, "this is not json").unwrap();
                     out.flush().unwrap();
+                }
+                if text.contains("picture") {
+                    // A title for the session, then an image and a file link.
+                    update(&sid, json!({ "sessionUpdate": "session_info_update", "title": "Draw a picture", "updatedAt": "2026-01-01T00:00:00Z" }));
+                    update(&sid, json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "image", "mimeType": "image/png", "data": "iVBORw0KGgo=" } }));
+                    update(&sid, json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "resource_link", "uri": "file:///w/a.txt", "name": "a.txt" } }));
+                    reply(json!({ "stopReason": "max_tokens" }));
+                    continue;
                 }
                 if text.contains("slow") {
                     chunk(&sid, "working…");

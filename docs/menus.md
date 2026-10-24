@@ -88,7 +88,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Stop `Cmd+.`
 - Take Over (Live, when an agent is editing)
 - Rename Agent… (also double-click the agent's button)
-- Permission: Allow Once · Allow for This Task · Deny
+- Permission: Allow Once `Cmd+Y` · Allow for This Task `Cmd+Opt+Y` · Deny `Cmd+Opt+Z`
 - ---
 - Next Agent · Previous Agent · Agent 1–9 `Ctrl+1..9`
 - ---
@@ -103,6 +103,8 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 ## Terminal
 - New Terminal `Cmd+T` · New Agent Terminal `Cmd+Shift+T`
 - Next / Previous Terminal `Cmd+Shift+]` / `Cmd+Shift+[`
+- Split Right `Cmd+D` · Split Down `Cmd+Shift+D`
+- Focus Pane Left / Right / Above / Below `Cmd+Opt+Arrows`
 - Clear `Cmd+K` · Find in Terminal `Cmd+F`
 - Close Terminal `Cmd+W`
 

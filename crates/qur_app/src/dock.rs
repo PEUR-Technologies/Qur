@@ -59,7 +59,7 @@ impl Kind {
     pub fn panels(self) -> &'static [Panel] {
         match self {
             Kind::Acp => &[Panel::Session, Panel::Live, Panel::Browser, Panel::Changes, Panel::Todo],
-            Kind::Terminal => &[Panel::Session, Panel::Live, Panel::Browser, Panel::Changes],
+            Kind::Terminal => &[Panel::Session, Panel::Live, Panel::Browser, Panel::Changes, Panel::Todo],
         }
     }
 
@@ -785,9 +785,9 @@ mod tests {
         }
         assert_eq!(Dock::preset(Kind::Acp, "A").serialize(), "h0.660(live,browser,changes|session,todo)");
         assert_eq!(Dock::parse(Kind::Acp, "garbage("), None);
-        // Unknown or foreign panels drop out; the agent itself is always kept.
+        // The agent itself is always kept; Agent Terminals have a To-do tab too.
         let t = Dock::parse(Kind::Terminal, "todo").unwrap();
-        assert_eq!(t.root, pane(&[Session]));
+        assert!(t.contains(Todo) && t.contains(Session));
         assert!(Dock::parse(Kind::Terminal, "session,browser").unwrap().contains(Browser));
     }
 

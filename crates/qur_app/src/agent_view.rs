@@ -2,23 +2,26 @@
 //! pending permission and status, plus the stage view that shows it:
 //! header, To-do strip, Chat, permission bar and prompt bar.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, ListAlignment, ListState, SharedString,
-    Subscription, Task, Window, div, list, prelude::*, px,
+    App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, ListAlignment, ListState, SharedString,
+    Subscription, Task, Window, div, img, list, prelude::*, px,
 };
 use qur_acp::{
-    AgentCommand, Client, Event, PermissionKind, PermissionOption, PermissionOutcome, PlanEntry, PlanStatus,
-    PromptBlock, RequestId, SessionUpdate, StopReason, ToolCall, ToolCallUpdate, ToolContent, ToolKind, ToolStatus,
+    AcpError, AgentCommand, AuthMethod, Client, ConfigOption, Event, Media, PermissionKind, PermissionOption, PermissionOutcome,
+    PlanEntry, PlanStatus, PromptBlock, RequestId, SessionId, SessionUpdate, StopReason, ToolCall, ToolCallId, ToolCallUpdate,
+    ToolContent, ToolKind, ToolStatus,
 };
-use qur_agents::{AgentDef, TaskRecord};
+use qur_agents::{AgentDef, QueuedMessage, TaskRecord};
 use qur_theme::Rgba;
 
-use crate::browser_view::{BrowserPane, BrowserPaneEvent, base64};
+use crate::browser_view::{Attachment, BrowserPane, BrowserPaneEvent, base64};
+use crate::commands::agent as aa;
 use crate::changes_view::{ChangesEvent, ChangesView};
 use crate::dock::{self, Docks, Kind, Panel};
 use crate::live::{LiveEvent, LivePane};
@@ -66,6 +69,19 @@ impl Status {
     }
 }
 
+/// A subagent (Claude's Agent/Task tool) running inside an agent's session.
+pub struct Subagent {
+    /// Its own (child) session id.
+    pub id: SessionId,
+    pub title: String,
+    /// "running", "requires_action", "idle" (done), or what the agent sent.
+    pub state: String,
+    /// What it's doing: its latest tool call or message line.
+    pub last: Option<String>,
+    /// Its work so far: (is a tool call, text), oldest first.
+    pub log: Vec<(bool, String)>,
+}
+
 pub enum AgentEvent {
     /// Status, title or session changed (sidebar, task store).
     Changed,
@@ -75,12 +91,18 @@ pub enum AgentEvent {
     MentionRequested,
     /// `/` typed: offer this agent's slash commands.
     SlashRequested,
+    /// A subagent started, changed state or did something (sidebar).
+    Subagents,
     /// Changes view: merge this task's branch into the user's branch.
     Merge,
     /// Changes view: discard the task.
     Discard,
     /// A turn ended after changing files: run the project's checks.
     TurnChangedFiles,
+    /// A setting chip (mode, model…) was clicked: offer its values.
+    PickSetting(String),
+    /// Sign-in: run this login command in a terminal in the task's worktree.
+    RunInTerminal { label: String, command: String },
 }
 
 #[derive(Clone)]
@@ -88,10 +110,37 @@ enum ChatItem {
     User(String),
     Agent(String),
     Thought(String),
-    Tool(String),
+    Tool(ToolCallId),
     Notice(String),
     /// Command output (worktree setup), shown in the code font.
     Output(String),
+    /// An image in a message, and its size in pixels.
+    Image(Arc<gpui::Image>, (u32, u32)),
+    /// A file or web link in a message: click opens it.
+    Link { uri: String, name: String },
+    /// A failed or cut-short turn, or the agent exiting.
+    Failure(Failure),
+}
+
+/// What an error callout shows: a line, the full error (stderr tail…), and
+/// the message to Retry / Edit & resend when there is one.
+#[derive(Clone)]
+struct Failure {
+    title: String,
+    detail: Option<String>,
+    resend: Option<Outgoing>,
+}
+
+/// The agent refused to start a session or a turn until the user signs in
+/// (JSON-RPC -32000). Messages stay queued meanwhile.
+struct SignIn {
+    /// The agent's words.
+    message: String,
+    /// The method being tried (`authenticate` running, or a restart).
+    busy: Option<String>,
+    /// A terminal login was started: (method name, the command it runs).
+    login: Option<(String, String)>,
+    error: Option<String>,
 }
 
 struct Permission {
@@ -185,10 +234,18 @@ pub struct AgentTask {
     pub accent: Rgba,
     pub status: Status,
     client: Option<Client>,
-    session_id: Option<String>,
+    session_id: Option<SessionId>,
     load_session: bool,
+    /// How the agent was started (a terminal login may reuse it).
+    agent_cmd: Option<AgentCommand>,
+    /// Sign-in methods the agent offered at `initialize`.
+    auth_methods: Vec<AuthMethod>,
+    /// Shown while the agent wants the user to sign in.
+    sign_in: Option<SignIn>,
+    /// The last message sent (Retry / Edit & resend).
+    last_sent: Option<Outgoing>,
     chat: Vec<ChatItem>,
-    tools: HashMap<String, ToolCall>,
+    tools: HashMap<ToolCallId, ToolCall>,
     list: ListState,
     plan: Vec<PlanEntry>,
     permission: Option<Permission>,
@@ -208,10 +265,25 @@ pub struct AgentTask {
     turn_wrote: bool,
     /// Slash commands the agent advertised.
     pub commands: Vec<qur_acp::AvailableCommand>,
+    /// Session settings the agent offers (mode, model…), shown above the prompt.
+    pub settings: Vec<ConfigOption>,
+    /// Chat items folded the other way from their default (tool call ids,
+    /// `thought-<ix>`).
+    toggled: HashSet<String>,
+    /// Context tokens used / window, and session cost (USD) if known.
+    usage: Option<(u64, u64, Option<f64>)>,
+    /// Subagents this agent started, oldest first (shown under it in the sidebar).
+    pub subagents: Vec<Subagent>,
+    /// The subagent shown in place of the chat (clicked in the sidebar).
+    pub open_subagent: Option<SessionId>,
     /// Setup command still running for a new worktree.
     pub setting_up: bool,
     focus: FocusHandle,
     turn_started: Option<Instant>,
+    /// Tool calls of the current (or last) turn, and the files they changed:
+    /// the strip above the prompt. Cleared when the next turn starts.
+    turn_tools: Vec<ToolCallId>,
+    turn_files: Vec<FileChange>,
     _events: Option<Task<()>>,
     _subs: Vec<Subscription>,
 }
@@ -257,6 +329,8 @@ impl AgentTask {
             BrowserPaneEvent::Attach(a) => {
                 let a = a.clone();
                 this.prompt.update(cx, |p, cx| p.attach(a, cx));
+                // The pick was a click in the page, which took the keyboard.
+                this.browser.read(cx).release_focus();
                 let f = this.prompt.read(cx).focus.clone();
                 window.focus(&f, cx);
                 // Dev/test: QUR_DEBUG_SEND="text" sends right after a pick.
@@ -276,10 +350,21 @@ impl AgentTask {
             PromptEvent::Cancel => this.stop(cx),
             PromptEvent::MentionRequested => cx.emit(AgentEvent::MentionRequested),
             PromptEvent::SlashRequested => cx.emit(AgentEvent::SlashRequested),
+            PromptEvent::UpInEmpty => this.edit_queued(this.pending.len().wrapping_sub(1), cx),
             PromptEvent::Changed => {}
         });
         let list = ListState::new(0, ListAlignment::Bottom, px(400.));
         list.set_follow_mode(gpui::FollowMode::Tail);
+        // Re-render on scroll: the "↓" button shows while you're scrolled up.
+        let weak = cx.weak_entity();
+        list.set_scroll_handler(move |_, _, cx| {
+            weak.update(cx, |_, cx| cx.notify()).ok();
+        });
+        let record_queue = record
+            .queued
+            .iter()
+            .map(|q| Outgoing { text: q.text.clone(), mentions: q.mentions.clone(), context: q.context.clone(), labels: q.labels.clone(), images: Vec::new() })
+            .collect();
         AgentTask {
             record,
             monitor,
@@ -291,6 +376,10 @@ impl AgentTask {
             client: None,
             session_id: None,
             load_session: false,
+            agent_cmd: None,
+            auth_methods: Vec::new(),
+            sign_in: None,
+            last_sent: None,
             chat: Vec::new(),
             tools: HashMap::new(),
             list,
@@ -298,15 +387,23 @@ impl AgentTask {
             permission: None,
             prompt,
             queued: None,
-            pending: Vec::new(),
+            // Saved by an earlier run (see `save_queue`).
+            pending: record_queue,
             images_ok: false,
             browser,
             changes,
             turn_wrote: false,
             commands: Vec::new(),
+            settings: Vec::new(),
+            toggled: HashSet::new(),
+            usage: None,
+            subagents: Vec::new(),
+            open_subagent: None,
             setting_up: false,
             focus: cx.focus_handle(),
             turn_started: None,
+            turn_tools: Vec::new(),
+            turn_files: Vec::new(),
             _events: None,
             _subs: vec![sub, live_sub, monitor_sub, browser_sub, files_sub, changes_sub],
         }
@@ -323,9 +420,26 @@ impl AgentTask {
     // -- chat list -------------------------------------------------------------
 
     fn push(&mut self, item: ChatItem) {
+        // The thought before this item stops streaming: fold it.
+        self.remeasure_last_thought();
         let n = self.chat.len();
         self.chat.push(item);
         self.list.splice(n..n, 1);
+    }
+
+    /// Back to the newest message, following it again as it streams.
+    fn follow_bottom(&self) {
+        self.list.set_follow_mode(gpui::FollowMode::Tail);
+        self.list.scroll_to_end();
+    }
+
+    /// Rows are measured once; a thought's open/folded state depends on
+    /// whether it's still the streaming last item, so re-measure it.
+    fn remeasure_last_thought(&mut self) {
+        let last = self.chat.len().wrapping_sub(1);
+        if matches!(self.chat.last(), Some(ChatItem::Thought(_))) {
+            self.list.splice(last..last + 1, 1);
+        }
     }
 
     /// Append streamed text to the last item of the same kind, or start one.
@@ -342,7 +456,70 @@ impl AgentTask {
         self.list.splice(last..last + 1, 1);
     }
 
-    fn refresh_tool(&mut self, id: &str) {
+    /// An image or link block from a message: its own chat row.
+    fn push_media(&mut self, media: Option<Media>) {
+        match media {
+            Some(Media::Image { mime, data }) => match gpui::ImageFormat::from_mime_type(&mime) {
+                Some(f) => {
+                    // The size now: GPUI decodes later, after the row is measured.
+                    let size = image::ImageReader::new(std::io::Cursor::new(&data))
+                        .with_guessed_format()
+                        .ok()
+                        .and_then(|r| r.into_dimensions().ok())
+                        .filter(|(w, h)| *w > 0 && *h > 0);
+                    match size {
+                        Some(size) => self.push(ChatItem::Image(Arc::new(gpui::Image::from_bytes(f, data)), size)),
+                        None => self.push(ChatItem::Notice("[image that couldn't be read]".into())),
+                    }
+                }
+                None => self.push(ChatItem::Notice(format!("[{mime} image]"))),
+            },
+            Some(Media::Link { uri, name }) => self.push(ChatItem::Link { uri, name }),
+            None => {}
+        }
+    }
+
+    /// A link in a message: a file opens in the code modal, a local address
+    /// in the task's Browser view, anything else in the default browser.
+    fn open_link(&mut self, uri: &str, cx: &mut Context<Self>) {
+        if let Some(path) = uri.strip_prefix("file://") {
+            // `file:///abs/path#L12` or `…:12`: open at that line when given.
+            let (path, line) = match path.rsplit_once("#L").or_else(|| path.rsplit_once(':')) {
+                Some((p, l)) if l.parse::<u32>().is_ok() => (p, l.parse().ok()),
+                _ => (path, None),
+            };
+            let path = PathBuf::from(path.replace("%20", " "));
+            return cx.emit(AgentEvent::OpenFile(path, line));
+        }
+        let local = ["http://localhost", "http://127.0.0.1", "https://localhost"].iter().any(|p| uri.starts_with(p));
+        if local {
+            self.browser.update(cx, |b, cx| b.navigate(uri, cx));
+            self.show_browser(true, cx);
+        } else {
+            cx.open_url(uri);
+        }
+    }
+
+    /// Error callout: send that message again.
+    fn retry(&mut self, out: Outgoing, cx: &mut Context<Self>) {
+        self.follow_bottom();
+        if matches!(self.status, Status::Working | Status::NeedsYou | Status::Starting) || self.setting_up || self.sign_in.is_some() {
+            self.pending.push(out);
+            self.save_queue(cx);
+            return cx.notify();
+        }
+        self.send_out(out, cx);
+    }
+
+    /// Error callout: the message back in the prompt to change and send.
+    fn edit_resend(&mut self, out: &Outgoing, window: &mut Window, cx: &mut Context<Self>) {
+        self.prompt.update(cx, |p, cx| p.set_text(&out.text, cx));
+        let f = self.prompt.read(cx).focus.clone();
+        window.focus(&f, cx);
+        cx.notify();
+    }
+
+    fn refresh_tool(&mut self, id: &ToolCallId) {
         if let Some(ix) = self.chat.iter().rposition(|c| matches!(c, ChatItem::Tool(t) if t == id)) {
             self.list.splice(ix..ix + 1, 1);
         }
@@ -366,6 +543,7 @@ impl AgentTask {
                 return;
             }
         };
+        self.agent_cmd = Some(cmd);
         self.client = Some(client.clone());
         self.set_status(Status::Starting, cx);
         self._events = Some(cx.spawn(async move |this, cx| {
@@ -376,8 +554,6 @@ impl AgentTask {
                 }
             }
         }));
-        let saved = self.record.session_id.clone();
-        let cwd = self.record.worktree.clone();
         cx.spawn(async move |this, cx| {
             let init = client.initialize().await;
             let init = match init {
@@ -385,31 +561,45 @@ impl AgentTask {
                 Ok(Err(e)) => return this.update(cx, |t, cx| t.fail(format!("initialize: {e}"), cx)).ok(),
                 Err(_) => return this.update(cx, |t, cx| t.fail("agent exited during start".into(), cx)).ok(),
             };
-            let can_load = init.load_session;
             let images = init.raw["agentCapabilities"]["promptCapabilities"]["image"].as_bool().unwrap_or(false);
-            this.update(cx, |t, _| {
-                t.load_session = can_load;
+            this.update(cx, |t, cx| {
+                t.load_session = init.load_session;
                 t.images_ok = images;
+                t.auth_methods = init.auth_methods;
+                t.open_session(client, cx);
             })
-            .ok();
-            let session = match saved.filter(|_| can_load) {
+            .ok()
+        })
+        .detach();
+    }
+
+    /// Load the saved session (shows its history) or start a new one, then
+    /// send what's waiting. A sign-in refusal shows the sign-in callout.
+    fn open_session(&mut self, client: Client, cx: &mut Context<Self>) {
+        let saved = self.record.session_id.clone().filter(|_| self.load_session).map(SessionId::from);
+        let cwd = self.record.worktree.clone();
+        cx.spawn(async move |this, cx| {
+            let session = match saved {
                 Some(id) => match client.load_session(&id, &cwd).await {
-                    Ok(Ok(())) => Some(id),
+                    Ok(Ok(settings)) => Some((id, settings)),
                     _ => None,
                 },
                 None => None,
             };
-            let session = match session {
+            let (session, settings) = match session {
                 Some(s) => s,
                 None => match client.new_session(&cwd).await {
-                    Ok(Ok(id)) => id,
+                    Ok(Ok(s)) => s,
+                    Ok(Err(e)) if e.is_auth_required() => return this.update(cx, |t, cx| t.need_sign_in(&e, cx)).ok(),
                     Ok(Err(e)) => return this.update(cx, |t, cx| t.fail(format!("session/new: {e}"), cx)).ok(),
                     Err(_) => return this.update(cx, |t, cx| t.fail("agent exited during start".into(), cx)).ok(),
                 },
             };
             this.update(cx, |t, cx| {
-                t.session_id = Some(session.clone());
-                t.record.session_id = Some(session);
+                t.sign_in = None;
+                t.settings = settings;
+                t.record.session_id = Some(session.to_string());
+                t.session_id = Some(session);
                 t.set_status(Status::Idle, cx);
                 if let Some(out) = t.queued.take() {
                     t.send_out(out, cx);
@@ -422,8 +612,181 @@ impl AgentTask {
         .detach();
     }
 
+    // -- sign-in -------------------------------------------------------------------
+
+    /// The agent wants a sign-in (-32000): show the callout; queued messages
+    /// wait (`drain_pending` only runs once a session is ready again).
+    fn need_sign_in(&mut self, e: &AcpError, cx: &mut Context<Self>) {
+        let again = self.sign_in.as_ref().is_some_and(|s| s.login.is_some() || s.busy.is_some());
+        self.sign_in = Some(SignIn {
+            message: e.message.clone(),
+            busy: None,
+            login: None,
+            error: again.then(|| "Still not signed in. Finish signing in, then Continue.".to_string()),
+        });
+        self.set_status(Status::Error("sign-in required".into()), cx);
+    }
+
+    /// A sign-in button: a terminal login runs in a Qur terminal (then
+    /// Continue restarts the agent, which reads the new login); any other
+    /// method is `authenticate`, then the session is opened again.
+    fn sign_in_with(&mut self, method_id: &str, cx: &mut Context<Self>) {
+        let Some(m) = self.auth_methods.iter().find(|m| m.id == method_id).cloned() else { return };
+        let Some(s) = self.sign_in.as_mut() else { return };
+        s.error = None;
+        if let Some(t) = &m.terminal {
+            let Some(agent) = self.agent_cmd.as_ref() else { return };
+            let (program, args) = t.command_line(agent);
+            let env = t.env.iter().map(|(k, v)| format!("{k}={} ", shell_quote(v))).collect::<String>();
+            let command = format!("{env}{}", std::iter::once(&program).chain(&args).map(|a| shell_quote(a)).collect::<Vec<_>>().join(" "));
+            s.login = Some((m.name.clone(), command.clone()));
+            cx.emit(AgentEvent::RunInTerminal { label: t.label.clone().unwrap_or_else(|| m.name.clone()), command });
+            cx.notify();
+            return;
+        }
+        let Some(client) = self.client.clone() else { return self.continue_sign_in(cx) };
+        s.busy = Some(m.name.clone());
+        let pending = client.authenticate(&m.id);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let r = pending.await;
+            this.update(cx, |t, cx| {
+                match r {
+                    Ok(Ok(())) if t.session_id.is_some() => {
+                        // Signed in mid-session (a turn was refused): carry on.
+                        t.sign_in = None;
+                        t.set_status(Status::Idle, cx);
+                        t.drain_pending(cx);
+                    }
+                    Ok(Ok(())) => t.open_session(client, cx),
+                    Ok(Err(e)) => {
+                        if let Some(s) = t.sign_in.as_mut() {
+                            s.busy = None;
+                            s.error = Some(format!("Sign-in didn't complete: {e}"));
+                        }
+                    }
+                    Err(_) => t.sign_in = None,
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// After a terminal login (or with no method offered): restart the agent
+    /// so it picks up the new login, then open the session again.
+    fn continue_sign_in(&mut self, cx: &mut Context<Self>) {
+        if let Some(s) = self.sign_in.as_mut() {
+            s.busy = Some("Checking".into());
+            s.error = None;
+        }
+        // The saved session's history is replayed on load: rebuild the chat
+        // from it rather than show it twice.
+        if self.load_session && self.record.session_id.is_some() && self.session_id.is_some() {
+            self.chat.clear();
+            self.tools.clear();
+            self.toggled.clear();
+            self.list.reset(0);
+        }
+        if let Some(c) = self.client.take() {
+            std::thread::spawn(move || c.shutdown(Duration::from_secs(2)));
+        }
+        self._events = None;
+        self.session_id = None;
+        self.permission = None;
+        self.start(cx);
+        cx.notify();
+    }
+
+    /// The sign-in callout, above the prompt: one button per method the
+    /// agent offers, or the command to run when a terminal login started.
+    fn sign_in_bar(&self, look: &Look, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let s = self.sign_in.as_ref()?;
+        let ui = &look.theme.ui;
+        let button = |id: SharedString, label: String, primary: bool| {
+            div()
+                .id(id)
+                .px(look.z(10.))
+                .py(look.z(3.))
+                .rounded(look.z(4.))
+                .cursor_pointer()
+                .text_size(look.text(0.))
+                .bg(look.c(if primary { ui.button_primary_bg } else { ui.button_bg }))
+                .text_color(look.c(if primary { ui.button_primary_text } else { ui.button_text }))
+                .child(label)
+        };
+        let methods: Vec<_> = self
+            .auth_methods
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let id = m.id.clone();
+                let label = if m.name.trim().is_empty() { m.id.clone() } else { m.name.clone() };
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(look.z(2.))
+                    .child(button(SharedString::from(format!("auth-{}", m.id)), label, i == 0 && s.login.is_none()).on_click(cx.listener(move |t, _, _, cx| t.sign_in_with(&id, cx))))
+                    .children(m.description.clone().map(|d| div().text_size(look.text(0.)).text_color(look.c(ui.text_muted)).child(d)))
+            })
+            .collect();
+        let queued = self.pending.len() + usize::from(self.queued.is_some());
+        let login_cmd = s.login.as_ref().map(|(_, c)| c.clone());
+        Some(
+            div()
+                .flex_none()
+                .mx(look.z(12.))
+                .mb(look.z(6.))
+                .px(look.z(12.))
+                .py(look.z(8.))
+                .rounded(look.z(6.))
+                .border_1()
+                .border_color(look.c(self.accent))
+                .bg(look.c(ui.permission_bar_bg))
+                .flex()
+                .flex_col()
+                .gap(look.z(6.))
+                .text_color(look.c(ui.text))
+                .child(div().font_weight(gpui::FontWeight::MEDIUM).child(format!("Sign in to {}", self.def.label)))
+                .child(div().text_color(look.c(ui.text_secondary)).child(match &s.login {
+                    Some((name, _)) => format!("Finish \"{name}\" in the terminal that opened, then click Continue. Or run this yourself:"),
+                    // The agent offered no method: say how (Claude's own CLI login).
+                    None if self.auth_methods.is_empty() && self.def.command.contains("claude") => {
+                        format!("{}. Run `claude /login` in a terminal, then click Continue.", s.message.trim_end_matches('.'))
+                    }
+                    None if self.auth_methods.is_empty() => format!("{}. Sign in with {}'s own login, then click Continue.", s.message.trim_end_matches('.'), self.def.label),
+                    None => s.message.clone(),
+                }))
+                .children(login_cmd.map(|c| {
+                    let copy = c.clone();
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(look.z(6.))
+                        .child(code_block(&c, look).flex_1().min_w(px(0.)))
+                        .child(button("auth-copy".into(), "Copy".into(), false).on_click(move |_, _, cx: &mut App| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))))
+                }))
+                .children(s.error.clone().map(|e| div().text_color(look.c(ui.error)).child(e)))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_start()
+                        .gap(look.z(6.))
+                        .children(methods)
+                        .when(s.login.is_some() || self.auth_methods.is_empty(), |d| {
+                            d.child(button("auth-continue".into(), "Continue".into(), true).on_click(cx.listener(|t, _, _, cx| t.continue_sign_in(cx))))
+                        })
+                        .children(s.busy.clone().map(|b| div().py(look.z(3.)).text_color(look.c(ui.text_muted)).child(format!("{b}…")))),
+                )
+                .when(queued > 0, |d| d.child(div().text_size(look.text(0.)).text_color(look.c(ui.text_muted)).child(format!("{queued} message(s) will be sent once you're signed in.")))),
+        )
+    }
+
     fn fail(&mut self, msg: String, cx: &mut Context<Self>) {
-        self.push(ChatItem::Notice(msg.clone()));
+        self.sign_in = None;
+        self.push(ChatItem::Failure(Failure { title: "The agent couldn't start.".into(), detail: Some(msg.clone()), resend: None }));
         self.set_status(Status::Error(msg), cx);
         if let Some(c) = self.client.take() {
             std::thread::spawn(move || c.shutdown(Duration::from_secs(2)));
@@ -442,6 +805,8 @@ impl AgentTask {
             cx.emit(AgentEvent::TurnChangedFiles);
         }
         let active = matches!(s, Status::Working | Status::NeedsYou);
+        // A thought that was streaming folds when the turn stops.
+        self.remeasure_last_thought();
         self.monitor.update(cx, |m, _| m.set_turn_active(active));
         if self.status != s {
             self.status = s;
@@ -456,6 +821,8 @@ impl AgentTask {
         if text.trim().is_empty() && atts.is_empty() {
             return;
         }
+        // Sending (or queueing) brings you back to the newest message.
+        self.follow_bottom();
         let mut out = Outgoing::plain(if text.trim().is_empty() { "Adjust this.".into() } else { text }, mentions);
         for a in atts {
             out.labels.push(a.label.to_string());
@@ -466,9 +833,10 @@ impl AgentTask {
                 out.images.push(png);
             }
         }
-        if matches!(self.status, Status::Working | Status::NeedsYou | Status::Starting) || self.setting_up {
+        if matches!(self.status, Status::Working | Status::NeedsYou | Status::Starting) || self.setting_up || self.sign_in.is_some() {
             // One turn at a time: queue it and send when the turn ends.
             self.pending.push(out);
+            self.save_queue(cx);
             cx.notify();
             return;
         }
@@ -479,8 +847,78 @@ impl AgentTask {
     fn drain_pending(&mut self, cx: &mut Context<Self>) {
         if !self.pending.is_empty() && matches!(self.status, Status::Done | Status::Idle) {
             let out = self.pending.remove(0);
+            self.save_queue(cx);
             self.send_out(out, cx);
         }
+    }
+
+    /// Drop a queued message before it's sent.
+    fn unqueue(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix < self.pending.len() {
+            self.pending.remove(ix);
+            self.save_queue(cx);
+            cx.notify();
+        }
+    }
+
+    /// Queue row "Send now": this message goes next, and the current turn
+    /// stops (the stop path's `drain_pending` then sends it).
+    fn send_queued_now(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix >= self.pending.len() {
+            return;
+        }
+        let out = self.pending.remove(ix);
+        self.pending.insert(0, out);
+        self.save_queue(cx);
+        if matches!(self.status, Status::Working | Status::NeedsYou) {
+            self.stop(cx);
+        } else {
+            self.drain_pending(cx);
+        }
+        self.follow_bottom();
+        cx.notify();
+    }
+
+    /// Queue row "Edit" (and Up in an empty prompt for the last one): take
+    /// the message out of the queue and back into the prompt. What you'd
+    /// typed since stays, after it.
+    fn edit_queued(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix >= self.pending.len() {
+            return;
+        }
+        let o = self.pending.remove(ix);
+        self.save_queue(cx);
+        // Context and screenshots come back as chips (what's sent is the
+        // same; a pick with both shows as two).
+        let named = o.labels.len() == o.context.len();
+        let mut atts: Vec<Attachment> = o
+            .context
+            .iter()
+            .enumerate()
+            .map(|(i, c)| Attachment { label: if named { o.labels[i].clone().into() } else { "Context".into() }, context: c.clone(), png: None })
+            .collect();
+        atts.extend(o.images.into_iter().map(|png| Attachment { label: "Image".into(), context: String::new(), png: Some(png) }));
+        self.prompt.update(cx, |p, cx| {
+            let typed = p.text.trim().to_string();
+            let text = if typed.is_empty() { o.text.clone() } else { format!("{}\n{typed}", o.text) };
+            p.set_text(&text, cx);
+            p.mentions.extend(o.mentions);
+            for a in atts {
+                p.attach(a, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    /// Mirror the queue into the task record, which the workspace saves on
+    /// `Changed`: queued messages survive a quit or a crash.
+    fn save_queue(&mut self, cx: &mut Context<Self>) {
+        self.record.queued = self
+            .pending
+            .iter()
+            .map(|o| QueuedMessage { text: o.text.clone(), mentions: o.mentions.clone(), context: o.context.clone(), labels: o.labels.clone() })
+            .collect();
+        cx.emit(AgentEvent::Changed);
     }
 
     pub fn output(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
@@ -513,6 +951,7 @@ impl AgentTask {
         self.chat.iter().rev().find_map(|c| match c {
             ChatItem::Agent(t) => t.lines().map(str::trim).rfind(|l| !l.is_empty() && !l.starts_with("```")).map(str::to_string),
             ChatItem::Notice(t) => Some(t.clone()),
+            ChatItem::Failure(f) => Some(f.title.clone()),
             _ => None,
         })
     }
@@ -533,6 +972,9 @@ impl AgentTask {
         if self.queued.is_none() && !matches!(self.chat.last(), Some(ChatItem::User(t)) if *t == shown) {
             self.push(ChatItem::User(shown));
         }
+        // Kept for Retry / Edit & resend, and re-queued if a sign-in is needed.
+        self.last_sent = Some(out.clone());
+        let sent = out.clone();
         let Outgoing { text, mentions, context, images, .. } = out;
         let mut blocks = vec![PromptBlock::Text(text)];
         for c in context {
@@ -548,6 +990,8 @@ impl AgentTask {
             blocks.push(PromptBlock::ResourceLink { uri: format!("file://{}", m.display()), name });
         }
         self.turn_started = Some(Instant::now());
+        self.turn_tools.clear();
+        self.turn_files.clear();
         self.set_status(Status::Working, cx);
         let rx = client.prompt(&session, blocks);
         cx.spawn(async move |this, cx| {
@@ -555,17 +999,29 @@ impl AgentTask {
             this.update(cx, |t, cx| {
                 t.permission = None;
                 match r {
+                    Ok(Ok(StopReason::EndTurn)) => t.set_status(Status::Done, cx),
                     Ok(Ok(StopReason::Cancelled)) => {
                         t.push(ChatItem::Notice("Stopped.".into()));
                         t.set_status(Status::Done, cx)
                     }
-                    Ok(Ok(StopReason::EndTurn)) => t.set_status(Status::Done, cx),
+                    // Cut short (length limit, refusal, too many steps…): say so, offer Retry.
                     Ok(Ok(other)) => {
-                        t.push(ChatItem::Notice(format!("Turn ended: {other:?}")));
+                        let title = other.describe(&t.def.label).unwrap_or_default();
+                        t.push(ChatItem::Failure(Failure { title, detail: None, resend: Some(sent) }));
                         t.set_status(Status::Done, cx)
                     }
+                    // Not signed in: the message waits at the front of the queue.
+                    Ok(Err(e)) if e.is_auth_required() => {
+                        t.pending.insert(0, sent);
+                        t.save_queue(cx);
+                        t.need_sign_in(&e, cx);
+                    }
+                    // The agent exited mid-turn: `Event::Exited`, right behind,
+                    // shows why (stderr) and offers Retry.
+                    Ok(Err(e)) if e.is_agent_exited() => {}
                     Ok(Err(e)) => {
-                        t.push(ChatItem::Notice(format!("Error: {e}")));
+                        let title = format!("{} couldn't finish this turn.", t.def.label);
+                        t.push(ChatItem::Failure(Failure { title, detail: Some(e.to_string()), resend: Some(sent) }));
                         t.set_status(Status::Error(e.to_string()), cx)
                     }
                     Err(_) => t.set_status(Status::Error("agent exited".into()), cx),
@@ -608,12 +1064,30 @@ impl AgentTask {
         handle
     }
 
+    /// Answer by kind (the Agent menu's Allow Once / Allow for This Task / Deny).
+    /// Does nothing when the agent doesn't offer that kind (Cmd+Opt+Y on a
+    /// request without "always" mustn't cancel it); Deny without a reject
+    /// option cancels the request.
     pub fn answer_permission(&mut self, kind: PermissionKind, cx: &mut Context<Self>) {
+        let Some(p) = &self.permission else { return };
+        let id = p.options.iter().find(|o| o.kind == kind).map(|o| o.id.clone());
+        if id.is_none() && kind != PermissionKind::RejectOnce {
+            return;
+        }
+        self.answer_with(id, cx);
+    }
+
+    /// Answer with one of the agent's own options (the permission bar's buttons).
+    fn answer_option(&mut self, option_id: &str, cx: &mut Context<Self>) {
+        self.answer_with(Some(option_id.to_string()), cx);
+    }
+
+    fn answer_with(&mut self, option_id: Option<String>, cx: &mut Context<Self>) {
         let Some(p) = self.permission.take() else { return };
         let paths: Vec<PathBuf> = p.tool.locations.iter().flatten().map(|l| l.path.clone()).collect();
         self.monitor.update(cx, |m, cx| m.on_permission(&paths, false, cx));
-        let outcome = match p.options.iter().find(|o| o.kind == kind) {
-            Some(o) => PermissionOutcome::Selected(o.id.clone()),
+        let outcome = match option_id {
+            Some(id) => PermissionOutcome::Selected(id),
             None => PermissionOutcome::Cancelled,
         };
         if let Some(c) = &self.client {
@@ -622,15 +1096,92 @@ impl AgentTask {
         self.set_status(Status::Working, cx);
     }
 
+    /// The agent's full new set of settings. A mode kept the old way
+    /// (`modes`) stays unless the new set has a mode of its own.
+    fn replace_settings(&mut self, list: Vec<ConfigOption>) {
+        let legacy = self.settings.iter().find(|o| o.legacy_mode).cloned().filter(|_| !list.iter().any(ConfigOption::is_mode));
+        self.settings = legacy.into_iter().chain(list).collect();
+    }
+
+    /// Change a session setting (mode, model…). Shown at once; the agent's
+    /// answer then replaces the whole set.
+    pub fn set_setting(&mut self, id: &str, value: &str, cx: &mut Context<Self>) {
+        let (Some(client), Some(session)) = (self.client.clone(), self.session_id.clone()) else { return };
+        let Some(opt) = self.settings.iter_mut().find(|o| o.id == id) else { return };
+        let before = std::mem::replace(&mut opt.current, value.to_string());
+        let pending = client.set_option(&session, opt, value);
+        let id = id.to_string();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let res = pending.await;
+            this.update(cx, |t, cx| {
+                match res {
+                    Ok(Ok(Some(list))) => t.replace_settings(list),
+                    Ok(Ok(None)) => {}
+                    // Refused: put it back and say why.
+                    Ok(Err(e)) => {
+                        if let Some(o) = t.settings.iter_mut().find(|o| o.id == id) {
+                            o.current = before;
+                        }
+                        t.notice(format!("couldn't change {id}: {e}"), cx);
+                    }
+                    Err(_) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Shift+Tab: the next mode, as in Claude Code's own terminal UI.
+    fn cycle_mode(&mut self, _: &aa::CycleMode, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(o) = self.settings.iter().find(|o| o.is_mode()) else { return };
+        if let Some(next) = o.next_value().map(str::to_string) {
+            let id = o.id.clone();
+            self.set_setting(&id, &next, cx);
+        }
+    }
+
     pub fn has_permission(&self) -> bool {
         self.permission.is_some()
     }
 
     fn on_event(&mut self, ev: Event, cx: &mut Context<Self>) {
         match ev {
+            // Our session id is known before session/load replays history, so
+            // replayed subagent work is kept out of the chat too.
+            Event::Update { session_id, update }
+                if !session_id.is_empty() && self.session_id.as_deref().or(self.record.session_id.as_deref()).is_some_and(|s| s != session_id.as_str()) =>
+            {
+                // A subagent's own work: keep it out of the chat, show its latest step.
+                let Some(sub) = self.subagents.iter_mut().find(|s| s.id == session_id) else { return };
+                match update {
+                    SessionUpdate::ToolCall(t) if !t.title.trim().is_empty() => {
+                        sub.last = Some(t.title.clone());
+                        sub.log.push((true, t.title));
+                    }
+                    SessionUpdate::AgentMessage(c) | SessionUpdate::UserMessage(c) => match sub.log.last_mut() {
+                        Some((false, s)) => s.push_str(&c.text),
+                        _ => sub.log.push((false, c.text)),
+                    },
+                    _ => return,
+                }
+                cx.emit(AgentEvent::Subagents);
+                cx.notify();
+            }
             Event::Update { update, .. } => match update {
+                SessionUpdate::AgentMessage(c) | SessionUpdate::UserMessage(c) if c.media.is_some() => self.push_media(c.media),
                 SessionUpdate::AgentMessage(c) => self.append(false, &c.text),
                 SessionUpdate::AgentThought(c) => self.append(true, &c.text),
+                // The agent named the session: the task's title follows unless
+                // the user renamed it (saved, and the sidebar updates, on Changed).
+                SessionUpdate::SessionTitle(title) => {
+                    if !self.record.renamed && self.record.title != title {
+                        self.record.title = title;
+                        cx.emit(AgentEvent::Changed);
+                    }
+                }
                 SessionUpdate::UserMessage(c) => {
                     // Replayed history (session/load).
                     match self.chat.last_mut() {
@@ -650,7 +1201,8 @@ impl AgentTask {
                         }
                     });
                     self.tools.insert(id.clone(), t);
-                    self.push(ChatItem::Tool(id));
+                    self.push(ChatItem::Tool(id.clone()));
+                    self.track_turn_tool(id);
                 }
                 SessionUpdate::ToolCallUpdate(u) => {
                     let id = u.id.clone();
@@ -666,24 +1218,45 @@ impl AgentTask {
                     match self.tools.get_mut(&id) {
                         Some(t) => t.apply(&u),
                         None => {
-                            let mut t = ToolCall {
-                                id: id.clone(),
-                                title: String::new(),
-                                kind: ToolKind::Other,
-                                status: ToolStatus::Pending,
-                                locations: Vec::new(),
-                                content: Vec::new(),
-                                raw_input: None,
-                            };
-                            t.apply(&u);
+                            let t = u.to_tool_call();
                             self.tools.insert(id.clone(), t);
                             self.push(ChatItem::Tool(id.clone()));
                         }
                     }
                     self.refresh_tool(&id);
+                    self.track_turn_tool(id);
                 }
                 SessionUpdate::Plan(p) => self.plan = p,
                 SessionUpdate::AvailableCommands(c) => self.commands = c,
+                // The agent switched mode itself (e.g. out of plan mode).
+                SessionUpdate::CurrentMode(m) => {
+                    if let Some(o) = self.settings.iter_mut().find(|o| o.legacy_mode) {
+                        o.current = m;
+                    }
+                }
+                SessionUpdate::ConfigOptions(list) => self.replace_settings(list),
+                SessionUpdate::Usage { used, size, cost } => {
+                    // A later update without a cost keeps the last one known.
+                    let cost = cost.or(self.usage.and_then(|u| u.2));
+                    self.usage = Some((used, size, cost));
+                }
+                SessionUpdate::Subagent { id, title, state } => {
+                    let ix = match self.subagents.iter().position(|s| s.id == id) {
+                        Some(ix) => ix,
+                        None => {
+                            self.subagents.push(Subagent { id, title: "Subagent".into(), state: "running".into(), last: None, log: Vec::new() });
+                            self.subagents.len() - 1
+                        }
+                    };
+                    let s = &mut self.subagents[ix];
+                    if let Some(t) = title {
+                        s.title = t;
+                    }
+                    if let Some(st) = state {
+                        s.state = st;
+                    }
+                    cx.emit(AgentEvent::Subagents);
+                }
                 _ => {}
             },
             Event::Permission { id, tool_call, options, .. } => {
@@ -697,9 +1270,15 @@ impl AgentTask {
                 self.session_id = None;
                 self.permission = None;
                 if !matches!(self.status, Status::Stopped) {
-                    let tail = stderr_tail.lines().last().unwrap_or("").to_string();
-                    let msg = format!("agent exited ({}){}", code.map(|c| c.to_string()).unwrap_or("signal".into()), if tail.is_empty() { String::new() } else { format!(": {tail}") });
-                    self.push(ChatItem::Notice(msg.clone()));
+                    // The status line gets the last stderr line; the callout the
+                    // whole tail (the real error is often a few lines up).
+                    let last = stderr_tail.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+                    let how = code.map(|c| format!("code {c}")).unwrap_or("a signal".into());
+                    let msg = format!("agent exited ({how}){}", if last.is_empty() { String::new() } else { format!(": {last}") });
+                    // Mid-turn, Retry sends that turn's message again (restarting the agent).
+                    let resend = self.last_sent.clone().filter(|_| matches!(self.status, Status::Working | Status::NeedsYou));
+                    let detail = Some(tail_lines(stderr_tail.trim_end(), MAX_STDERR_LINES)).filter(|d| !d.is_empty());
+                    self.push(ChatItem::Failure(Failure { title: format!("{} exited ({how}).", self.def.label), detail, resend }));
                     self.set_status(Status::Error(msg), cx);
                 }
             }
@@ -729,14 +1308,48 @@ impl AgentTask {
                         .child(t.clone()),
                 )
                 .into_any_element(),
-            ChatItem::Agent(t) => pad(div()).child(markdownish(t, look)).into_any_element(),
-            ChatItem::Thought(t) => pad(div())
-                .text_size(look.text(-1.))
-                .italic()
-                .text_color(look.c(ui.text_muted))
-                .child(t.trim().to_string())
+            // Hover shows "Copy" (the raw Markdown).
+            ChatItem::Agent(t) => pad(div())
+                .relative()
+                .group("agent-msg")
+                .child(self.markdown(t, format!("md-{}-{ix}", cx.entity_id()), look, cx))
+                .child(
+                    div()
+                        .absolute()
+                        .top(look.z(2.))
+                        .right(look.z(12.))
+                        .rounded(look.z(4.))
+                        .bg(look.c(ui.panel_bg))
+                        .invisible()
+                        .group_hover("agent-msg", |s| s.visible())
+                        .child(crate::markdown::copy_button(("copy-msg", ix), t.clone(), look)),
+                )
                 .into_any_element(),
-            ChatItem::Notice(t) => pad(div()).text_size(look.text(-1.)).text_color(look.c(ui.text_muted)).child(t.clone()).into_any_element(),
+            // Open while it streams (the last item of a working turn), then
+            // folded to its first line; click to toggle (as in Zed).
+            ChatItem::Thought(t) => {
+                let streaming = ix + 1 == self.chat.len() && matches!(self.status, Status::Working);
+                let open = streaming != self.toggled.contains(&format!("thought-{ix}"));
+                let t = t.trim();
+                let first = t.lines().next().unwrap_or("").to_string();
+                pad(div())
+                    .text_size(look.text(0.))
+                    .text_color(look.c(ui.text_muted))
+                    .child(
+                        div()
+                            .id(("thought", ix))
+                            .flex()
+                            .gap(look.z(6.))
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(look.c(ui.text_secondary)))
+                            .child(div().flex_none().child(if open { "▾ Thinking" } else { "▸ Thinking" }))
+                            .when(!open, |d| d.child(div().min_w(px(0.)).truncate().italic().child(first)))
+                            .on_click(cx.listener(move |t, _, _, cx| t.toggle(format!("thought-{ix}"), ix, cx))),
+                    )
+                    .when(open, |d| d.child(div().pl(look.z(14.)).pt(look.z(2.)).italic().child(t.to_string())))
+                    .into_any_element()
+            }
+            ChatItem::Notice(t) => pad(div()).text_size(look.text(0.)).text_color(look.c(ui.text_muted)).child(t.clone()).into_any_element(),
             ChatItem::Output(t) => pad(div())
                 .child(
                     div()
@@ -747,11 +1360,47 @@ impl AgentTask {
                         .border_1()
                         .border_color(look.c(ui.border))
                         .font_family(look.code_font.clone())
-                        .text_size(look.text(-2.))
+                        .text_size(look.text(0.))
                         .text_color(look.c(ui.text_secondary))
                         .child(t.clone()),
                 )
                 .into_any_element(),
+            // At its own size, at most 480 high and never wider than the
+            // chat; the aspect ratio keeps the height right when it shrinks.
+            ChatItem::Image(image, (w, h)) => {
+                let (w, h) = (*w as f32, *h as f32);
+                let width = w * (480. / h).min(1.);
+                pad(div())
+                    .child(img(image.clone()).w(look.z(width)).max_w_full().aspect_ratio(w / h).rounded(look.z(4.)).border_1().border_color(look.c(ui.border)))
+                    .into_any_element()
+            }
+            ChatItem::Link { uri, name } => {
+                let target = uri.clone();
+                pad(div())
+                    .child(
+                        div()
+                            .id(("link", ix))
+                            .flex()
+                            .items_center()
+                            .gap(look.z(6.))
+                            .max_w_full()
+                            .px(look.z(8.))
+                            .py(look.z(2.))
+                            .rounded(look.z(4.))
+                            .border_1()
+                            .border_color(look.c(ui.border))
+                            .bg(look.c(ui.panel_bg))
+                            .cursor_pointer()
+                            .text_size(look.text(0.))
+                            .text_color(look.c(ui.text_secondary))
+                            .hover(|d| d.text_color(look.c(ui.text)).border_color(look.c(ui.border_strong)))
+                            .child(div().flex_none().text_color(look.c(ui.text_muted)).child(if uri.starts_with("file://") { "▤" } else { "↗" }))
+                            .child(div().min_w(px(0.)).truncate().child(name.clone()))
+                            .on_click(cx.listener(move |t, _, _, cx| t.open_link(&target, cx))),
+                    )
+                    .into_any_element()
+            }
+            ChatItem::Failure(f) => pad(div()).child(self.failure_callout(ix, f, look, cx)).into_any_element(),
             ChatItem::Tool(id) => {
                 let Some(t) = self.tools.get(id) else { return div().into_any_element() };
                 let (glyph, color) = match t.status {
@@ -771,16 +1420,28 @@ impl AgentTask {
                     ToolKind::SwitchMode => "mode",
                     ToolKind::Other => "tool",
                 };
-                let (mut add, mut del) = (0usize, 0usize);
-                for c in &t.content {
-                    if let ToolContent::Diff { old_text, new_text, .. } = c {
-                        add += new_text.lines().count();
-                        del += old_text.as_deref().map(|o| o.lines().count()).unwrap_or(0);
-                    }
-                }
+                // Real line counts (every line of old and new counted before).
+                let diffs: Vec<(&PathBuf, Vec<(char, &str)>)> = t
+                    .content
+                    .iter()
+                    .filter_map(|c| match c {
+                        ToolContent::Diff { path, old_text, new_text } => Some((path, line_diff(old_text.as_deref().unwrap_or(""), new_text))),
+                        _ => None,
+                    })
+                    .collect();
+                let add = diffs.iter().flat_map(|(_, d)| d).filter(|(k, _)| *k == '+').count();
+                let del = diffs.iter().flat_map(|(_, d)| d).filter(|(k, _)| *k == '-').count();
                 let loc = t.locations.first().cloned();
                 let title = if t.title.is_empty() { kind.to_string() } else { t.title.clone() };
-                let diff = add + del > 0;
+                let body = self.tool_body(t, &diffs, look, cx);
+                // Edits and failures start open; the rest folded (click toggles).
+                // A command stays open while it runs, so its output shows as it
+                // streams (`terminal_output_delta`), then folds.
+                let running_cmd = t.content.iter().any(|c| matches!(c, ToolContent::Terminal(_))) && t.exit.is_none() && matches!(t.status, ToolStatus::Pending | ToolStatus::InProgress);
+                let default_open = matches!(t.kind, ToolKind::Edit | ToolKind::Delete | ToolKind::Move) || t.status == ToolStatus::Failed || running_cmd;
+                let open = body.is_some() && default_open != self.toggled.contains(id.as_str());
+                let expandable = body.is_some();
+                let tid = id.clone();
                 pad(div())
                     .py(look.z(2.))
                     .child(
@@ -789,25 +1450,263 @@ impl AgentTask {
                             .flex()
                             .items_center()
                             .gap(look.z(8.))
-                            .text_size(look.text(-1.))
+                            .text_size(look.text(0.))
                             .text_color(look.c(ui.text_secondary))
-                            .when(loc.is_some(), |d| d.cursor_pointer().hover(|d| d.text_color(look.c(ui.text))))
+                            .when(expandable || loc.is_some(), |d| d.cursor_pointer().hover(|d| d.text_color(look.c(ui.text))))
                             .child(div().w(look.z(40.)).flex_none().text_color(look.c(ui.text_muted)).child(kind))
                             .child(div().min_w(px(0.)).truncate().child(title))
-                            .when(diff, |d| {
+                            .when(add + del > 0, |d| {
                                 d.child(div().flex_none().text_color(look.c(look.theme.diff.added_text)).child(format!("+{add}")))
                                     .child(div().flex_none().text_color(look.c(look.theme.diff.removed_text)).child(format!("−{del}")))
                             })
+                            .when_some(t.exit.flatten().filter(|c| *c != 0), |d, c| d.child(div().flex_none().text_color(look.c(ui.error)).child(format!("exit {c}"))))
                             .child(div().flex_none().text_color(look.c(color)).child(glyph))
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                if let Some(l) = &loc {
+                            .when(expandable, |d| d.child(div().flex_none().text_color(look.c(ui.text_muted)).child(if open { "▾" } else { "▸" })))
+                            .on_click(cx.listener(move |t, _, _, cx| {
+                                if expandable {
+                                    t.toggle(tid.to_string(), ix, cx);
+                                } else if let Some(l) = &loc {
                                     cx.emit(AgentEvent::OpenFile(l.path.clone(), l.line));
                                 }
                             })),
                     )
+                    .when_some(body.filter(|_| open), |d, b| d.child(div().pl(look.z(48.)).pt(look.z(4.)).child(b)))
                     .into_any_element()
             }
         }
+    }
+
+    /// Fold or unfold a chat item (tool call `key` = its id, thought
+    /// `thought-<ix>`) and re-measure its row.
+    fn toggle(&mut self, key: String, ix: usize, cx: &mut Context<Self>) {
+        if !self.toggled.remove(&key) {
+            self.toggled.insert(key);
+        }
+        self.list.splice(ix..ix + 1, 1);
+        cx.notify();
+    }
+
+    /// An error-coloured callout: what went wrong, the full error (bounded,
+    /// scrolls), then Retry / Edit & resend when a message can be sent
+    /// again, and Copy error.
+    fn failure_callout(&self, ix: usize, f: &Failure, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = &look.theme.ui;
+        let button = |id: &'static str, label: &'static str| {
+            div()
+                .id((id, ix))
+                .px(look.z(10.))
+                .py(look.z(3.))
+                .rounded(look.z(4.))
+                .cursor_pointer()
+                .text_size(look.text(0.))
+                .bg(look.c(ui.button_bg))
+                .text_color(look.c(ui.button_text))
+                .hover(|d| d.bg(look.c(ui.hover_bg)))
+                .child(label)
+        };
+        let copy = match &f.detail {
+            Some(d) => format!("{}\n\n{d}", f.title),
+            None => f.title.clone(),
+        };
+        let (retry, edit) = (f.resend.clone(), f.resend.clone());
+        div()
+            .px(look.z(12.))
+            .py(look.z(8.))
+            .rounded(look.z(6.))
+            .border_1()
+            .border_color(look.c(ui.error))
+            .flex()
+            .flex_col()
+            .gap(look.z(6.))
+            .text_size(look.text(0.))
+            .child(div().text_color(look.c(ui.error)).child(f.title.clone()))
+            .children(f.detail.clone().map(|d| {
+                div()
+                    .id(("failure-detail", ix))
+                    .max_h(look.z(180.))
+                    .overflow_y_scroll()
+                    .child(code_block(&d, look))
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(look.z(6.))
+                    .children(retry.map(|out| button("failure-retry", "Retry").on_click(cx.listener(move |t, _, _, cx| t.retry(out.clone(), cx)))))
+                    .children(edit.map(|out| button("failure-edit", "Edit & resend").on_click(cx.listener(move |t, _, window, cx| t.edit_resend(&out, window, cx)))))
+                    .child(button("failure-copy", "Copy error").on_click(move |_, _, cx: &mut App| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone())))),
+            )
+    }
+
+    /// What an unfolded tool call shows: its text (code blocks in the code
+    /// font), each file's diff, a command's output and exit, or else its raw
+    /// input/output. None when there's nothing to show.
+    fn tool_body(&self, t: &ToolCall, diffs: &[(&PathBuf, Vec<(char, &str)>)], look: &Look, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let ui = &look.theme.ui;
+        let mut parts: Vec<gpui::AnyElement> = Vec::new();
+        for c in &t.content {
+            match c {
+                ToolContent::Text(s) if !s.trim().is_empty() => parts.push(self.markdown(s, format!("md-{}-{}-{}", cx.entity_id(), t.id, parts.len()), look, cx).into_any_element()),
+                ToolContent::Terminal(_) => {
+                    let out = t.output.as_deref().unwrap_or("").trim_end();
+                    let status = match t.exit {
+                        None => "running…".to_string(),
+                        Some(Some(0)) => "exit 0".into(),
+                        Some(Some(c)) => format!("exit {c}"),
+                        Some(None) => "ended".into(),
+                    };
+                    let failed = matches!(t.exit, Some(Some(c)) if c != 0);
+                    // Still running with nothing yet: just "running…" (the
+                    // Claude adapter sends the output when the command ends).
+                    let block = (!out.is_empty() || t.exit.is_some()).then(|| code_block(&tail_lines(out, MAX_TOOL_LINES), look).when(out.is_empty(), |d| d.child("(no output)")));
+                    parts.push(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(look.z(2.))
+                            .children(block)
+                            .child(div().text_size(look.text(0.)).text_color(look.c(if failed { ui.error } else { ui.text_muted })).child(status))
+                            .into_any_element(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        for (path, lines) in diffs {
+            let path = (*path).clone();
+            let shown = lines.iter().filter(|(k, _)| *k != ' ').count().min(MAX_TOOL_LINES);
+            let rows = lines.iter().filter(|(k, _)| *k != ' ').take(MAX_TOOL_LINES).map(|(k, l)| {
+                let (bg, fg) = if *k == '+' { (look.theme.diff.added_line, look.theme.diff.added_text) } else { (look.theme.diff.removed_line, look.theme.diff.removed_text) };
+                div().px(look.z(6.)).bg(look.c(bg)).child(div().text_color(look.c(fg)).child(format!("{k} {l}")))
+            });
+            let more = lines.iter().filter(|(k, _)| *k != ' ').count() - shown;
+            parts.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(look.z(2.))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("diff-{}", path.display())))
+                            .text_size(look.text(0.))
+                            .text_color(look.c(ui.text_muted))
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(look.c(ui.text)))
+                            .child(self.rel(&path))
+                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(AgentEvent::OpenFile(path.clone(), None)))),
+                    )
+                    .child(
+                        div()
+                            .rounded(look.z(4.))
+                            .border_1()
+                            .border_color(look.c(ui.border))
+                            .overflow_hidden()
+                            .font_family(look.code_font.clone())
+                            .text_size(look.text(0.))
+                            .children(rows)
+                            .when(more > 0, |d| d.child(div().px(look.z(6.)).text_color(look.c(ui.text_muted)).child(format!("… {more} more changed lines")))),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if parts.is_empty() {
+            // Nothing structured: the raw input, then the raw result.
+            for v in [&t.raw_input, &t.raw_output].into_iter().flatten() {
+                let text = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Object(m) if m.is_empty() => continue,
+                    v => serde_json::to_string_pretty(v).unwrap_or_default(),
+                };
+                if !text.trim().is_empty() {
+                    parts.push(code_block(&tail_lines(text.trim_end(), MAX_TOOL_LINES), look).into_any_element());
+                }
+            }
+        }
+        (!parts.is_empty()).then(|| div().flex().flex_col().gap(look.z(6.)).children(parts).into_any_element())
+    }
+
+    /// A tool call of the running turn: remember it and recount the files
+    /// the turn changed (the strip above the prompt).
+    fn track_turn_tool(&mut self, id: ToolCallId) {
+        if !matches!(self.status, Status::Working | Status::NeedsYou) {
+            return;
+        }
+        if !self.turn_tools.contains(&id) {
+            self.turn_tools.push(id);
+        }
+        let tools: Vec<&ToolCall> = self.turn_tools.iter().filter_map(|id| self.tools.get(id)).collect();
+        self.turn_files = turn_changes(&tools);
+    }
+
+    /// "3 files changed · +40 −12 · Review", then a chip per file (opens it).
+    fn files_strip(&self, look: &Look, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if self.turn_files.is_empty() {
+            return None;
+        }
+        let ui = &look.theme.ui;
+        let (add, del) = change_totals(&self.turn_files);
+        let n = self.turn_files.len();
+        let counts = |d: gpui::Stateful<gpui::Div>, add: usize, del: usize| {
+            d.when(add > 0, |d| d.child(div().flex_none().text_color(look.c(look.theme.diff.added_text)).child(format!("+{add}"))))
+                .when(del > 0, |d| d.child(div().flex_none().text_color(look.c(look.theme.diff.removed_text)).child(format!("−{del}"))))
+        };
+        let chips: Vec<_> = self
+            .turn_files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let path = f.path.clone();
+                let name = f.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| self.rel(&f.path));
+                let chip = div()
+                    .id(("turn-file", i))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(look.z(4.))
+                    .px(look.z(6.))
+                    .py(look.z(1.))
+                    .rounded(look.z(4.))
+                    .cursor_pointer()
+                    .bg(look.c(ui.active_bg))
+                    .text_color(look.c(ui.text_secondary))
+                    .hover(|d| d.text_color(look.c(ui.text)))
+                    .child(div().max_w(look.z(220.)).truncate().child(name));
+                counts(chip, f.add, f.del).on_click(cx.listener(move |_, _, _, cx| cx.emit(AgentEvent::OpenFile(path.clone(), None))))
+            })
+            .collect();
+        let summary = div()
+            .id("turn-files")
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(look.z(6.))
+            .text_color(look.c(ui.text_secondary))
+            .child(format!("{n} file{} changed", if n == 1 { "" } else { "s" }));
+        Some(
+            div()
+                .flex_none()
+                .mx(look.z(12.))
+                .mb(look.z(6.))
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(look.z(6.))
+                .text_size(look.text(0.))
+                .child(counts(summary, add, del))
+                .child(
+                    div()
+                        .id("turn-review")
+                        .flex_none()
+                        .px(look.z(6.))
+                        .rounded(look.z(4.))
+                        .cursor_pointer()
+                        .text_color(look.c(self.accent))
+                        .hover(|d| d.bg(look.c(ui.hover_bg)))
+                        .child("Review")
+                        .on_click(cx.listener(|t, _, _, cx| t.show_changes(cx))),
+                )
+                .children(chips),
+        )
     }
 
     fn plan_strip(&self, look: &Look) -> Option<impl IntoElement> {
@@ -826,8 +1725,8 @@ impl AgentTask {
                 .flex()
                 .flex_col()
                 .gap(look.z(3.))
-                .text_size(look.text(-1.))
-                .child(div().text_size(look.text(-2.)).font_weight(gpui::FontWeight::MEDIUM).text_color(look.c(ui.text_muted)).child(format!("TO-DO  {done}/{}", self.plan.len())))
+                .text_size(look.text(0.))
+                .child(div().text_size(look.text(0.)).font_weight(gpui::FontWeight::MEDIUM).text_color(look.c(ui.text_muted)).child(format!("TO-DO  {done}/{}", self.plan.len())))
                 .children(self.plan.iter().map(|p| {
                     let (g, c) = match p.status {
                         PlanStatus::Completed => ("●", ui.text_muted),
@@ -850,20 +1749,73 @@ impl AgentTask {
         let ui = &look.theme.ui;
         let what = p.tool.title.clone().unwrap_or_else(|| "use a tool".into());
         let file = p.tool.locations.as_ref().and_then(|l| l.first()).map(|l| self.rel(&l.path));
-        let button = |label: &'static str, kind: PermissionKind, primary: bool, id: &'static str| {
-            div()
-                .id(id)
-                .px(look.z(10.))
-                .py(look.z(3.))
-                .rounded(look.z(4.))
-                .cursor_pointer()
-                .text_size(look.text(-1.))
-                .bg(look.c(if primary { ui.button_primary_bg } else { ui.button_bg }))
-                .text_color(look.c(if primary { ui.button_primary_text } else { ui.button_text }))
-                .child(label)
-                .on_click(cx.listener(move |t, _, _, cx| t.answer_permission(kind, cx)))
+        // What's being approved: the diff, text or command, as in the chat.
+        let tool = self.tools.get(&p.tool.id).cloned().map(|mut t| {
+            t.apply(&p.tool);
+            t
+        });
+        let tool = tool.unwrap_or_else(|| p.tool.to_tool_call());
+        let diffs: Vec<(&PathBuf, Vec<(char, &str)>)> = tool
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                ToolContent::Diff { path, old_text, new_text } => Some((path, line_diff(old_text.as_deref().unwrap_or(""), new_text))),
+                _ => None,
+            })
+            .collect();
+        let detail = self.tool_body(&tool, &diffs, look, cx);
+        // Every option the agent offers, in its words ("Yes, and auto-accept
+        // edits", "No, keep planning"…); the first allow is the primary one.
+        let primary = p.options.iter().position(|o| o.kind == PermissionKind::AllowOnce).or_else(|| p.options.iter().position(|o| matches!(o.kind, PermissionKind::AllowAlways)));
+        // Cmd+Y / Cmd+Opt+Y / Cmd+Opt+Z answer with the first option of their kind.
+        let key_for = |i: usize, o: &PermissionOption| -> Option<String> {
+            let action: Box<dyn gpui::Action> = match o.kind {
+                PermissionKind::AllowOnce => Box::new(aa::AllowOnce),
+                PermissionKind::AllowAlways => Box::new(aa::AllowAlways),
+                PermissionKind::RejectOnce => Box::new(aa::Deny),
+                PermissionKind::RejectAlways => return None,
+            };
+            let first = p.options.iter().position(|x| x.kind == o.kind) == Some(i);
+            let keys = crate::commands::find(action.as_ref())?.first_keys();
+            (first && !keys.is_empty()).then(|| crate::commands::display_keys(keys))
         };
-        let has = |k: PermissionKind| p.options.iter().any(|o| o.kind == k);
+        let buttons: Vec<_> = p
+            .options
+            .iter()
+            .enumerate()
+            .map(|(i, o)| {
+                let is_primary = Some(i) == primary;
+                let reject = matches!(o.kind, PermissionKind::RejectOnce | PermissionKind::RejectAlways);
+                let label = if o.name.trim().is_empty() {
+                    match o.kind {
+                        PermissionKind::AllowOnce => "Allow once",
+                        PermissionKind::AllowAlways => "Allow for this task",
+                        PermissionKind::RejectOnce => "Deny",
+                        PermissionKind::RejectAlways => "Always deny",
+                    }
+                    .to_string()
+                } else {
+                    o.name.clone()
+                };
+                let id = o.id.clone();
+                let key = key_for(i, o);
+                div()
+                    .id(("perm-option", i))
+                    .px(look.z(10.))
+                    .py(look.z(3.))
+                    .rounded(look.z(4.))
+                    .cursor_pointer()
+                    .text_size(look.text(0.))
+                    .bg(look.c(if is_primary { ui.button_primary_bg } else { ui.button_bg }))
+                    .text_color(look.c(if is_primary { ui.button_primary_text } else if reject { ui.text_secondary } else { ui.button_text }))
+                    .flex()
+                    .items_center()
+                    .gap(look.z(6.))
+                    .child(label)
+                    .children(key.map(|k| div().text_size(look.text(-2.)).opacity(0.6).child(k)))
+                    .on_click(cx.listener(move |t, _, _, cx| t.answer_option(&id, cx)))
+            })
+            .collect();
         Some(
             div()
                 .flex_none()
@@ -878,71 +1830,167 @@ impl AgentTask {
                 .flex()
                 .flex_col()
                 .gap(look.z(6.))
-                // A long command or edit as the title scrolls here instead of
-                // growing the bar over the chat (which then couldn't scroll).
+                // The buttons come right after the title, so a long command or
+                // diff can't push them off screen; both of those scroll in
+                // their own boxes instead of growing the bar over the chat.
                 .child(
                     div()
-                        .id("perm-what")
+                        .id("perm-title")
                         .min_w(px(0.))
-                        .max_h(look.z(140.))
+                        .max_h(look.z(90.))
                         .overflow_y_scroll()
-                        .flex()
-                        .flex_col()
-                        .child(div().text_color(look.c(ui.text)).child(format!("{} wants to {what}", self.def.label)))
-                        .children(file.map(|f| div().truncate().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(f))),
+                        .text_color(look.c(ui.text))
+                        .child(format!("{} wants to {what}", self.def.label)),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(look.z(6.))
-                        .when(has(PermissionKind::AllowOnce), |d| d.child(button("Allow once", PermissionKind::AllowOnce, true, "perm-once")))
-                        .when(has(PermissionKind::AllowAlways), |d| d.child(button("Allow for this task", PermissionKind::AllowAlways, false, "perm-always")))
-                        .when(has(PermissionKind::RejectOnce), |d| d.child(button("Deny", PermissionKind::RejectOnce, false, "perm-deny"))),
-                ),
+                .child(div().flex().flex_wrap().gap(look.z(6.)).children(buttons))
+                .when(file.is_some() || detail.is_some(), |d| {
+                    d.child(
+                        div()
+                            .id("perm-what")
+                            .min_w(px(0.))
+                            .max_h(look.z(220.))
+                            .overflow_y_scroll()
+                            .flex()
+                            .flex_col()
+                            .gap(look.z(4.))
+                            .children(file.map(|f| div().truncate().text_color(look.c(ui.text_muted)).child(f)))
+                            .children(detail),
+                    )
+                }),
         )
     }
 }
 
-/// Plain text with fenced code blocks in the code font (enough for agent
-/// replies; real markdown rendering can come later).
-fn markdownish(text: &str, look: &Look) -> gpui::Div {
-    let ui = &look.theme.ui;
-    let mut out = div().flex().flex_col().gap(look.z(6.)).text_color(look.c(ui.text));
-    let mut in_code = false;
-    let mut buf = String::new();
-    let flush = |out: gpui::Div, buf: &mut String, code: bool| -> gpui::Div {
-        let t = std::mem::take(buf);
-        let t = t.trim_matches('\n').to_string();
-        if t.is_empty() {
-            return out;
-        }
-        if code {
-            out.child(
-                div()
-                    .px(look.z(10.))
-                    .py(look.z(6.))
-                    .rounded(look.z(4.))
-                    .bg(look.c(ui.panel_bg))
-                    .border_1()
-                    .border_color(look.c(ui.border))
-                    .font_family(look.code_font.clone())
-                    .text_size(look.text(-1.))
-                    .child(t),
-            )
-        } else {
-            out.child(div().child(t))
-        }
-    };
-    for line in text.split_inclusive('\n') {
-        if line.trim_start().starts_with("```") {
-            out = flush(out, &mut buf, in_code);
-            in_code = !in_code;
-            continue;
-        }
-        buf.push_str(line);
+/// Lines an unfolded tool call shows of a diff, output or raw input.
+const MAX_TOOL_LINES: usize = 200;
+/// Lines of an exited agent's stderr an error callout keeps (of ~4 KB).
+const MAX_STDERR_LINES: usize = 80;
+
+/// `s` quoted for a POSIX shell when it needs it.
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-=:@%+,".contains(c)) {
+        return s.to_string();
     }
-    flush(out, &mut buf, in_code)
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// The last `max` lines of `text`, with a note of how many were left out.
+fn tail_lines(text: &str, max: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= max {
+        return text.to_string();
+    }
+    format!("… {} earlier lines\n{}", lines.len() - max, lines[lines.len() - max..].join("\n"))
+}
+
+/// One file a turn changed, with its changed-line counts.
+#[derive(Clone, Debug, PartialEq)]
+struct FileChange {
+    path: PathBuf,
+    add: usize,
+    del: usize,
+}
+
+/// The files these tool calls changed, first-touched first: each diff's
+/// changed lines, summed per file; an edit without a diff counts its
+/// locations. Failed calls changed nothing.
+fn turn_changes(tools: &[&ToolCall]) -> Vec<FileChange> {
+    let mut out: Vec<FileChange> = Vec::new();
+    let mut add_to = |path: &Path, add: usize, del: usize| match out.iter_mut().find(|f| f.path == path) {
+        Some(f) => {
+            f.add += add;
+            f.del += del;
+        }
+        None => out.push(FileChange { path: path.to_path_buf(), add, del }),
+    };
+    for t in tools.iter().filter(|t| t.status != ToolStatus::Failed) {
+        let mut diffed = false;
+        for c in &t.content {
+            if let ToolContent::Diff { path, old_text, new_text } = c {
+                let d = line_diff(old_text.as_deref().unwrap_or(""), new_text);
+                add_to(path, d.iter().filter(|(k, _)| *k == '+').count(), d.iter().filter(|(k, _)| *k == '-').count());
+                diffed = true;
+            }
+        }
+        if !diffed && matches!(t.kind, ToolKind::Edit | ToolKind::Delete | ToolKind::Move) {
+            for l in &t.locations {
+                add_to(&l.path, 0, 0);
+            }
+        }
+    }
+    out
+}
+
+fn change_totals(files: &[FileChange]) -> (usize, usize) {
+    files.iter().fold((0, 0), |(a, d), f| (a + f.add, d + f.del))
+}
+
+fn code_block(text: &str, look: &Look) -> gpui::Div {
+    let ui = &look.theme.ui;
+    div()
+        .px(look.z(10.))
+        .py(look.z(6.))
+        .rounded(look.z(4.))
+        .bg(look.c(ui.panel_bg))
+        .border_1()
+        .border_color(look.c(ui.border))
+        .font_family(look.code_font.clone())
+        .text_size(look.text(0.))
+        .text_color(look.c(ui.text_secondary))
+        .when(!text.is_empty(), |d| d.child(text.to_string()))
+}
+
+/// Line diff of `old` to `new`: ('-', line) removed, ('+', line) added,
+/// (' ', line) kept, in order. Longest common subsequence; past ~4M cells
+/// (two files of 2,000 lines) it just shows all old removed, all new added.
+fn line_diff<'a>(old: &'a str, new: &'a str) -> Vec<(char, &'a str)> {
+    let (a, b): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
+    // Common head and tail first: an edit usually touches a few lines.
+    let head = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let tail = a[head..].iter().rev().zip(b[head..].iter().rev()).take_while(|(x, y)| x == y).count();
+    let (am, bm) = (&a[head..a.len() - tail], &b[head..b.len() - tail]);
+    let mut out: Vec<(char, &str)> = a[..head].iter().map(|l| (' ', *l)).collect();
+    if am.len() * bm.len() > 4_000_000 {
+        out.extend(am.iter().map(|l| ('-', *l)));
+        out.extend(bm.iter().map(|l| ('+', *l)));
+    } else {
+        // lcs[i][j]: common lines of am[i..] and bm[j..].
+        let (n, m) = (am.len(), bm.len());
+        let mut lcs = vec![0u32; (n + 1) * (m + 1)];
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                lcs[i * (m + 1) + j] = if am[i] == bm[j] { lcs[(i + 1) * (m + 1) + j + 1] + 1 } else { lcs[(i + 1) * (m + 1) + j].max(lcs[i * (m + 1) + j + 1]) };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < n || j < m {
+            if i < n && j < m && am[i] == bm[j] {
+                out.push((' ', am[i]));
+                (i, j) = (i + 1, j + 1);
+            // Ties remove first, so a changed line reads `-old` then `+new`.
+            } else if j < m && (i == n || lcs[i * (m + 1) + j + 1] > lcs[(i + 1) * (m + 1) + j]) {
+                out.push(('+', bm[j]));
+                j += 1;
+            } else {
+                out.push(('-', am[i]));
+                i += 1;
+            }
+        }
+    }
+    out.extend(a[a.len() - tail..].iter().map(|l| (' ', *l)));
+    out
+}
+
+impl AgentTask {
+    /// `text` as Markdown; file links open in the code modal. `id`: unique
+    /// and stable per chat item (see `markdown::render`).
+    fn markdown(&self, text: &str, id: String, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let me = cx.entity().downgrade();
+        let open: crate::markdown::OnFile = std::rc::Rc::new(move |path, line, _, cx| {
+            me.update(cx, |_, cx| cx.emit(AgentEvent::OpenFile(path, line))).ok();
+        });
+        crate::markdown::render(text, id, Some(&self.record.worktree), look, open)
+    }
 }
 
 impl Focusable for AgentTask {
@@ -953,13 +2001,104 @@ impl Focusable for AgentTask {
 
 impl AgentTask {
     /// To-do + Chat + permission bar + prompt (the "side notes").
+    /// Show a subagent's work in place of the chat (`None`: back to the chat).
+    pub fn show_subagent(&mut self, id: Option<SessionId>, cx: &mut Context<Self>) {
+        self.open_subagent = id;
+        cx.notify();
+    }
+
+    /// Stop a running subagent (the agent grants `cancel` on its session).
+    pub fn stop_subagent(&mut self, id: &SessionId, cx: &mut Context<Self>) {
+        if let Some(c) = &self.client {
+            c.cancel(id);
+        }
+        if let Some(s) = self.subagents.iter_mut().find(|s| s.id == *id) {
+            s.state = "stopped".into();
+        }
+        cx.emit(AgentEvent::Subagents);
+        cx.notify();
+    }
+
+    fn subagent_view(&self, sub: &Subagent, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = &look.theme.ui;
+        let running = sub.state == "running";
+        let id = sub.id.clone();
+        let button = |label: &'static str, key: &'static str| {
+            div().id(key).flex_none().px(look.z(8.)).py(look.z(2.)).rounded(look.z(4.)).cursor_pointer().bg(look.c(ui.button_bg)).text_color(look.c(ui.button_text)).child(label)
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_none()
+                    .px(look.z(16.))
+                    .py(look.z(8.))
+                    .flex()
+                    .items_center()
+                    .gap(look.z(8.))
+                    .border_b_1()
+                    .border_color(look.c(ui.border))
+                    .child(button("← Chat", "sub-back").on_click(cx.listener(|t, _, _, cx| t.show_subagent(None, cx))))
+                    .child(div().flex_1().min_w(px(0.)).truncate().font_weight(gpui::FontWeight::MEDIUM).child(format!("↳ {}", sub.title)))
+                    .child(div().flex_none().text_color(look.c(ui.text_muted)).child(sub.state.replace('_', " ")))
+                    .when(running, |d| d.child(button("Stop", "sub-stop").on_click(cx.listener(move |t, _, _, cx| t.stop_subagent(&id, cx))))),
+            )
+            .child(
+                div()
+                    .id("sub-log")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .px(look.z(16.))
+                    .py(look.z(8.))
+                    .flex()
+                    .flex_col()
+                    .gap(look.z(6.))
+                    .when(sub.log.is_empty(), |d| d.child(div().text_color(look.c(ui.text_muted)).child("Nothing from this subagent yet.")))
+                    .children(sub.log.iter().enumerate().map(|(n, (tool, text))| {
+                        if *tool {
+                            div().text_color(look.c(ui.text_secondary)).child(format!("· {}", text.trim()))
+                        } else {
+                            self.markdown(text.trim(), format!("md-{}-{}-{n}", cx.entity_id(), sub.id), look, cx)
+                        }
+                    })),
+            )
+    }
+
     fn notes(&self, show_plan: bool, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        if let Some(sub) = self.open_subagent.as_ref().and_then(|id| self.subagents.iter().find(|s| s.id == *id)) {
+            return self.subagent_view(sub, look, cx);
+        }
         let ui = look.theme.ui.clone();
         let me = cx.entity();
         let look2 = look.clone();
-        let chat = list(self.list.clone(), move |ix, _, cx| me.update(cx, |t, cx| t.render_item(ix, &look2, cx)))
-            .flex_1()
-            .min_h(px(0.));
+        let chat = list(self.list.clone(), move |ix, _, cx| me.update(cx, |t, cx| t.render_item(ix, &look2, cx))).size_full();
+        // Scrolled up: a "↓" to jump back to the newest message.
+        let jump = (!self.list.is_following_tail() && self.list.is_scrolled_to_end() == Some(false)).then(|| {
+            div()
+                .id("chat-bottom")
+                .absolute()
+                .right(look.z(16.))
+                .bottom(look.z(8.))
+                .px(look.z(9.))
+                .py(look.z(3.))
+                .rounded(look.z(12.))
+                .cursor_pointer()
+                .border_1()
+                .border_color(look.c(ui.border_strong))
+                .bg(look.c(ui.overlay_bg))
+                .text_size(look.text(0.))
+                .text_color(look.c(ui.text_secondary))
+                .hover(|d| d.text_color(look.c(ui.text)))
+                .child("↓")
+                .on_click(cx.listener(|t, _, _, cx| {
+                    t.follow_bottom();
+                    cx.notify();
+                }))
+        });
+        let chat = div().flex_1().min_h(px(0.)).relative().child(chat).children(jump);
         let working = matches!(self.status, Status::Working | Status::NeedsYou);
         let empty = self.chat.is_empty();
         let prompt_bar = div()
@@ -973,21 +2112,56 @@ impl AgentTask {
             .border_color(look.c(ui.border_strong))
             .bg(look.c(ui.editor_bg))
             .child(self.prompt.clone());
-        // Queue and Esc hints sit just above the field, outside it, and only
-        // while there's something to say (inside, they squeezed the field).
-        let hints = (working || !self.pending.is_empty()).then(|| {
+        // Just above the field, outside it (inside, they squeezed it): the
+        // session's settings on the left (click to choose; Shift+Tab cycles
+        // the mode), queue and Esc hints on the right while working.
+        let chips: Vec<_> = self
+            .settings
+            .iter()
+            .map(|o| {
+                let id = o.id.clone();
+                div()
+                    .id(SharedString::from(format!("setting-{}", o.id)))
+                    .flex_none()
+                    .px(look.z(6.))
+                    .py(look.z(1.))
+                    .rounded(look.z(4.))
+                    .cursor_pointer()
+                    .text_color(look.c(if o.is_mode() && o.current != o.values.first().map(|v| v.value.clone()).unwrap_or_default() { self.accent } else { ui.text_secondary }))
+                    .hover(|d| d.bg(look.c(ui.hover_bg)))
+                    // Mode and model read on their own; others need their name
+                    // ("Effort: high", "Fast: off").
+                    .child(match o.category.as_deref() {
+                        Some("mode" | "model") => format!("{} ▾", o.current_name()),
+                        _ => format!("{}: {} ▾", o.name, o.current_name()),
+                    })
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(AgentEvent::PickSetting(id.clone()))))
+            })
+            .collect();
+        let busy = working || !self.pending.is_empty();
+        // "24k / 1M · $0.31": context used of the window (warning colour
+        // past 80 %, as Zed does), and the session's cost.
+        let usage = self.usage.filter(|u| u.1 > 0).map(|(used, size, cost)| {
+            let k = |n: u64| if n >= 1_000_000 { format!("{}M", (n as f64 / 1e6 * 10.).round() / 10.) } else { format!("{}k", n.div_ceil(1000)) };
+            let text = format!("{} / {}{}", k(used), k(size), cost.map(|c| format!(" · ${c:.2}")).unwrap_or_default());
+            let hot = used as f64 >= size as f64 * 0.8;
+            div().flex_none().mr(look.z(6.)).when(hot, |d| d.text_color(look.c(ui.warning))).child(text)
+        });
+        let hints = (busy || !chips.is_empty() || usage.is_some()).then(|| {
             div()
                 .flex_none()
-                .mx(look.z(14.))
+                .mx(look.z(12.))
                 .mb(look.z(3.))
                 .flex()
-                .justify_end()
                 .items_center()
-                .gap(look.z(6.))
-                .text_size(look.text(-3.))
+                .gap(look.z(2.))
+                .text_size(look.text(0.))
                 .text_color(look.c(ui.text_muted))
-                .when(!self.pending.is_empty(), |d| d.child(div().flex_none().text_color(look.c(ui.text_secondary)).child(format!("{} queued", self.pending.len()))))
-                .when(working, |d| d.child(div().min_w(px(0.)).truncate().child("esc to stop")))
+                .children(chips)
+                .child(div().flex_1())
+                .children(usage)
+                .when(!self.pending.is_empty(), |d| d.child(div().flex_none().mr(look.z(6.)).text_color(look.c(ui.text_secondary)).child(format!("{} queued", self.pending.len()))))
+                .when(working, |d| d.child(div().min_w(px(0.)).mr(look.z(2.)).truncate().child("esc to stop")))
         });
         div()
             .size_full()
@@ -1012,9 +2186,66 @@ impl AgentTask {
                 )
             })
             .when(!empty, |d| d.child(chat))
+            .children(self.sign_in_bar(look, cx))
             .children(self.permission_bar(look, cx))
+            .children(self.files_strip(look, cx))
+            .when(!self.pending.is_empty(), |d| d.child(self.queue_list(look, cx)))
             .children(hints)
             .child(prompt_bar)
+    }
+
+    /// Queued messages, oldest (next to send) first, each removable.
+    fn queue_list(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = &look.theme.ui;
+        let row_button = |label: &'static str, id: (&'static str, usize)| {
+            div()
+                .id(id)
+                .flex_none()
+                .px(look.z(6.))
+                .rounded(look.z(4.))
+                .cursor_pointer()
+                .text_size(look.text(-1.))
+                .text_color(look.c(ui.text_muted))
+                .hover(|d| d.bg(look.c(ui.hover_bg)).text_color(look.c(ui.text)))
+                .child(label)
+        };
+        div()
+            .flex_none()
+            .mx(look.z(12.))
+            .mb(look.z(6.))
+            .flex()
+            .flex_col()
+            .gap(look.z(4.))
+            .child(div().text_size(look.text(0.)).font_weight(gpui::FontWeight::MEDIUM).text_color(look.c(ui.text_muted)).child(format!("QUEUED  {}", self.pending.len())))
+            .children(self.pending.iter().enumerate().map(|(i, o)| {
+                let labels = if o.labels.is_empty() { String::new() } else { format!("  [{}]", o.labels.join(", ")) };
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(look.z(8.))
+                    .px(look.z(10.))
+                    .py(look.z(4.))
+                    .rounded(look.z(4.))
+                    .bg(look.c(ui.active_bg))
+                    .text_color(look.c(ui.text_secondary))
+                    .child(div().flex_1().min_w(px(0.)).child(format!("{}{labels}", o.text.trim())))
+                    .child(row_button("Send now", ("queue-send", i)).on_click(cx.listener(move |t, _, _, cx| t.send_queued_now(i, cx))))
+                    .child(row_button("Edit", ("queue-edit", i)).on_click(cx.listener(move |t, _, window, cx| {
+                        t.edit_queued(i, cx);
+                        let f = t.prompt.read(cx).focus.clone();
+                        window.focus(&f, cx);
+                    })))
+                    .child(
+                        div()
+                            .id(("queue-x", i))
+                            .flex_none()
+                            .cursor_pointer()
+                            .text_color(look.c(ui.text_muted))
+                            .hover(|d| d.text_color(look.c(ui.text)))
+                            .child("✕")
+                            .on_click(cx.listener(move |t, _, _, cx| t.unqueue(i, cx))),
+                    )
+            }))
     }
 
     fn header(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
@@ -1117,11 +2348,69 @@ impl Render for AgentTask {
         div()
             .key_context("AgentView")
             .track_focus(&self.focus)
+            .on_action(cx.listener(Self::cycle_mode))
             .size_full()
             .flex()
             .flex_col()
             .bg(look.bg(ui.editor_bg))
             .child(header)
             .child(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn changed(d: &[(char, &str)]) -> Vec<String> {
+        d.iter().filter(|(k, _)| *k != ' ').map(|(k, l)| format!("{k}{l}")).collect()
+    }
+
+    #[test]
+    fn line_diff_counts_only_changed_lines() {
+        // One line edited in a 5-line file: -1 +1, not -5 +5.
+        let d = line_diff("a\nb\nc\nd\ne", "a\nb\nC\nd\ne");
+        assert_eq!(changed(&d), ["-c", "+C"]);
+        assert_eq!(d.len(), 6, "kept lines stay, in order");
+        // A new file is all added; an insertion keeps its neighbours.
+        assert_eq!(changed(&line_diff("", "x\ny")), ["+x", "+y"]);
+        assert_eq!(changed(&line_diff("a\nc", "a\nb\nc")), ["+b"]);
+        assert_eq!(changed(&line_diff("a\nb\nc", "a\nc")), ["-b"]);
+        assert!(changed(&line_diff("same\n", "same\n")).is_empty());
+        // Middle edits around repeated lines.
+        assert_eq!(changed(&line_diff("x\na\nx\nb\nx", "x\nb\nx\na\nx")).len(), 4);
+    }
+
+    #[test]
+    fn turn_changes_sums_per_file() {
+        let diff = |p: &str, old: Option<&str>, new: &str| ToolContent::Diff { path: p.into(), old_text: old.map(str::to_string), new_text: new.into() };
+        let loc = |p: &str| vec![qur_acp::Location { path: p.into(), line: None }];
+        let edit1 = ToolCall { kind: ToolKind::Edit, status: ToolStatus::Completed, content: vec![diff("/w/a.rs", Some("x\ny"), "x\nY\nz")], ..Default::default() };
+        let edit2 = ToolCall { kind: ToolKind::Edit, status: ToolStatus::InProgress, content: vec![diff("/w/a.rs", Some("q"), "")], ..Default::default() };
+        let write = ToolCall { kind: ToolKind::Edit, status: ToolStatus::Completed, content: vec![diff("/w/new.ts", None, "1\n2\n3")], ..Default::default() };
+        let failed = ToolCall { kind: ToolKind::Edit, status: ToolStatus::Failed, content: vec![diff("/w/b.rs", None, "nope")], ..Default::default() };
+        let moved = ToolCall { kind: ToolKind::Move, status: ToolStatus::Completed, locations: loc("/w/c.rs"), ..Default::default() };
+        let read = ToolCall { kind: ToolKind::Read, status: ToolStatus::Completed, locations: loc("/w/d.rs"), ..Default::default() };
+        let files = turn_changes(&[&edit1, &read, &write, &edit2, &failed, &moved]);
+        let got: Vec<(&str, usize, usize)> = files.iter().map(|f| (f.path.to_str().unwrap(), f.add, f.del)).collect();
+        // a.rs: y -> Y, +z (+2 -1), then q removed (-1).
+        assert_eq!(got, [("/w/a.rs", 2, 2), ("/w/new.ts", 3, 0), ("/w/c.rs", 0, 0)]);
+        assert_eq!(change_totals(&files), (5, 2));
+        assert_eq!(change_totals(&[]), (0, 0));
+    }
+
+    #[test]
+    fn shell_quote_only_when_needed() {
+        assert_eq!(shell_quote("/usr/bin/node"), "/usr/bin/node");
+        assert_eq!(shell_quote("--claudeai"), "--claudeai");
+        assert_eq!(shell_quote("a b"), "'a b'");
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn tail_lines_keeps_the_end() {
+        assert_eq!(tail_lines("1\n2\n3", 5), "1\n2\n3");
+        assert_eq!(tail_lines("1\n2\n3\n4", 2), "… 2 earlier lines\n3\n4");
     }
 }

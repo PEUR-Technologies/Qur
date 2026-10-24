@@ -3594,6 +3594,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulldown-cmark"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "278e9268c93b9e498a2da46c34d90ba93a3255eb99009646398f34bc73ab36eb"
+dependencies = [
+ "bitflags 2.13.2",
+ "memchr",
+ "unicase",
+]
+
+[[package]]
 name = "pulp"
 version = "0.22.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3648,7 +3659,7 @@ dependencies = [
 
 [[package]]
 name = "qur_acp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "futures",
  "libc",
@@ -3657,7 +3668,7 @@ dependencies = [
 
 [[package]]
 name = "qur_agents"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "qur_config",
  "qur_worktree",
@@ -3668,17 +3679,19 @@ dependencies = [
 
 [[package]]
 name = "qur_app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "alacritty_terminal",
  "futures",
  "gpui",
  "gpui_platform",
+ "image",
  "libc",
  "nucleo-matcher",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "pulldown-cmark",
  "qur_acp",
  "qur_agents",
  "qur_browser",
@@ -3699,7 +3712,7 @@ dependencies = [
 
 [[package]]
 name = "qur_browser"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "block2 0.6.2",
  "futures",
@@ -3712,7 +3725,7 @@ dependencies = [
 
 [[package]]
 name = "qur_config"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "toml_edit 0.25.17+spec-1.1.0",
@@ -3720,7 +3733,7 @@ dependencies = [
 
 [[package]]
 name = "qur_editor"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "regex",
  "ropey",
@@ -3730,15 +3743,15 @@ dependencies = [
 
 [[package]]
 name = "qur_git"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "qur_heat"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "qur_search"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ignore",
  "regex",
@@ -3746,7 +3759,7 @@ dependencies = [
 
 [[package]]
 name = "qur_syntax"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ropey",
  "tree-sitter",
@@ -3766,7 +3779,7 @@ dependencies = [
 
 [[package]]
 name = "qur_theme"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "toml_edit 0.25.17+spec-1.1.0",
@@ -3774,14 +3787,14 @@ dependencies = [
 
 [[package]]
 name = "qur_tree"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ignore",
 ]
 
 [[package]]
 name = "qur_watch"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "futures",
  "ignore",
@@ -3790,7 +3803,7 @@ dependencies = [
 
 [[package]]
 name = "qur_worktree"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "r-efi"
@@ -5115,6 +5128,12 @@ dependencies = [
  "tempfile",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "unicase"
+version = "2.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
 
 [[package]]
 name = "unicode-bidi"

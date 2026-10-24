@@ -21,10 +21,10 @@ pub mod qur {
             About, CheckSetup, OpenKeymap, OpenAgents, VimMode, NewAgentTask, FindInProject,
             ReplaceInProject, GitPanel, SearchPanel, PeekLayoutA, PeekLayoutB, PeekLayoutC,
             CyclePeekLayout, PeekLive, PeekTodo, PeekChat, PeekChanges, FollowAgent, GoToSymbol,
-            FocusPrompt, StopAgent, TakeOver, NextAgent, PrevAgent, ReviewChanges, Merge,
+            FocusPrompt, FocusInput, StopAgent, TakeOver, NextAgent, PrevAgent, ReviewChanges, Merge,
             KeepWorking, DiscardTask, OpenWorktreeInTerminal, RevealWorktree, KeyboardShortcuts,
             RunDoctor, ShowLogs, ReportProblem, ExpandSelection, ShrinkSelection,
-            RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge,
+            RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge, Caffeinate,
         ]
     );
 
@@ -73,11 +73,16 @@ pub mod setup {
 
 /// Answers for the permission bar of the selected agent.
 pub mod agent {
-    gpui::actions!(agent, [AllowOnce, AllowAlways, Deny]);
+    gpui::actions!(agent, [AllowOnce, AllowAlways, Deny, CycleMode]);
 }
 
 pub mod terminal {
-    gpui::actions!(terminal, [Clear, SendLineStart, SendLineEnd, SendKillLine, SendBackTab, Find]);
+    gpui::actions!(terminal, [Clear, SendLineStart, SendLineEnd, SendKillLine, SendBackTab, Find, SplitRight, SplitDown, Tile, FocusLeft, FocusRight, FocusUp, FocusDown]);
+}
+
+/// The Browser view's keys (while it, or the page in it, has focus).
+pub mod browser {
+    gpui::actions!(browser, [Reload, FocusAddress, Back, Forward, ZoomIn, ZoomOut, ZoomReset]);
 }
 
 /// Single-line text fields (find, replace, go to line, pickers).
@@ -128,9 +133,13 @@ const E: Option<&str> = Some("Editor");
 const T: Option<&str> = Some("Terminal");
 const I: Option<&str> = Some("TextInput");
 const W: Option<&str> = None;
+/// The Browser view, but not its address bar (Cmd+Left/Right edit there).
+const B: Option<&str> = Some("Browser && !TextInput");
 /// Global, except where the terminal needs the key itself (Ctrl+G, Ctrl+Tab,
 /// chords that would shadow Cmd+K Clear).
 const NT: Option<&str> = Some("!Terminal");
+/// Permission answers: anywhere but where you're editing or typing a command.
+const PERM: Option<&str> = Some("!Editor && !Terminal && !Picker");
 use Tier::{Later as L, Ready as R};
 
 #[rustfmt::skip]
@@ -251,8 +260,16 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::NewAgentTerminal, "Terminal", "New Agent Terminal", "cmd-shift-t", W, R),
     cmd!(qur::CloseTerminal, "Terminal", "Close Terminal", "cmd-w", T, R),
     cmd!(qur::ToggleTerminal, "View", "Go to Terminal", "ctrl-`", W, R),
+    cmd!(qur::Caffeinate, "View", "Keep Mac Awake (caffeinate)", "", W, R),
     cmd!(terminal::Clear, "Terminal", "Clear", "cmd-k", T, R),
     cmd!(terminal::Find, "Terminal", "Find in Terminal", "cmd-f", T, R),
+    cmd!(terminal::Tile, "Terminal", "New Tiled Terminal", "cmd-enter", W, R),
+    cmd!(terminal::SplitRight, "Terminal", "Split Right", "cmd-d", T, R),
+    cmd!(terminal::SplitDown, "Terminal", "Split Down", "cmd-shift-d", T, R),
+    cmd!(terminal::FocusLeft, "Terminal", "Focus Pane Left", "cmd-alt-left", T, R),
+    cmd!(terminal::FocusRight, "Terminal", "Focus Pane Right", "cmd-alt-right", T, R),
+    cmd!(terminal::FocusUp, "Terminal", "Focus Pane Above", "cmd-alt-up", T, R),
+    cmd!(terminal::FocusDown, "Terminal", "Focus Pane Below", "cmd-alt-down", T, R),
     cmd!(qur::PrevTerminal, "Terminal", "Previous Terminal", "cmd-shift-[|cmd-{", W, R),
     cmd!(qur::NextTerminal, "Terminal", "Next Terminal", "cmd-shift-]|cmd-}", W, R),
     cmd!(terminal::SendLineStart, "Terminal", "Line Start", "cmd-left", T, R),
@@ -267,13 +284,18 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::SearchPanel, "View", "Search", "", W, R),
     // Agents and peek
     cmd!(qur::FocusPrompt, "Agent", "Focus Prompt", "cmd-i", W, R),
+    // "/" like a browser's search box, only when you're not typing somewhere.
+    cmd!(qur::FocusInput, "View", "Focus Input Field", "/", Some("!Editor && !Terminal && !TextInput && !Picker"), R),
     cmd!(qur::StopAgent, "Agent", "Stop", "cmd-.", W, R),
     cmd!(qur::TakeOver, "Agent", "Take Over", "", W, R),
     cmd!(qur::NextAgent, "Agent", "Next Session", "ctrl-alt-down", W, R),
     cmd!(qur::PrevAgent, "Agent", "Previous Session", "ctrl-alt-up", W, R),
-    cmd!(agent::AllowOnce, "Agent", "Permission: Allow Once", "", W, R),
-    cmd!(agent::AllowAlways, "Agent", "Permission: Allow for This Task", "", W, R),
-    cmd!(agent::Deny, "Agent", "Permission: Deny", "", W, R),
+    // Zed's keys. Not in the editor or a terminal (they'd answer an agent you
+    // can't see) or a picker; the workspace answers the selected agent first.
+    cmd!(agent::AllowOnce, "Agent", "Permission: Allow Once", "cmd-y", PERM, R),
+    cmd!(agent::AllowAlways, "Agent", "Permission: Allow for This Task", "cmd-alt-y", PERM, R),
+    cmd!(agent::Deny, "Agent", "Permission: Deny", "cmd-alt-z", PERM, R),
+    cmd!(agent::CycleMode, "Agent", "Next Mode (Default / Accept Edits / Plan…)", "shift-tab", Some("AgentView"), R),
     cmd!(qur::ReviewChanges, "Agent", "Review Changes", "", W, R),
     cmd!(qur::Merge, "Agent", "Merge into My Branch", "", W, R),
     cmd!(qur::KeepWorking, "Agent", "Keep Working", "", W, R),
@@ -301,6 +323,13 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::PeekChanges, "View", "Changes", "cmd-4", W, R),
     cmd!(qur::PeekBrowser, "View", "Browser", "cmd-5", W, R),
     cmd!(qur::ToggleInspect, "View", "Browser: Inspect Element", "cmd-shift-c", NT, R),
+    cmd!(browser::Reload, "Browser", "Reload Page", "cmd-r", B, R),
+    cmd!(browser::FocusAddress, "Browser", "Address Bar", "cmd-l", B, R),
+    cmd!(browser::Back, "Browser", "Back", "cmd-[|cmd-left", B, R),
+    cmd!(browser::Forward, "Browser", "Forward", "cmd-]|cmd-right", B, R),
+    cmd!(browser::ZoomIn, "Browser", "Zoom Page In", "cmd-=|cmd-+", B, R),
+    cmd!(browser::ZoomOut, "Browser", "Zoom Page Out", "cmd--", B, R),
+    cmd!(browser::ZoomReset, "Browser", "Actual Size", "cmd-0", B, R),
     cmd!(qur::FollowAgent, "View", "Follow Agent", "", W, R),
     // Help
     cmd!(qur::KeyboardShortcuts, "Help", "Qur Keyboard Shortcuts", "", W, R),
@@ -515,6 +544,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::ToggleSidebar).checked(s.sidebar),
             item(qur::RevealInFiles),
             item(qur::ToggleTerminal),
+            item(qur::Caffeinate),
             item(qur::GitPanel),
             M::submenu(Menu::new("Git").items([item(qur::GitStageAll), item(qur::GitUnstageAll), item(qur::GitCommit)])),
             item(qur::SearchPanel),
@@ -592,6 +622,15 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::NewAgentTerminal),
             item(qur::NextTerminal),
             item(qur::PrevTerminal),
+            sep(),
+            item(terminal::Tile),
+            item(terminal::SplitRight),
+            item(terminal::SplitDown),
+            item(terminal::FocusLeft),
+            item(terminal::FocusRight),
+            item(terminal::FocusUp),
+            item(terminal::FocusDown),
+            sep(),
             item(terminal::Clear),
             item(qur::CloseTerminal),
         ]),

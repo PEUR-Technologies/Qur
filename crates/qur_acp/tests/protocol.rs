@@ -62,12 +62,38 @@ fn group_gone(pgid: i32) -> bool {
     unsafe { libc::killpg(pgid, 0) != 0 }
 }
 
-fn start(client: &Client) -> String {
+fn start(client: &Client) -> SessionId {
     let init = wait(client.initialize(), 10).unwrap();
     assert_eq!(init.protocol_version, 1);
     assert_eq!(init.agent_name.as_deref(), Some("fake-agent"));
     assert!(init.load_session);
-    wait(client.new_session(Path::new("/tmp")), 10).unwrap()
+    wait(client.new_session(Path::new("/tmp")), 10).unwrap().0
+}
+
+#[test]
+fn session_settings_modes_and_config_options() {
+    let (client, mut rx) = fake(&[]);
+    wait(client.initialize(), 10).unwrap();
+    let (sid, opts) = wait(client.new_session(Path::new("/tmp")), 10).unwrap();
+    // Legacy modes first, then the model; the boolean option is skipped.
+    let ids: Vec<_> = opts.iter().map(|o| o.id.as_str()).collect();
+    assert_eq!(ids, ["mode", "model"]);
+    let (mode, model) = (&opts[0], &opts[1]);
+    assert!(mode.legacy_mode && mode.is_mode());
+    assert_eq!(mode.current_name(), "Default");
+    assert_eq!(mode.next_value(), Some("acceptEdits"));
+    assert_eq!(model.values.len(), 2, "groups flattened");
+    assert_eq!(model.current_name(), "Sonnet");
+
+    // Mode the old way: no result, a current_mode_update instead.
+    assert_eq!(wait(client.set_option(&sid, mode, "plan"), 10).unwrap(), None);
+    let evs = events_until(&mut rx, 10, |e| matches!(e, Event::Update { update: SessionUpdate::CurrentMode(_), .. }));
+    assert!(matches!(evs.last(), Some(Event::Update { update: SessionUpdate::CurrentMode(m), .. }) if m == "plan"));
+
+    // A config option: the full new set comes back.
+    let new = wait(client.set_option(&sid, model, "opus"), 10).unwrap().unwrap();
+    assert_eq!(new[0].current_name(), "Opus");
+    client.shutdown(Duration::from_secs(2));
 }
 
 #[test]
@@ -142,7 +168,7 @@ fn crash_fails_pending_and_reports_stderr() {
     let sid = start(&client);
     let turn = client.prompt(&sid, vec![PromptBlock::Text("crash".into())]);
     let err = wait(turn, 10).unwrap_err();
-    assert!(err.message.contains("exited"), "{err}");
+    assert!(err.is_agent_exited(), "{err}");
     let evs = events_until(&mut rx, 5, |e| matches!(e, Event::Exited { .. }));
     let Some(Event::Exited { code, stderr_tail }) = evs.last() else { unreachable!() };
     assert_eq!(*code, Some(3));
@@ -180,10 +206,42 @@ fn sigkill_after_grace_when_sigterm_is_ignored() {
 fn load_session_replays_history() {
     let (client, mut rx) = fake(&[]);
     start(&client);
-    wait(client.load_session("s1", Path::new("/tmp")), 10).unwrap();
+    wait(client.load_session(&"s1".into(), Path::new("/tmp")), 10).unwrap();
     let evs = events_until(&mut rx, 10, |e| matches!(e, Event::Update { update: SessionUpdate::AgentMessage(_), .. }));
     assert!(evs.iter().any(|e| matches!(e, Event::Update { update: SessionUpdate::UserMessage(c), .. } if c.text == "earlier question")));
     assert_eq!(texts(&evs), ["earlier answer"]);
+    client.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn sign_in_then_new_session() {
+    let (client, _rx) = fake(&[("FAKE_AGENT_AUTH", "1")]);
+    let init = wait(client.initialize(), 10).unwrap();
+    let ids: Vec<_> = init.auth_methods.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["token", "claude-ai-login"]);
+    assert!(init.auth_methods[1].terminal.as_ref().is_some_and(|t| t.command.as_deref() == Some("/usr/bin/node")));
+    let err = wait(client.new_session(Path::new("/tmp")), 10).unwrap_err();
+    assert!(err.is_auth_required(), "{err}");
+    // A terminal-only method can't be used with `authenticate`.
+    assert!(wait(client.authenticate("claude-ai-login"), 10).is_err());
+    wait(client.authenticate("token"), 10).unwrap();
+    let (sid, _) = wait(client.new_session(Path::new("/tmp")), 10).unwrap();
+    assert_eq!(sid, "s1");
+    client.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn title_image_link_and_max_tokens() {
+    let (client, mut rx) = fake(&[]);
+    let sid = start(&client);
+    let turn = client.prompt(&sid, vec![PromptBlock::Text("picture".into())]);
+    assert_eq!(wait(turn, 10).unwrap(), StopReason::MaxTokens);
+    let evs = events_until(&mut rx, 10, |e| matches!(e, Event::Update { update: SessionUpdate::AgentMessage(c), .. } if matches!(c.media, Some(Media::Link { .. }))));
+    let ups: Vec<_> = evs.iter().filter_map(|e| if let Event::Update { session_id, update } = e { Some((session_id, update)) } else { None }).collect();
+    assert!(ups.iter().all(|(s, _)| **s == sid));
+    assert!(ups.iter().any(|(_, u)| matches!(u, SessionUpdate::SessionTitle(t) if t == "Draw a picture")));
+    assert!(ups.iter().any(|(_, u)| matches!(u, SessionUpdate::AgentMessage(c) if matches!(&c.media, Some(Media::Image { mime, data }) if mime == "image/png" && data.starts_with(b"\x89PNG")))));
+    assert!(matches!(ups.last(), Some((_, SessionUpdate::AgentMessage(c))) if c.media == Some(Media::Link { uri: "file:///w/a.txt".into(), name: "a.txt".into() })));
     client.shutdown(Duration::from_secs(2));
 }
 
@@ -218,7 +276,7 @@ fn real_claude_agent_acp() {
     eprintln!("initialize {:?}: {:?} {:?}", t0.elapsed(), init.agent_name, init.agent_version);
     assert_eq!(init.protocol_version, 1);
     let t1 = Instant::now();
-    let sid = wait(client.new_session(&repo), 120).unwrap();
+    let sid = wait(client.new_session(&repo), 120).unwrap().0;
     eprintln!("session/new {:?}", t1.elapsed());
     let t2 = Instant::now();
     let stop = wait(client.prompt(&sid, vec![PromptBlock::Text("Reply with just the word ok.".into())]), 300).unwrap();

@@ -32,6 +32,11 @@ nucleo-matcher.workspace = true
 raw-window-handle = "0.6"
 smallvec = "1"
 serde_json = "1"
+# Agent chat Markdown (MIT). No default features: no CLI, no SIMD.
+pulldown-cmark = { version = "0.13", default-features = false }
+# Only to read an agent image's size before GPUI loads it (chat rows are
+# measured once). The same crate and formats GPUI already builds.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Dock badge and the alert chime (M6). Same crates GPUI and qur_browser

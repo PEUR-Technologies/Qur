@@ -3,9 +3,11 @@
 //! only when the active terminal has new output.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -362,6 +364,87 @@ struct Find {
     _sub: gpui::Subscription,
 }
 
+/// Split terminals (owner: "split terminals like in linux"): sessions shown
+/// side by side, like iTerm or Terminator. A tree of panes, each one session.
+#[derive(Clone, Debug, PartialEq)]
+enum Tile {
+    Term(usize),
+    /// `vertical` = stacked top/bottom; `ratio` = the first child's share.
+    Split { vertical: bool, ratio: f32, a: Box<Tile>, b: Box<Tile> },
+}
+
+impl Tile {
+    fn ids(&self) -> Vec<usize> {
+        match self {
+            Tile::Term(id) => vec![*id],
+            Tile::Split { a, b, .. } => [a.ids(), b.ids()].concat(),
+        }
+    }
+
+    /// Put `new` beside `target` (right of it, or below when `vertical`).
+    fn split_at(&mut self, target: usize, new: usize, vertical: bool) -> bool {
+        match self {
+            Tile::Term(id) if *id == target => {
+                *self = Tile::Split { vertical, ratio: 0.5, a: Box::new(Tile::Term(target)), b: Box::new(Tile::Term(new)) };
+                true
+            }
+            Tile::Term(_) => false,
+            Tile::Split { a, b, .. } => a.split_at(target, new, vertical) || b.split_at(target, new, vertical),
+        }
+    }
+
+    /// Whether the split directly holding `id` stacks top/bottom.
+    fn parent_vertical(&self, id: usize) -> Option<bool> {
+        match self {
+            Tile::Term(_) => None,
+            Tile::Split { vertical, a, b, .. } => {
+                if matches!(**a, Tile::Term(t) if t == id) || matches!(**b, Tile::Term(t) if t == id) {
+                    Some(*vertical)
+                } else {
+                    a.parent_vertical(id).or_else(|| b.parent_vertical(id))
+                }
+            }
+        }
+    }
+
+    /// Without `id`; a split left with one pane collapses into it.
+    fn without(self, id: usize) -> Option<Tile> {
+        match self {
+            Tile::Term(t) => (t != id).then_some(self),
+            Tile::Split { vertical, ratio, a, b } => match (a.without(id), b.without(id)) {
+                (Some(a), Some(b)) => Some(Tile::Split { vertical, ratio, a: Box::new(a), b: Box::new(b) }),
+                (Some(x), None) | (None, Some(x)) => Some(x),
+                (None, None) => None,
+            },
+        }
+    }
+
+    fn set_ratio(&mut self, path: &[bool], r: f32) {
+        match (self, path.split_first()) {
+            (Tile::Split { ratio, .. }, None) => *ratio = r.clamp(0.12, 0.88),
+            (Tile::Split { a, b, .. }, Some((&second, rest))) => if second { b } else { a }.set_ratio(rest, r),
+            _ => {}
+        }
+    }
+
+    fn is_vertical(&self, path: &[bool]) -> bool {
+        match (self, path.split_first()) {
+            (Tile::Split { vertical, .. }, None) => *vertical,
+            (Tile::Split { a, b, .. }, Some((&second, rest))) => if second { b } else { a }.is_vertical(rest),
+            _ => false,
+        }
+    }
+}
+
+/// A sidebar row's splits. `owner` is the session the row stands for; the
+/// other panes are shells that belong to it and have no row of their own.
+struct Group {
+    owner: usize,
+    tile: Tile,
+    /// The pane last focused, focused again when the row is selected.
+    last: usize,
+}
+
 pub struct TerminalPanel {
     pub focus: FocusHandle,
     pub sessions: Vec<Session>,
@@ -369,12 +452,19 @@ pub struct TerminalPanel {
     next_id: usize,
     pub message: Option<String>,
     cell: (Pixels, Pixels),
-    last_bounds: Option<Bounds<Pixels>>,
+    /// Each shown pane's grid, as last painted (mouse hits, focus moves).
+    pane_bounds: HashMap<usize, Bounds<Pixels>>,
     selecting: bool,
     /// Scroll not yet turned into whole lines (see `on_scroll`).
     scroll_px: Pixels,
     find: Option<Find>,
     idle_check: Option<Task<()>>,
+    groups: Vec<Group>,
+    /// A group's owner closed and another pane took its row: old -> new.
+    moved: HashMap<usize, usize>,
+    split_bounds: Rc<RefCell<HashMap<Vec<bool>, Bounds<Pixels>>>>,
+    /// A divider being dragged: its split's path and bounds.
+    resizing: Option<(Vec<bool>, Bounds<Pixels>)>,
 }
 
 impl EventEmitter<PanelEvent> for TerminalPanel {}
@@ -388,11 +478,15 @@ impl TerminalPanel {
             next_id: 1,
             message: None,
             cell: (px(8.), px(16.)),
-            last_bounds: None,
+            pane_bounds: HashMap::new(),
             selecting: false,
             scroll_px: px(0.),
             find: None,
             idle_check: None,
+            groups: Vec::new(),
+            moved: HashMap::new(),
+            split_bounds: Rc::default(),
+            resizing: None,
         }
     }
 
@@ -421,7 +515,7 @@ impl TerminalPanel {
                         let Some(ix) = p.sessions.iter().position(|s| s.id == id) else { return };
                         let was_busy = p.sessions[ix].is_busy();
                         p.sessions[ix].last_output = Some(Instant::now());
-                        if ix == p.active {
+                        if p.shown().contains(&id) {
                             cx.notify();
                         }
                         if !was_busy {
@@ -500,17 +594,163 @@ impl TerminalPanel {
         }
         let s = self.sessions.remove(ix);
         s.shutdown(false);
-        if self.active >= self.sessions.len() {
-            self.active = self.sessions.len().saturating_sub(1);
+        let mut next = None;
+        if let Some(g) = self.groups.iter().position(|g| g.tile.ids().contains(&s.id)) {
+            let group = self.groups.remove(g);
+            if group.owner == s.id && s.kind != Kind::Shell {
+                // An agent or Run Project terminal ended: its splits go with it.
+                for id in group.tile.ids() {
+                    if let Some(i) = self.sessions.iter().position(|x| x.id == id) {
+                        self.sessions.remove(i).shutdown(false);
+                    }
+                }
+            } else if let Some(tile) = group.tile.without(s.id) {
+                let rest = tile.ids();
+                let owner = if group.owner == s.id {
+                    // A shell's row lives on in the pane beside it.
+                    self.moved.insert(s.id, rest[0]);
+                    rest[0]
+                } else {
+                    group.owner
+                };
+                next = Some(if rest.contains(&group.last) { group.last } else { rest[0] });
+                if rest.len() > 1 {
+                    self.groups.push(Group { owner, tile, last: next.unwrap_or(owner) });
+                }
+            }
         }
+        match next.and_then(|id| self.sessions.iter().position(|x| x.id == id)) {
+            Some(i) => self.active = i,
+            None if self.active >= self.sessions.len() => self.active = self.sessions.len().saturating_sub(1),
+            None => {}
+        }
+        self.pane_bounds.remove(&s.id);
         cx.emit(PanelEvent::Closed);
         cx.notify();
     }
 
     pub fn close_all_sync(&mut self) {
+        self.groups.clear();
         for s in self.sessions.drain(..) {
             s.shutdown(true);
         }
+    }
+
+    /// The row that `id` (a closed group owner) now lives in, if any.
+    pub fn successor(&self, mut id: usize) -> Option<usize> {
+        let mut found = None;
+        while let Some(&n) = self.moved.get(&id) {
+            found = Some(n);
+            id = n;
+        }
+        found
+    }
+
+    /// Open a shell in `cwd` beside the focused terminal (below it when
+    /// `vertical`) and focus it.
+    pub fn split_active(&mut self, cwd: &Path, vertical: bool, cx: &mut Context<Self>) -> Option<usize> {
+        let target = self.active_session()?.id;
+        let label = self.label_for(&Kind::Shell);
+        let new = self.open(cwd, Kind::Shell, label, cx)?;
+        match self.groups.iter_mut().find(|g| g.tile.ids().contains(&target)) {
+            Some(g) => {
+                g.tile.split_at(target, new, vertical);
+                g.last = new;
+            }
+            None => {
+                let mut tile = Tile::Term(target);
+                tile.split_at(target, new, vertical);
+                self.groups.push(Group { owner: target, tile, last: new });
+            }
+        }
+        cx.notify();
+        Some(new)
+    }
+
+    /// Tiling-WM style (dwindle, like Hyprland or bspwm): split the focused
+    /// pane along its longer side, so new terminals keep filling the view.
+    pub fn tile_active(&mut self, cwd: &Path, cx: &mut Context<Self>) -> Option<usize> {
+        let target = self.active_session()?.id;
+        // A pane not drawn yet (just made, or the window is covered) has no
+        // size: turn the other way from the split that made it.
+        let vertical = match self.pane_bounds.get(&target) {
+            Some(b) => b.size.height > b.size.width,
+            None => self.groups.iter().find_map(|g| g.tile.parent_vertical(target)).is_some_and(|v| !v),
+        };
+        self.split_active(cwd, vertical, cx)
+    }
+
+    /// The group the focused session is in.
+    fn active_group(&self) -> Option<&Group> {
+        let id = self.active_session()?.id;
+        self.groups.iter().find(|g| g.tile.ids().contains(&id))
+    }
+
+    /// The sessions on screen: the focused one's group, or just it.
+    fn shown(&self) -> Vec<usize> {
+        match self.active_group() {
+            Some(g) => g.tile.ids(),
+            None => self.active_session().map(|s| vec![s.id]).unwrap_or_default(),
+        }
+    }
+
+    /// Focus the pane with session `id` (it's on screen).
+    fn focus_pane(&mut self, id: usize, cx: &mut Context<Self>) {
+        let Some(ix) = self.sessions.iter().position(|s| s.id == id) else { return };
+        self.active = ix;
+        if let Some(g) = self.groups.iter_mut().find(|g| g.tile.ids().contains(&id)) {
+            g.last = id;
+        }
+        cx.notify();
+    }
+
+    /// The shown pane under the pointer.
+    fn pane_at(&self, pos: gpui::Point<Pixels>) -> Option<usize> {
+        self.shown().into_iter().find(|id| self.pane_bounds.get(id).is_some_and(|b| b.contains(&pos)))
+    }
+
+    /// Cmd+Opt+arrows: focus the nearest pane in that direction.
+    fn focus_toward(&mut self, dx: f32, dy: f32, cx: &mut Context<Self>) {
+        let Some(cur) = self.active_session().map(|s| s.id) else { return };
+        let Some(b) = self.pane_bounds.get(&cur).copied() else { return };
+        let c = b.center();
+        let best = self
+            .shown()
+            .into_iter()
+            .filter(|id| *id != cur)
+            .filter_map(|id| {
+                let o = self.pane_bounds.get(&id)?;
+                let beyond = if dx < 0. {
+                    o.right() <= b.left() + px(1.)
+                } else if dx > 0. {
+                    o.left() >= b.right() - px(1.)
+                } else if dy < 0. {
+                    o.bottom() <= b.top() + px(1.)
+                } else {
+                    o.top() >= b.bottom() - px(1.)
+                };
+                let oc = o.center();
+                // Mostly along the direction; a little sideways drift counts too.
+                let (along, across) = if dx != 0. { (oc.x - c.x, oc.y - c.y) } else { (oc.y - c.y, oc.x - c.x) };
+                beyond.then(|| (id, f32::from(along).abs() + 2. * f32::from(across).abs()))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((id, _)) = best {
+            self.focus_pane(id, cx);
+        }
+    }
+
+    fn focus_left(&mut self, _: &ta::FocusLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.focus_toward(-1., 0., cx)
+    }
+    fn focus_right(&mut self, _: &ta::FocusRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.focus_toward(1., 0., cx)
+    }
+    fn focus_up(&mut self, _: &ta::FocusUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.focus_toward(0., -1., cx)
+    }
+    fn focus_down(&mut self, _: &ta::FocusDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.focus_toward(0., 1., cx)
     }
 
 
@@ -537,6 +777,8 @@ impl TerminalPanel {
     }
 
     pub fn activate_id(&mut self, id: usize, cx: &mut Context<Self>) -> bool {
+        // A row with splits: back to the pane you were in.
+        let id = self.groups.iter().find(|g| g.owner == id && self.session_by_id(g.last).is_some()).map(|g| g.last).unwrap_or(id);
         if let Some(ix) = self.sessions.iter().position(|s| s.id == id) {
             self.active = ix;
             cx.notify();
@@ -683,7 +925,7 @@ impl TerminalPanel {
     }
 
     fn grid_point(&self, p: gpui::Point<Pixels>, display_offset: usize) -> (TPoint, Side) {
-        let b = self.last_bounds.unwrap_or_default();
+        let b = self.active_session().and_then(|s| self.pane_bounds.get(&s.id)).copied().unwrap_or_default();
         let x = (p.x - b.left()).max(px(0.));
         let col = (x / self.cell.0).floor() as usize;
         let side = if (x / self.cell.0).fract() < 0.5 { Side::Left } else { Side::Right };
@@ -693,6 +935,11 @@ impl TerminalPanel {
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        if let Some(id) = self.pane_at(ev.position)
+            && Some(id) != self.active_session().map(|s| s.id)
+        {
+            self.focus_pane(id, cx);
+        }
         if ev.modifiers.platform && self.open_link_at(ev.position, cx) {
             return;
         }
@@ -815,6 +1062,19 @@ impl TerminalPanel {
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some((path, b)) = self.resizing.clone() {
+            if ev.pressed_button != Some(MouseButton::Left) {
+                self.resizing = None;
+                return;
+            }
+            let owner = self.active_group().map(|g| g.owner);
+            if let Some(g) = self.groups.iter_mut().find(|g| Some(g.owner) == owner) {
+                let r = if g.tile.is_vertical(&path) { (ev.position.y - b.top()) / b.size.height } else { (ev.position.x - b.left()) / b.size.width };
+                g.tile.set_ratio(&path, r);
+                cx.notify();
+            }
+            return;
+        }
         if !(self.selecting && ev.pressed_button == Some(MouseButton::Left)) {
             self.selecting = false;
             return;
@@ -856,7 +1116,9 @@ impl TerminalPanel {
         if lines == 0 {
             return;
         }
-        let Some(s) = self.active_session() else { return };
+        // The split pane under the pointer, else the focused one.
+        let under = self.pane_at(ev.position).and_then(|id| self.session_by_id(id));
+        let Some(s) = under.or_else(|| self.active_session()) else { return };
         let mut t = s.term.lock();
         let mode = *t.mode();
         let bytes = if mode.intersects(TermMode::MOUSE_MODE) && !ev.modifiers.shift {
@@ -985,6 +1247,8 @@ impl EntityInputHandler for TerminalPanel {
 
 struct GridElement {
     panel: Entity<TerminalPanel>,
+    /// The session this pane shows.
+    id: usize,
 }
 
 struct GridRow {
@@ -1037,10 +1301,11 @@ impl Element for GridElement {
         let cols = ((bounds.size.width / cw).floor() as usize).max(2);
         let lines = ((bounds.size.height / lh).floor() as usize).max(1);
         let mut out = GridPrepaint { rows: Vec::new(), cursor: None, has_content: false };
+        let id = self.id;
         self.panel.update(cx, |p, _| {
             p.cell = (cw, lh);
-            p.last_bounds = Some(bounds);
-            let Some(s) = p.sessions.get_mut(p.active) else { return };
+            p.pane_bounds.insert(id, bounds);
+            let Some(s) = p.sessions.iter_mut().find(|s| s.id == id) else { return };
             s.restore_selection();
             if s.size != (cols, lines) {
                 // New columns rewrap the lines: the old selection means nothing.
@@ -1058,7 +1323,7 @@ impl Element for GridElement {
             }
         });
         let p = self.panel.read(cx);
-        let Some(s) = p.sessions.get(p.active) else { return out };
+        let Some(s) = p.session_by_id(id) else { return out };
         let term = s.term.lock();
         let content = term.renderable_content();
         let off = content.display_offset as i32;
@@ -1143,9 +1408,12 @@ impl Element for GridElement {
         let cursor_color = Look::of(window, cx).theme.terminal.cursor;
         let p = self.panel.read(cx);
         let focus = p.focus.clone();
-        let focused = focus.is_focused(window);
+        let mine = p.active_session().is_some_and(|s| s.id == self.id);
+        let focused = mine && focus.is_focused(window);
         let (cw, lh) = p.cell;
-        window.handle_input(&focus, ElementInputHandler::new(bounds, self.panel.clone()), cx);
+        if mine {
+            window.handle_input(&focus, ElementInputHandler::new(bounds, self.panel.clone()), cx);
+        }
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             for row in &pre.rows {
                 for &(a, b, c) in &row.bgs {
@@ -1187,6 +1455,10 @@ impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
         let ui = look.theme.ui.clone();
+        let tiles = match self.active_group().map(|g| g.tile.clone()) {
+            Some(t) => Some(self.tile(&t, Vec::new(), true, &look, cx)),
+            None => self.active_session().map(|s| s.id).map(|id| self.tile(&Tile::Term(id), Vec::new(), false, &look, cx)),
+        };
         let message = self.message.clone().map(|m| {
             div().flex_none().px(look.z(8.)).py(look.z(4.)).text_size(look.text(-1.)).text_color(look.c(ui.text_muted)).child(m)
         });
@@ -1207,6 +1479,10 @@ impl Render for TerminalPanel {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::close_terminal))
             .on_action(cx.listener(Self::find))
+            .on_action(cx.listener(Self::focus_left))
+            .on_action(cx.listener(Self::focus_right))
+            .on_action(cx.listener(Self::focus_up))
+            .on_action(cx.listener(Self::focus_down))
             .children(message)
             .children(self.find.as_ref().map(|f| {
                 div()
@@ -1230,8 +1506,7 @@ impl Render for TerminalPanel {
                 div()
                     .flex_1()
                     .min_h(px(0.))
-                    .px(look.z(8.))
-                    .py(look.z(4.))
+                    .flex()
                     // Files dragged in from Finder become their paths, as in Terminal.
                     .drag_over::<gpui::ExternalPaths>(|s, _, window, cx| {
                         let l = Look::of(window, cx);
@@ -1245,9 +1520,67 @@ impl Render for TerminalPanel {
                     }))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
+                    .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.resizing = None))
                     .on_scroll(cx.listener(Self::on_scroll))
-                    .when(!self.sessions.is_empty(), |d| d.child(GridElement { panel: cx.entity() })),
+                    .children(tiles),
             )
+    }
+}
+
+impl TerminalPanel {
+    /// One pane per session in the tree, with draggable dividers between.
+    fn tile(&self, t: &Tile, path: Vec<bool>, split: bool, look: &Look, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let ui = &look.theme.ui;
+        match t {
+            Tile::Term(id) => {
+                let on = split && self.active_session().is_some_and(|s| s.id == *id);
+                div()
+                    .size_full()
+                    .px(look.z(8.))
+                    .py(look.z(4.))
+                    .when(split, |d| d.border_t_2().border_color(if on { look.c(ui.focus_ring) } else { gpui::transparent_black() }))
+                    .child(GridElement { panel: cx.entity(), id: *id })
+                    .into_any_element()
+            }
+            Tile::Split { vertical, ratio, a, b } => {
+                let (mut pa, mut pb) = (path.clone(), path.clone());
+                pa.push(false);
+                pb.push(true);
+                let first = self.tile(a, pa, split, look, cx);
+                let second = self.tile(b, pb, split, look, cx);
+                let (sb, p2) = (self.split_bounds.clone(), path.clone());
+                let measure = {
+                    let (sb, path) = (sb.clone(), path.clone());
+                    gpui::canvas(move |b, _, _| { sb.borrow_mut().insert(path.clone(), b); }, |_, _, _, _| {}).absolute().size_full()
+                };
+                let handle = div()
+                    .id(SharedString::from(format!("term-split-{path:?}")))
+                    .flex_none()
+                    .relative()
+                    .bg(look.c(ui.border))
+                    .hover(|d| d.bg(look.c(ui.focus_ring)))
+                    .when(*vertical, |d| d.h(px(1.)).w_full().cursor_row_resize())
+                    .when(!*vertical, |d| d.w(px(1.)).h_full().cursor_col_resize())
+                    // A wider grab area than the 1 px line.
+                    .child(div().absolute().when(*vertical, |d| d.left_0().right_0().top(px(-3.)).h(px(7.))).when(!*vertical, |d| d.top_0().bottom_0().left(px(-3.)).w(px(7.))))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                        if let Some(b) = sb.borrow().get(&p2).copied() {
+                            this.resizing = Some((p2.clone(), b));
+                        }
+                        cx.stop_propagation();
+                    }));
+                div()
+                    .relative()
+                    .size_full()
+                    .flex()
+                    .when(*vertical, |d| d.flex_col())
+                    .child(measure)
+                    .child(div().flex_none().overflow_hidden().when(*vertical, |d| d.w_full().h(relative(*ratio))).when(!*vertical, |d| d.h_full().w(relative(*ratio))).child(first))
+                    .child(handle)
+                    .child(div().flex_1().min_w(px(0.)).min_h(px(0.)).overflow_hidden().child(second))
+                    .into_any_element()
+            }
+        }
     }
 }
 
@@ -1457,6 +1790,14 @@ fn classify_link(tok: &str) -> Option<Link> {
     Some(Link::Path(path.to_string(), line.map(|l| (l, col.unwrap_or(1)))))
 }
 
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:@+%,".contains(c)) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1535,6 +1876,33 @@ mod tests {
     }
 
     #[test]
+    fn parent_direction() {
+        let mut t = Tile::Term(1);
+        t.split_at(1, 2, false);
+        assert_eq!(t.parent_vertical(2), Some(false));
+        t.split_at(2, 3, true);
+        assert_eq!((t.parent_vertical(1), t.parent_vertical(3)), (Some(false), Some(true)));
+        assert_eq!(Tile::Term(1).parent_vertical(1), None);
+    }
+
+    #[test]
+    fn split_tiles() {
+        let mut t = Tile::Term(1);
+        assert!(t.split_at(1, 2, false));
+        assert!(t.split_at(2, 3, true));
+        assert!(!t.split_at(9, 4, true), "no such pane");
+        assert_eq!(t.ids(), vec![1, 2, 3]);
+        assert!(!t.is_vertical(&[]) && t.is_vertical(&[true]));
+        t.set_ratio(&[true], 0.99);
+        assert!(matches!(&t, Tile::Split { b, .. } if matches!(**b, Tile::Split { ratio, .. } if ratio == 0.88)));
+        // Closing a pane collapses its split into the one beside it.
+        let t = t.without(2).unwrap();
+        assert_eq!(t, Tile::Split { vertical: false, ratio: 0.5, a: Box::new(Tile::Term(1)), b: Box::new(Tile::Term(3)) });
+        assert_eq!(t.without(1), Some(Tile::Term(3)));
+        assert_eq!(Tile::Term(3).without(3), None);
+    }
+
+    #[test]
     fn cmd_click_links() {
         let line = "  --> src/main.rs:12:5 (see https://example.com/x).";
         let at = |needle: &str| line.find(needle).unwrap();
@@ -1548,13 +1916,5 @@ mod tests {
         assert_eq!(classify_link("hello"), None);
         assert_eq!(classify_link("-->"), None);
         assert_eq!(link_at("error: 'lib/a.py', line 3", 9).as_deref(), Some("lib/a.py"));
-    }
-}
-
-fn shell_quote(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:@+%,".contains(c)) {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace('\'', "'\\''"))
     }
 }

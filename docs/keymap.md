@@ -87,7 +87,10 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 |---|---|---|
 | `Cmd+T` | New terminal | S |
 | `Cmd+Shift+T` | New Agent Terminal: a Claude agent task in its own worktree, shown as a terminal (decisions 12, 17) | S |
-| `Cmd+W` | Close focused terminal | S |
+| `Cmd+W` | Close focused terminal (or split pane) | S |
+| `Cmd+D` / `Cmd+Shift+D` (terminal focused) | Split right / split down: a new shell in the project folder beside the focused one (decision 39) | S |
+| `Cmd+Opt+Arrows` (terminal focused) | Focus the split pane in that direction | S |
+| `Cmd+Enter` | New Tiled Terminal: a shell tiled into the terminal on screen, splitting the focused pane along its longer side (like i3/Hyprland); with no terminal shown, a new one. Insert Line Below in the editor | S |
 | `` Ctrl+` `` | Toggle terminal / focus it | S |
 | `Cmd+K` (terminal focused) | Clear terminal | S |
 | `Cmd+C` / `Cmd+V` (terminal focused) | Copy selection / paste (Ctrl+C still sends SIGINT) | S |
@@ -113,15 +116,23 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Ctrl+1..9` | Select session N in the sidebar | M2 ✅ |
 | `Ctrl+Opt+Up/Down` | Previous / next session | M2 ✅ |
 | `Cmd+I` | Focus the prompt bar | M2 ✅ |
+| `/` (not typing) | Focus Input Field: the agent's prompt, the search box or the terminal, like a browser's search shortcut | ✅ |
 | `Enter` / `Shift+Enter` | Send (queues during a turn) / newline | M2 ✅ |
 | `Esc` (prompt) / `Cmd+.` | Stop the agent's turn (`session/cancel`) | M2 ✅ |
 | `@` / `/` in the prompt | Mention a file / pick an agent slash command | M2 ✅ |
-| Agent menu | Permission: Allow Once / Allow for This Task / Deny | M2 ✅ |
+| `Cmd+Y` / `Cmd+Opt+Y` / `Cmd+Opt+Z` | Permission: Allow Once / Allow for This Task / Deny (Zed's keys), for the selected agent's request, else the first agent waiting; each works only when the agent offers that kind of answer, and its button shows the key. Not while the code modal, a terminal or a picker has focus (Agent menu too) | ✅ |
+| `Up` (empty prompt) | Pull the last queued message back into the prompt to edit it (each queued message also has Send now / Edit / ✕) | ✅ |
+| `Cmd+Z` / `Shift+Cmd+Z` (prompt) | Undo / redo in the prompt (typing groups into one step) | ✅ |
+| `Shift+Tab` (chat agent) | Next mode (Default / Accept Edits / Plan…), from the agent's session settings; click the Mode or Model chip above the prompt to choose | ✅ |
 | Agent menu | Discard Task…, Reveal Worktree in Finder, Open Task Worktree in Terminal | M2 ✅ |
 | `Cmd+K Cmd+L` | Cycle peek layout | M3 ✅ |
 | `Cmd+1..4` | Live / To-do / Chat / Changes (layout B) | M3 ✅ |
 | `Cmd+5` | Browser: show the selected agent's browser (any layout; Agent Terminals too) | Browser ✅ |
 | `Cmd+Shift+C` | Browser: Inspect Element (highlight, click to attach to the prompt, or paste into an Agent Terminal; select text to attach it) | Browser ✅ |
+| `Cmd+R` / `Cmd+L` (browser) | Reload the page / address bar (its text selected) | Browser ✅ |
+| `Cmd+[` `Cmd+]` or `Cmd+Left/Right` (browser) | Back / Forward | Browser ✅ |
+| `Cmd+=` `Cmd+-` `Cmd+0` (browser) | Page zoom in / out / actual size (instead of Qur's zoom while the browser has focus) | Browser ✅ |
+| `Cmd+C/X/V/A/Z`, `Shift+Cmd+Z` (in a page) | Copy, cut, paste, select all, undo, redo in the page | Browser ✅ |
 | Changes view / Agent menu | Merge into My Branch, Keep Working, Discard Task…, Review Changes | M4 ✅ |
 | Agent menu | Run Checks Now, Run Project in Worktree (no default keys) | ✅ |
 | `Cmd+F` (in a terminal) | Find in Terminal (regex; ↩ older, ⇧↩ newer, Esc closes) | M5 ✅ |

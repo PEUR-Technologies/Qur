@@ -42,7 +42,7 @@ One window is one project. There's no permanent editor area: the window is for a
 
 - **Left column**
   - **AGENTS**: one button per agent. A button fills with the agent's colour while it's working, and the selected agent has a coloured outline. Click one to open its session.
-  - **TERMINALS**: plain shells, shown only when you have some.
+  - **TERMINALS**: plain shells, shown only when you have some. Split one with `Cmd+D` (right) or `Cmd+Shift+D` (down); the new shell starts in the project folder and shares the row. `Cmd+Opt+Arrows` or a click moves between panes, drag the divider to resize, `Cmd+W` closes the focused pane. Agent Terminals split the same way.
   - **SOURCE CONTROL**: branch and change count; opens the Git panel.
   - **FILES**: the file tree, and the only collapsible section. It shows the selected agent's worktree, or your checkout when no agent is selected.
 - **Stage** (the rest of the window): the selected session, in panes you arrange like VS Code.

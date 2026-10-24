@@ -29,7 +29,7 @@ use crate::live::{LiveEvent, LivePane};
 use crate::monitor::{MonitorEvent, TaskMonitor};
 use crate::assets::{self, icon};
 use crate::browser_view::{Attachment, BrowserPane, BrowserPaneEvent};
-use crate::commands::{self, MenuState, agent as aa, edit, editor as ea, qur};
+use crate::commands::{self, MenuState, agent as aa, edit, editor as ea, qur, terminal as ta};
 use crate::editor_view::{Buffers, EditorEvent, EditorView};
 use crate::input::{InputEvent, TextInput};
 use crate::look::Look;
@@ -67,6 +67,8 @@ struct TermTask {
     /// When the current busy stretch began (alerts: only long ones count).
     busy_since: Option<Instant>,
     wrote: bool,
+    /// The agent's to-do list, from Claude's transcript (To-do tab).
+    todos: qur_agents::todos::TodoTracker,
 }
 
 struct FirstRun {
@@ -112,6 +114,8 @@ enum PickKind {
     Projects(Vec<PathBuf>),
     /// The agent's slash commands, inserted into its prompt.
     Slash { names: Vec<String>, target: Entity<PromptInput> },
+    /// A session setting's values (mode, model…) for one agent.
+    Setting { agent: Entity<AgentTask>, id: String, values: Vec<String> },
 }
 
 enum Overlay {
@@ -166,6 +170,9 @@ pub struct Workspace {
     code_prev_focus: Option<FocusHandle>,
     sidebar: bool,
     sidebar_w: f32,
+    /// `caffeinate` while Keep Awake is on (agents keep working with the lid
+    /// open and the screen idle). It watches Qur's pid, so it ends with Qur.
+    caffeinate: Option<std::process::Child>,
     /// FILES is the one collapsible section in the left column.
     files_open: bool,
     resizing: bool,
@@ -274,6 +281,7 @@ impl Workspace {
             code_prev_focus: None,
             sidebar: true,
             sidebar_w: SIDEBAR_DEFAULT_W,
+            caffeinate: None,
             files_open: true,
             resizing: false,
             overlay: None,
@@ -507,6 +515,17 @@ impl Workspace {
         self.agents.iter().find(|a| agent_id_matches(a, id))
     }
 
+    /// The page keeps the keyboard until told otherwise: typing went to it
+    /// after you'd clicked back into Qur or picked with Inspect.
+    fn release_browser_focus(&self, cx: &App) {
+        for a in &self.agents {
+            a.read(cx).browser.read(cx).release_focus();
+        }
+        for t in &self.term_tasks {
+            t.browser.read(cx).release_focus();
+        }
+    }
+
     fn term_task(&self, id: &str) -> Option<&TermTask> {
         self.term_tasks.iter().find(|t| t.record.id == id)
     }
@@ -595,6 +614,7 @@ impl Workspace {
     }
 
     fn add_term_task(&mut self, record: TaskRecord, window: &mut Window, cx: &mut Context<Self>) {
+        let todo_id = record.id.clone();
         let accent = Look::of(window, cx).theme.accents[0].base;
         let monitor = cx.new(|cx| {
             let mut m = TaskMonitor::new(record.worktree.clone(), record.base.clone(), accent, cx);
@@ -641,8 +661,33 @@ impl Workspace {
             was_busy: false,
             busy_since: None,
             wrote: false,
+            todos: Default::default(),
         });
         self.refresh_overlaps(cx);
+        self.poll_todos(todo_id, cx);
+    }
+
+    /// Follow a terminal Claude's to-do list in its transcript, every second,
+    /// until the task goes away.
+    fn poll_todos(&mut self, id: String, cx: &mut Context<Self>) {
+        let bg = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                bg.timer(Duration::from_secs(1)).await;
+                let alive = this.update(cx, |this, cx| {
+                    let Some(t) = this.term_tasks.iter_mut().find(|t| t.record.id == id) else { return false };
+                    let dir = qur_agents::todos::claude_project_dir(&t.record.worktree);
+                    if t.todos.refresh(&dir) {
+                        cx.notify();
+                    }
+                    true
+                });
+                if !matches!(alive, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// An Inspect pick in an Agent Terminal's Browser: paste it into the
@@ -664,6 +709,7 @@ impl Workspace {
             p.type_text(tid, &text, cx);
             p.activate_id(tid, cx);
         });
+        self.release_browser_focus(cx);
         let f = self.terms.read(cx).focus.clone();
         window.focus(&f, cx);
     }
@@ -747,6 +793,12 @@ impl Workspace {
         let (layout, wrap, tab) = (self.layout, self.config.editor.soft_wrap, self.config.editor.tab_width);
         let root = self.root.clone();
         let a = cx.new(|cx| AgentTask::new(root, record, def, accent, layout, wrap, tab, window, cx));
+        // Messages still queued when Qur last quit: start the agent so they go out.
+        a.update(cx, |a, cx| {
+            if !a.record.queued.is_empty() && a.status == Status::Stopped {
+                a.start(cx);
+            }
+        });
         AGENT_IDS.with(|m| m.borrow_mut().insert(a.entity_id(), id));
         let monitor = a.read(cx).monitor.clone();
         self.watch_monitor(&monitor, window, cx);
@@ -783,6 +835,7 @@ impl Workspace {
                 this.save_tasks(cx);
                 cx.notify();
             }
+            AgentEvent::Subagents => cx.notify(),
             AgentEvent::SlashRequested => {
                 let (cmds, target) = {
                     let a = a.read(cx);
@@ -793,6 +846,20 @@ impl Workspace {
                     let items = cmds.iter().map(|c| PickItem::new(format!("/{}", c.name)).detail(c.description.clone())).collect();
                     this.open_picker("Agent command…", items, PickKind::Slash { names, target }, false, window, cx);
                 }
+            }
+            AgentEvent::PickSetting(id) => {
+                let Some(o) = a.read(cx).settings.iter().find(|o| &o.id == id).cloned() else { return };
+                let values = o.values.iter().map(|v| v.value.clone()).collect();
+                let items = o
+                    .values
+                    .iter()
+                    .map(|v| {
+                        let item = PickItem::new(v.name.clone()).detail(v.description.clone().unwrap_or_default());
+                        if v.value == o.current { item.right("current") } else { item }
+                    })
+                    .collect();
+                let title = if o.is_mode() { format!("{}…  (⇧⇥ next)", o.name) } else { format!("{}…", o.name) };
+                this.open_picker(&title, items, PickKind::Setting { agent: a.clone(), id: id.clone(), values }, false, window, cx);
             }
             AgentEvent::OpenFile(p, line) => {
                 let p = p.clone();
@@ -818,6 +885,16 @@ impl Workspace {
                     (a.record.worktree.clone(), a.prompt.clone())
                 };
                 this.mention_picker(root, target, window, cx);
+            }
+            // Sign-in: the login command in a terminal of its own, shown now;
+            // the agent's callout waits for Continue.
+            AgentEvent::RunInTerminal { label, command } => {
+                let wt = a.read(cx).record.worktree.clone();
+                let kind = Kind::Agent { task: label.clone(), command: command.clone() };
+                let Some(tid) = this.terms.update(cx, |p, cx| p.open(&wt, kind, label.clone(), cx)) else { return };
+                this.shells.push(tid);
+                this.select(Some(Selected::Shell(tid)), window, cx);
+                this.flash(format!("{label}: when you've signed in, go back to the agent and click Continue"), cx);
             }
         });
         self._subs.push(sub);
@@ -867,6 +944,7 @@ impl Workspace {
                         browser_url: std::env::var("QUR_DEBUG_BROWSER_URL").ok().map(|u| u.replace("{slug}", &c.slug)),
                         renamed: false,
                         in_root: false,
+                        queued: Vec::new(),
                     };
                     let debug_browser = std::env::var_os("QUR_DEBUG_BROWSER_URL").is_some();
                     match def.mode {
@@ -959,6 +1037,7 @@ impl Workspace {
                 browser_url: None,
                 renamed: false,
                 in_root: true,
+                queued: Vec::new(),
             };
             let id = record.id.clone();
             self.add_term_task(record, window, cx);
@@ -996,6 +1075,7 @@ impl Workspace {
                         browser_url: None,
                         renamed: false,
                         in_root: false,
+                        queued: Vec::new(),
                     };
                     this.add_term_task(record, window, cx);
                     this.apply_look(window, cx);
@@ -1167,9 +1247,50 @@ impl Workspace {
         }
     }
 
+    /// Always the project folder; Open Worktree in Terminal is the way into an agent's worktree.
     fn new_terminal(&mut self, _: &qur::NewTerminal, window: &mut Window, cx: &mut Context<Self>) {
-        let dir = self.current_root(cx);
-        self.new_terminal_in(dir, window, cx)
+        self.new_terminal_in(self.root.clone(), window, cx)
+    }
+
+    /// Split the selected terminal (a shell or an Agent Terminal): a new shell
+    /// in the project folder, like Cmd+T.
+    fn split_terminal(&mut self, vertical: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let live = match &self.selected {
+            Some(Selected::Shell(_)) => true,
+            Some(Selected::TermTask(id)) => self.term_task(id).and_then(|t| t.term_id).is_some(),
+            _ => false,
+        };
+        if !live {
+            return self.flash("Select a terminal to split", cx);
+        }
+        let root = self.root.clone();
+        self.terms.update(cx, |p, cx| p.split_active(&root, vertical, cx));
+        let f = self.terms.read(cx).focus.clone();
+        window.focus(&f, cx);
+    }
+
+    /// Cmd+Enter (like Mod+Enter in i3): another terminal, tiled into the one
+    /// on screen; with no terminal shown, a new one.
+    fn tile_terminal(&mut self, _: &ta::Tile, window: &mut Window, cx: &mut Context<Self>) {
+        let live = match &self.selected {
+            Some(Selected::Shell(_)) => true,
+            Some(Selected::TermTask(id)) => self.term_task(id).and_then(|t| t.term_id).is_some(),
+            _ => false,
+        };
+        if !live {
+            return self.new_terminal(&qur::NewTerminal, window, cx);
+        }
+        let root = self.root.clone();
+        self.terms.update(cx, |p, cx| p.tile_active(&root, cx));
+        let f = self.terms.read(cx).focus.clone();
+        window.focus(&f, cx);
+    }
+
+    fn split_right(&mut self, _: &ta::SplitRight, window: &mut Window, cx: &mut Context<Self>) {
+        self.split_terminal(false, window, cx)
+    }
+    fn split_down(&mut self, _: &ta::SplitDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.split_terminal(true, window, cx)
     }
 
     /// A terminal closed (exit or Cmd+W): forget shells; terminal tasks keep
@@ -1177,6 +1298,17 @@ impl Workspace {
     fn prune_closed_terms(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let panel = self.terms.read(cx);
         let live: Vec<usize> = panel.sessions.iter().map(|s| s.id).collect();
+        // A split shell's row moves to the pane beside it when its own closes.
+        for s in &mut self.shells {
+            if !live.contains(s)
+                && let Some(n) = panel.successor(*s)
+            {
+                if self.selected == Some(Selected::Shell(*s)) {
+                    self.selected = Some(Selected::Shell(n));
+                }
+                *s = n;
+            }
+        }
         self.shells.retain(|s| live.contains(s));
         self.runs.retain(|_, s| live.contains(s));
         for t in &mut self.term_tasks {
@@ -1258,6 +1390,20 @@ impl Workspace {
                 let f = a.read(cx).prompt.read(cx).focus.clone();
                 window.focus(&f, cx);
             }
+        }
+    }
+
+    /// "/": put the keyboard in the input field of what's on screen (the
+    /// agent's prompt, the search box, the terminal), like a browser's search.
+    fn focus_input(&mut self, _: &qur::FocusInput, window: &mut Window, cx: &mut Context<Self>) {
+        let f = match &self.selected {
+            Some(Selected::Agent(id)) => self.agent(id).map(|a| a.read(cx).prompt.read(cx).focus.clone()),
+            Some(Selected::Search) => self.search.as_ref().map(|s| s.read(cx).query.read(cx).focus.clone()),
+            Some(Selected::Shell(_) | Selected::TermTask(_)) => Some(self.terms.read(cx).focus.clone()),
+            _ => None,
+        };
+        if let Some(f) = f {
+            window.focus(&f, cx);
         }
     }
 
@@ -2264,6 +2410,25 @@ impl Workspace {
 
     // -- actions: app & window ---------------------------------------------------
 
+    /// Keep Awake: run `caffeinate -dims` (no display, idle or system sleep)
+    /// until toggled off or Qur exits.
+    fn caffeinate(&mut self, _: &qur::Caffeinate, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(mut c) = self.caffeinate.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+            self.flash("Keep Awake off", cx);
+        } else {
+            match std::process::Command::new("/usr/bin/caffeinate").args(["-dims", "-w", &std::process::id().to_string()]).spawn() {
+                Ok(c) => {
+                    self.caffeinate = Some(c);
+                    self.flash("Keep Awake on: the Mac won't sleep while Qur is open", cx);
+                }
+                Err(e) => self.flash(format!("Couldn't start caffeinate: {e}"), cx),
+            }
+        }
+        cx.notify();
+    }
+
     fn quit(&mut self, _: &qur::Quit, window: &mut Window, cx: &mut Context<Self>) {
         let dirty: Vec<_> = cx
             .windows()
@@ -2505,6 +2670,15 @@ impl Workspace {
                 let f = target.read(cx).focus.clone();
                 window.focus(&f, cx);
                 cx.notify();
+            }
+            (PickerEvent::Confirm(i), PickKind::Setting { agent, id, values }) => {
+                let (agent, id, value) = (agent.clone(), id.clone(), values.get(*i).cloned());
+                self.close_overlays(window, cx);
+                if let Some(v) = value {
+                    agent.update(cx, |a, cx| a.set_setting(&id, &v, cx));
+                }
+                let f = agent.read(cx).prompt.read(cx).focus.clone();
+                window.focus(&f, cx);
             }
             (PickerEvent::Confirm(i), PickKind::Projects(list)) => {
                 let target = list.get(*i).cloned();
@@ -3115,7 +3289,7 @@ impl Workspace {
                 this.mention_over_dialog = Some(p);
                 cx.notify();
             }
-            PromptEvent::Changed | PromptEvent::SlashRequested => {}
+            PromptEvent::Changed | PromptEvent::SlashRequested | PromptEvent::UpInEmpty => {}
         });
         self._subs.push(sub);
         let f = input.read(cx).focus.clone();
@@ -3222,6 +3396,7 @@ impl Workspace {
                     browser_url: None,
                     renamed: false,
                     in_root: false,
+                    queued: Vec::new(),
                 };
                 this.add_term_task(record, window, cx);
                 // Show the tree without starting a terminal process.
@@ -3498,11 +3673,59 @@ impl Workspace {
                 .when(unread, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
                 .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
                     this.select(Some(Selected::Agent(id.clone())), window, cx);
+                    // The agent's own row shows its chat, not a subagent's log.
+                    if let Some(a) = this.agent(&id).cloned() {
+                        a.update(cx, |a, cx| a.show_subagent(None, cx));
+                    }
                     if ev.click_count() == 2 {
                         this.rename_agent(&qur::RenameAgent, window, cx);
                     }
                 }));
             agents.push(row.into_any_element());
+            // Its subagents, indented under it; a click shows the agent.
+            let subs: Vec<_> = a.read(cx).subagents.iter().map(|s| (s.id.clone(), s.title.clone(), s.state.clone(), s.last.clone())).collect();
+            for (sid, title, state, last) in subs {
+                let (glyph, detail) = match state.as_str() {
+                    "running" => ("~", last.unwrap_or_default()),
+                    "requires_action" => ("!", "needs you".to_string()),
+                    "idle" => ("✓", "done".to_string()),
+                    other => ("", other.to_string()),
+                };
+                let id = a.read(cx).record.id.clone();
+                let open = sel && a.read(cx).open_subagent.as_deref() == Some(sid.as_str());
+                let running = state == "running";
+                let agent = a.clone();
+                let row = self
+                    .session_row(format!("sub-{sid}").into(), None, format!("↳ {title}"), detail, glyph, open, look)
+                    .pl(look.z(22.))
+                    .on_click({
+                        let (agent, sid) = (agent.clone(), sid.clone());
+                        cx.listener(move |this, _, window, cx| {
+                            // Show its work in the agent's chat panel.
+                            this.select(Some(Selected::Agent(id.clone())), window, cx);
+                            agent.update(cx, |a, cx| a.show_subagent(Some(sid.clone()), cx));
+                            Docks::update(cx, dock::Kind::Acp, |d| d.activate(dock::Panel::Session));
+                        })
+                    })
+                    .when(running, |d| {
+                        d.child(
+                            div()
+                                .id(SharedString::from(format!("sub-stop-{sid}")))
+                                .flex_none()
+                                .px(look.z(4.))
+                                .rounded(look.z(3.))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(look.c(ui.hover_bg)))
+                                .text_color(look.c(ui.text_muted))
+                                .child("✕")
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.stop_propagation();
+                                    agent.update(cx, |a, cx| a.stop_subagent(&sid, cx));
+                                })),
+                        )
+                    });
+                agents.push(row.into_any_element());
+            }
         }
         let panel = self.terms.read(cx);
         for t in &self.term_tasks {
@@ -3559,29 +3782,56 @@ impl Workspace {
             .bg(look.bg(ui.sidebar_bg))
             .border_r_1()
             .border_color(look.c(ui.border))
-            .child(
-                self.section_header("AGENTS".into(), look).child(
-                    div()
-                        .id("new-task")
-                        .flex_none()
-                        .p(look.z(2.))
-                        .rounded(look.z(3.))
-                        .cursor_pointer()
-                        .hover(|d| d.bg(look.c(ui.hover_bg)))
-                        .child(svg().path(icon::PLUS).size(look.z(12.)).text_color(look.c(ui.text_secondary)))
-                        .on_click(cx.listener(|this, _, window, cx| this.new_agent_task(&qur::NewAgentTask, window, cx))),
-                ),
-            )
-            .child(agents)
-            .when(empty_agents, |d| {
+            .child({
+                // Keep Awake toggle, above the agents.
+                let on = self.caffeinate.is_some();
+                div()
+                    .id("caffeinate")
+                    .mx(look.z(6.))
+                    .mt(look.z(8.))
+                    .px(look.z(8.))
+                    .py(look.z(4.))
+                    .rounded(look.z(4.))
+                    .flex()
+                    .items_center()
+                    .gap(look.z(8.))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(look.c(ui.hover_bg)))
+                    .text_size(look.text(-1.))
+                    .text_color(look.c(if on { ui.text } else { ui.text_muted }))
+                    .child(
+                        // A small switch: filled with the accent when on.
+                        div()
+                            .flex_none()
+                            .w(look.z(22.))
+                            .h(look.z(12.))
+                            .rounded(look.z(6.))
+                            .p(look.z(2.))
+                            .flex()
+                            .when(on, |d| d.justify_end())
+                            .bg(look.c(if on { look.theme.accents[0].base } else { ui.border_strong }))
+                            .child(div().size(look.z(8.)).rounded(look.z(4.)).bg(look.c(ui.editor_bg))),
+                    )
+                    .child(if on { "Keep awake · on" } else { "Keep awake" })
+                    .on_click(cx.listener(|this, _, window, cx| this.caffeinate(&qur::Caffeinate, window, cx)))
+            })
+            // Like TERMINALS: the section only appears once there's something in it
+            // (Cmd+Shift+N or File > New Agent Task starts one).
+            .when(!empty_agents, |d| {
                 d.child(
-                    div()
-                        .px(look.z(10.))
-                        .py(look.z(4.))
-                        .text_size(look.text(-2.))
-                        .text_color(look.c(ui.text_muted))
-                        .child(format!("{}  new agent task", commands::display_keys("cmd-shift-n"))),
+                    self.section_header("AGENTS".into(), look).child(
+                        div()
+                            .id("new-task")
+                            .flex_none()
+                            .p(look.z(2.))
+                            .rounded(look.z(3.))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(look.c(ui.hover_bg)))
+                            .child(svg().path(icon::PLUS).size(look.z(12.)).text_color(look.c(ui.text_secondary)))
+                            .on_click(cx.listener(|this, _, window, cx| this.new_agent_task(&qur::NewAgentTask, window, cx))),
+                    ),
                 )
+                .child(agents)
             })
             .when(!shells.is_empty(), |d| d.child(self.section_header("TERMINALS".into(), look)).children(shells))
             .child(self.section_header("SOURCE CONTROL".into(), look))
@@ -3662,7 +3912,7 @@ impl Workspace {
                         dock::Panel::Live => div().size_full().child(t.live.clone()).into_any_element(),
                         dock::Panel::Changes => div().size_full().child(t.changes.clone()).into_any_element(),
                         dock::Panel::Browser => div().size_full().child(t.browser.clone()).into_any_element(),
-                        _ => div().into_any_element(),
+                        dock::Panel::Todo => todo_panel(&t.todos.todos, t.accent, look).into_any_element(),
                     });
                     // The stage region's one translucent layer.
                     return div().size_full().bg(look.bg(ui.panel_bg)).child(dock).into_any_element();
@@ -3791,7 +4041,29 @@ impl Workspace {
                 .child(div().occlude().child(child))
                 .into_any_element()
         };
+        // Pickers opened from a prompt (agent commands, @ mentions, the mode
+        // and model chips) sit just above that prompt, not at the top.
+        let above_prompt = |target: &Entity<PromptInput>, child: gpui::AnyElement| -> Option<gpui::AnyElement> {
+            let b = target.read(cx).bounds?;
+            Some(
+                gpui::anchored()
+                    .position(gpui::point(b.left() - look.z(12.), b.top() - look.z(14.)))
+                    .anchor(gpui::Anchor::BottomLeft)
+                    .snap_to_window_with_margin(look.z(8.))
+                    .child(div().occlude().child(child))
+                    .into_any_element(),
+            )
+        };
         match self.overlay.as_ref()? {
+            Overlay::Picker(p, PickKind::Slash { target, .. } | PickKind::Mention { target, .. }) => {
+                let el = || p.clone().into_any_element();
+                Some(above_prompt(target, el()).unwrap_or_else(|| centered(el())))
+            }
+            Overlay::Picker(p, PickKind::Setting { agent, .. }) => {
+                let target = agent.read(cx).prompt.clone();
+                let el = || p.clone().into_any_element();
+                Some(above_prompt(&target, el()).unwrap_or_else(|| centered(el())))
+            }
             Overlay::Picker(p, _) => Some(centered(p.clone().into_any_element())),
             Overlay::Setup(s) => Some(centered(s.clone().into_any_element())),
             Overlay::About => Some(centered(self.about_box(look, cx))),
@@ -4134,6 +4406,9 @@ impl Render for Workspace {
         div()
             .key_context("Workspace")
             .track_focus(&self.focus)
+            // A click anywhere in Qur (clicks in a page go to the page, not
+            // here) takes the keyboard back from the browsers.
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| this.release_browser_focus(cx)))
             .size_full()
             .relative()
             .flex()
@@ -4185,6 +4460,11 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_agent_terminal))
             .on_action(cx.listener(Self::new_agent_task))
             .on_action(cx.listener(Self::close_terminal))
+            .on_action(cx.listener(Self::tile_terminal))
+            .on_action(cx.listener(Self::caffeinate))
+            .on_action(cx.listener(Self::focus_input))
+            .on_action(cx.listener(Self::split_right))
+            .on_action(cx.listener(Self::split_down))
             .on_action(cx.listener(Self::next_terminal))
             .on_action(cx.listener(Self::prev_terminal))
             .on_action(cx.listener(Self::next_session))
@@ -4320,22 +4600,6 @@ fn local_port(url: &str) -> Option<u16> {
     port.parse().ok()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::local_port;
-
-    #[test]
-    fn run_project_urls_are_local_only() {
-        assert_eq!(local_port("http://localhost:5173"), Some(5173));
-        assert_eq!(local_port("http://127.0.0.1:8080/app?x=1"), Some(8080));
-        assert_eq!(local_port("localhost:3000"), Some(3000));
-        assert_eq!(local_port("http://[::1]:4000/"), Some(4000));
-        assert_eq!(local_port("https://example.com:443"), None);
-        assert_eq!(local_port("http://localhost.evil.com:80"), None);
-        assert_eq!(local_port("http://localhost"), None);
-    }
-}
-
 /// Notification tag for an agent: `qur:<window>:<task id>` (main.rs parses it).
 fn alert_tag(window: &Window, id: &str) -> String {
     format!("qur:{}:{id}", window.window_handle().window_id().as_u64())
@@ -4361,5 +4625,54 @@ fn hue_name(c: Rgba) -> &'static str {
         200..=254 => "blue",
         255..=289 => "purple",
         _ => "pink",
+    }
+}
+
+/// An Agent Terminal's To-do tab (same look as a structured agent's).
+fn todo_panel(todos: &[qur_agents::todos::Todo], accent: Rgba, look: &Look) -> gpui::Div {
+    use qur_agents::todos::TodoStatus;
+    let ui = &look.theme.ui;
+    if todos.is_empty() {
+        return div().size_full().flex().items_center().justify_center().text_color(look.c(ui.text_muted)).child("No plan yet.");
+    }
+    let done = todos.iter().filter(|t| t.status == TodoStatus::Completed).count();
+    div()
+        .size_full()
+        .px(look.z(16.))
+        .py(look.z(8.))
+        .flex()
+        .flex_col()
+        .gap(look.z(3.))
+        .text_size(look.text(0.))
+        .child(div().font_weight(gpui::FontWeight::MEDIUM).text_color(look.c(ui.text_muted)).child(format!("TO-DO  {done}/{}", todos.len())))
+        .children(todos.iter().map(|t| {
+            let (g, c) = match t.status {
+                TodoStatus::Completed => ("●", ui.text_muted),
+                TodoStatus::InProgress => ("◐", ui.text),
+                TodoStatus::Pending => ("○", ui.text_secondary),
+            };
+            div()
+                .flex()
+                .gap(look.z(8.))
+                .text_color(look.c(c))
+                .when(t.status == TodoStatus::InProgress, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                .child(div().flex_none().text_color(look.c(accent)).child(g))
+                .child(div().min_w(px(0.)).child(t.content.clone()))
+        }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_port;
+
+    #[test]
+    fn run_project_urls_are_local_only() {
+        assert_eq!(local_port("http://localhost:5173"), Some(5173));
+        assert_eq!(local_port("http://127.0.0.1:8080/app?x=1"), Some(8080));
+        assert_eq!(local_port("localhost:3000"), Some(3000));
+        assert_eq!(local_port("http://[::1]:4000/"), Some(4000));
+        assert_eq!(local_port("https://example.com:443"), None);
+        assert_eq!(local_port("http://localhost.evil.com:80"), None);
+        assert_eq!(local_port("http://localhost"), None);
     }
 }
