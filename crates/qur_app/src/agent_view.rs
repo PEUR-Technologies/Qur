@@ -938,7 +938,23 @@ impl AgentTask {
                         .child(t.clone()),
                 )
                 .into_any_element(),
-            ChatItem::Agent(t) => pad(div()).child(markdownish(t, look)).into_any_element(),
+            // Hover shows "Copy" (the raw Markdown).
+            ChatItem::Agent(t) => pad(div())
+                .relative()
+                .group("agent-msg")
+                .child(self.markdown(t, format!("md-{}-{ix}", cx.entity_id()), look, cx))
+                .child(
+                    div()
+                        .absolute()
+                        .top(look.z(2.))
+                        .right(look.z(12.))
+                        .rounded(look.z(4.))
+                        .bg(look.c(ui.panel_bg))
+                        .invisible()
+                        .group_hover("agent-msg", |s| s.visible())
+                        .child(crate::markdown::copy_button(("copy-msg", ix), t.clone(), look)),
+                )
+                .into_any_element(),
             // Open while it streams (the last item of a working turn), then
             // folded to its first line; click to toggle (as in Zed).
             ChatItem::Thought(t) => {
@@ -1069,7 +1085,7 @@ impl AgentTask {
         let mut parts: Vec<gpui::AnyElement> = Vec::new();
         for c in &t.content {
             match c {
-                ToolContent::Text(s) if !s.trim().is_empty() => parts.push(markdownish(s, look).into_any_element()),
+                ToolContent::Text(s) if !s.trim().is_empty() => parts.push(self.markdown(s, format!("md-{}-{}-{}", cx.entity_id(), t.id, parts.len()), look, cx).into_any_element()),
                 ToolContent::Terminal(_) => {
                     let out = t.output.as_deref().unwrap_or("").trim_end();
                     let status = match t.exit {
@@ -1349,45 +1365,16 @@ fn line_diff<'a>(old: &'a str, new: &'a str) -> Vec<(char, &'a str)> {
     out
 }
 
-/// Plain text with fenced code blocks in the code font (enough for agent
-/// replies; real markdown rendering can come later).
-fn markdownish(text: &str, look: &Look) -> gpui::Div {
-    let ui = &look.theme.ui;
-    let mut out = div().flex().flex_col().gap(look.z(6.)).text_color(look.c(ui.text));
-    let mut in_code = false;
-    let mut buf = String::new();
-    let flush = |out: gpui::Div, buf: &mut String, code: bool| -> gpui::Div {
-        let t = std::mem::take(buf);
-        let t = t.trim_matches('\n').to_string();
-        if t.is_empty() {
-            return out;
-        }
-        if code {
-            out.child(
-                div()
-                    .px(look.z(10.))
-                    .py(look.z(6.))
-                    .rounded(look.z(4.))
-                    .bg(look.c(ui.panel_bg))
-                    .border_1()
-                    .border_color(look.c(ui.border))
-                    .font_family(look.code_font.clone())
-                    .text_size(look.text(0.))
-                    .child(t),
-            )
-        } else {
-            out.child(div().child(t))
-        }
-    };
-    for line in text.split_inclusive('\n') {
-        if line.trim_start().starts_with("```") {
-            out = flush(out, &mut buf, in_code);
-            in_code = !in_code;
-            continue;
-        }
-        buf.push_str(line);
+impl AgentTask {
+    /// `text` as Markdown; file links open in the code modal. `id`: unique
+    /// and stable per chat item (see `markdown::render`).
+    fn markdown(&self, text: &str, id: String, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let me = cx.entity().downgrade();
+        let open: crate::markdown::OnFile = std::rc::Rc::new(move |path, line, _, cx| {
+            me.update(cx, |_, cx| cx.emit(AgentEvent::OpenFile(path, line))).ok();
+        });
+        crate::markdown::render(text, id, Some(&self.record.worktree), look, open)
     }
-    flush(out, &mut buf, in_code)
 }
 
 impl Focusable for AgentTask {
@@ -1454,11 +1441,11 @@ impl AgentTask {
                     .flex_col()
                     .gap(look.z(6.))
                     .when(sub.log.is_empty(), |d| d.child(div().text_color(look.c(ui.text_muted)).child("Nothing from this subagent yet.")))
-                    .children(sub.log.iter().map(|(tool, text)| {
+                    .children(sub.log.iter().enumerate().map(|(n, (tool, text))| {
                         if *tool {
                             div().text_color(look.c(ui.text_secondary)).child(format!("· {}", text.trim()))
                         } else {
-                            markdownish(text.trim(), look)
+                            self.markdown(text.trim(), format!("md-{}-{}-{n}", cx.entity_id(), sub.id), look, cx)
                         }
                     })),
             )

@@ -16,6 +16,7 @@ mod git_panel;
 mod input;
 mod live;
 mod look;
+mod markdown;
 mod monitor;
 mod picker;
 mod prompt;
