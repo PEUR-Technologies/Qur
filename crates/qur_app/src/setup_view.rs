@@ -417,8 +417,8 @@ impl Render for SetupView {
                         .justify_center()
                         .text_size(look.text(-3.))
                         .border_1()
-                        .border_color(look.c(if done { ui.success } else { ui.border_strong }))
-                        .text_color(look.c(if done { ui.success } else { ui.text_secondary }))
+                        .border_color(look.c(if done { ui.text_secondary } else { ui.border_strong }))
+                        .text_color(look.c(if done { ui.text } else { ui.text_secondary }))
                         .child(if done { "✓" } else { n }),
                 )
                 .child(div().w(look.z(140.)).flex_none().text_size(look.text(-1.)).text_color(look.c(ui.text)).child(title))
@@ -459,7 +459,7 @@ impl Render for SetupView {
                 .child(div().w(look.z(190.)).flex_none().text_size(look.text(-1.)).text_color(look.c(if f.path.is_some() { ui.text } else { ui.text_muted })).child(f.def.label.clone()))
                 .child(div().flex_1().min_w(px(0.)).truncate().text_size(look.text(-2.)).text_color(look.c(match f.check {
                     Check::Failed(_) => ui.error,
-                    Check::Ok(_) => ui.success,
+                    Check::Ok(_) => ui.text_secondary,
                     _ => ui.text_muted,
                 })).child(status))
                 .when(f.path.is_some(), |d| {
@@ -473,7 +473,7 @@ impl Render for SetupView {
             // ① Install
             let mut install = step("1", "Install", installed);
             install = if installed {
-                install.child(note("Installed".into(), ui.success))
+                install.child(note("Installed".into(), ui.text_secondary))
             } else if waiting == Some(Wait::Install) {
                 install.child(note("Installing in a terminal… Setup comes back when it's done".into(), ui.text_muted))
             } else if !self.npm {
@@ -494,7 +494,7 @@ impl Render for SetupView {
                 _ if !cli_found => sign.child(note("Install first".into(), ui.text_muted)),
                 (_, Some(Wait::SignIn)) => sign.child(note("Finish signing in in your browser… Setup comes back when it's done".into(), ui.text_muted)),
                 (None, _) => sign.child(note("Checking…".into(), ui.text_muted)),
-                (Some(Login::In(who)), _) => sign.child(note(who.clone(), ui.success)),
+                (Some(Login::In(who)), _) => sign.child(note(who.clone(), ui.text_secondary)),
                 (Some(Login::Out), _) => sign
                     .child(note("Not signed in. Opens your browser, where you may already be signed in.".into(), ui.text_muted))
                     .child(primary(("svc-sign-in", ix), "Sign in".into()).on_click(cx.listener(move |this, _, _, cx| this.sign_in(ix, cx)))),
@@ -509,7 +509,7 @@ impl Render for SetupView {
                 .p(look.z(10.))
                 .rounded(look.z(6.))
                 .border_1()
-                .border_color(look.c(if self.connected(ix) { ui.success } else { ui.border }))
+                .border_color(look.c(ui.border))
                 .flex()
                 .flex_col()
                 .child(
