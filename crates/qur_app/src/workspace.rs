@@ -3770,7 +3770,9 @@ impl Workspace {
             format!("FILES · {}", root.file_name().unwrap_or_default().to_string_lossy()).into()
         };
         let empty_agents = agents.is_empty();
-        let agents = div().pt(look.z(2.)).flex().flex_col().children(agents);
+        // Scrolls on its own once there are many agents and subagents, so
+        // Source Control and the file tree stay on screen below it.
+        let agents = div().id("sidebar-agents").pt(look.z(2.)).flex().flex_col().flex_shrink_0().max_h(gpui::relative(0.6)).overflow_y_scroll().children(agents);
         div()
             .relative()
             .w(look.z(self.sidebar_w))
