@@ -886,6 +886,16 @@ impl Workspace {
                 };
                 this.mention_picker(root, target, window, cx);
             }
+            // Sign-in: the login command in a terminal of its own, shown now;
+            // the agent's callout waits for Continue.
+            AgentEvent::RunInTerminal { label, command } => {
+                let wt = a.read(cx).record.worktree.clone();
+                let kind = Kind::Agent { task: label.clone(), command: command.clone() };
+                let Some(tid) = this.terms.update(cx, |p, cx| p.open(&wt, kind, label.clone(), cx)) else { return };
+                this.shells.push(tid);
+                this.select(Some(Selected::Shell(tid)), window, cx);
+                this.flash(format!("{label}: when you've signed in, go back to the agent and click Continue"), cx);
+            }
         });
         self._subs.push(sub);
         self.agents.push(a.clone());

@@ -4,16 +4,18 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, ListAlignment, ListState, SharedString,
-    Subscription, Task, Window, div, list, prelude::*, px,
+    App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, ListAlignment, ListState, SharedString,
+    Subscription, Task, Window, div, img, list, prelude::*, px,
 };
 use qur_acp::{
-    AgentCommand, Client, ConfigOption, Event, PermissionKind, PermissionOption, PermissionOutcome, PlanEntry, PlanStatus,
-    PromptBlock, RequestId, SessionUpdate, StopReason, ToolCall, ToolCallUpdate, ToolContent, ToolKind, ToolStatus,
+    AcpError, AgentCommand, AuthMethod, Client, ConfigOption, Event, Media, PermissionKind, PermissionOption, PermissionOutcome,
+    PlanEntry, PlanStatus, PromptBlock, RequestId, SessionId, SessionUpdate, StopReason, ToolCall, ToolCallId, ToolCallUpdate,
+    ToolContent, ToolKind, ToolStatus,
 };
 use qur_agents::{AgentDef, QueuedMessage, TaskRecord};
 use qur_theme::Rgba;
@@ -69,7 +71,8 @@ impl Status {
 
 /// A subagent (Claude's Agent/Task tool) running inside an agent's session.
 pub struct Subagent {
-    pub id: String,
+    /// Its own (child) session id.
+    pub id: SessionId,
     pub title: String,
     /// "running", "requires_action", "idle" (done), or what the agent sent.
     pub state: String,
@@ -98,6 +101,8 @@ pub enum AgentEvent {
     TurnChangedFiles,
     /// A setting chip (mode, model…) was clicked: offer its values.
     PickSetting(String),
+    /// Sign-in: run this login command in a terminal in the task's worktree.
+    RunInTerminal { label: String, command: String },
 }
 
 #[derive(Clone)]
@@ -105,10 +110,37 @@ enum ChatItem {
     User(String),
     Agent(String),
     Thought(String),
-    Tool(String),
+    Tool(ToolCallId),
     Notice(String),
     /// Command output (worktree setup), shown in the code font.
     Output(String),
+    /// An image in a message, and its size in pixels.
+    Image(Arc<gpui::Image>, (u32, u32)),
+    /// A file or web link in a message: click opens it.
+    Link { uri: String, name: String },
+    /// A failed or cut-short turn, or the agent exiting.
+    Failure(Failure),
+}
+
+/// What an error callout shows: a line, the full error (stderr tail…), and
+/// the message to Retry / Edit & resend when there is one.
+#[derive(Clone)]
+struct Failure {
+    title: String,
+    detail: Option<String>,
+    resend: Option<Outgoing>,
+}
+
+/// The agent refused to start a session or a turn until the user signs in
+/// (JSON-RPC -32000). Messages stay queued meanwhile.
+struct SignIn {
+    /// The agent's words.
+    message: String,
+    /// The method being tried (`authenticate` running, or a restart).
+    busy: Option<String>,
+    /// A terminal login was started: (method name, the command it runs).
+    login: Option<(String, String)>,
+    error: Option<String>,
 }
 
 struct Permission {
@@ -202,10 +234,18 @@ pub struct AgentTask {
     pub accent: Rgba,
     pub status: Status,
     client: Option<Client>,
-    session_id: Option<String>,
+    session_id: Option<SessionId>,
     load_session: bool,
+    /// How the agent was started (a terminal login may reuse it).
+    agent_cmd: Option<AgentCommand>,
+    /// Sign-in methods the agent offered at `initialize`.
+    auth_methods: Vec<AuthMethod>,
+    /// Shown while the agent wants the user to sign in.
+    sign_in: Option<SignIn>,
+    /// The last message sent (Retry / Edit & resend).
+    last_sent: Option<Outgoing>,
     chat: Vec<ChatItem>,
-    tools: HashMap<String, ToolCall>,
+    tools: HashMap<ToolCallId, ToolCall>,
     list: ListState,
     plan: Vec<PlanEntry>,
     permission: Option<Permission>,
@@ -235,14 +275,14 @@ pub struct AgentTask {
     /// Subagents this agent started, oldest first (shown under it in the sidebar).
     pub subagents: Vec<Subagent>,
     /// The subagent shown in place of the chat (clicked in the sidebar).
-    pub open_subagent: Option<String>,
+    pub open_subagent: Option<SessionId>,
     /// Setup command still running for a new worktree.
     pub setting_up: bool,
     focus: FocusHandle,
     turn_started: Option<Instant>,
     /// Tool calls of the current (or last) turn, and the files they changed:
     /// the strip above the prompt. Cleared when the next turn starts.
-    turn_tools: Vec<String>,
+    turn_tools: Vec<ToolCallId>,
     turn_files: Vec<FileChange>,
     _events: Option<Task<()>>,
     _subs: Vec<Subscription>,
@@ -336,6 +376,10 @@ impl AgentTask {
             client: None,
             session_id: None,
             load_session: false,
+            agent_cmd: None,
+            auth_methods: Vec::new(),
+            sign_in: None,
+            last_sent: None,
             chat: Vec::new(),
             tools: HashMap::new(),
             list,
@@ -412,7 +456,70 @@ impl AgentTask {
         self.list.splice(last..last + 1, 1);
     }
 
-    fn refresh_tool(&mut self, id: &str) {
+    /// An image or link block from a message: its own chat row.
+    fn push_media(&mut self, media: Option<Media>) {
+        match media {
+            Some(Media::Image { mime, data }) => match gpui::ImageFormat::from_mime_type(&mime) {
+                Some(f) => {
+                    // The size now: GPUI decodes later, after the row is measured.
+                    let size = image::ImageReader::new(std::io::Cursor::new(&data))
+                        .with_guessed_format()
+                        .ok()
+                        .and_then(|r| r.into_dimensions().ok())
+                        .filter(|(w, h)| *w > 0 && *h > 0);
+                    match size {
+                        Some(size) => self.push(ChatItem::Image(Arc::new(gpui::Image::from_bytes(f, data)), size)),
+                        None => self.push(ChatItem::Notice("[image that couldn't be read]".into())),
+                    }
+                }
+                None => self.push(ChatItem::Notice(format!("[{mime} image]"))),
+            },
+            Some(Media::Link { uri, name }) => self.push(ChatItem::Link { uri, name }),
+            None => {}
+        }
+    }
+
+    /// A link in a message: a file opens in the code modal, a local address
+    /// in the task's Browser view, anything else in the default browser.
+    fn open_link(&mut self, uri: &str, cx: &mut Context<Self>) {
+        if let Some(path) = uri.strip_prefix("file://") {
+            // `file:///abs/path#L12` or `…:12`: open at that line when given.
+            let (path, line) = match path.rsplit_once("#L").or_else(|| path.rsplit_once(':')) {
+                Some((p, l)) if l.parse::<u32>().is_ok() => (p, l.parse().ok()),
+                _ => (path, None),
+            };
+            let path = PathBuf::from(path.replace("%20", " "));
+            return cx.emit(AgentEvent::OpenFile(path, line));
+        }
+        let local = ["http://localhost", "http://127.0.0.1", "https://localhost"].iter().any(|p| uri.starts_with(p));
+        if local {
+            self.browser.update(cx, |b, cx| b.navigate(uri, cx));
+            self.show_browser(true, cx);
+        } else {
+            cx.open_url(uri);
+        }
+    }
+
+    /// Error callout: send that message again.
+    fn retry(&mut self, out: Outgoing, cx: &mut Context<Self>) {
+        self.follow_bottom();
+        if matches!(self.status, Status::Working | Status::NeedsYou | Status::Starting) || self.setting_up || self.sign_in.is_some() {
+            self.pending.push(out);
+            self.save_queue(cx);
+            return cx.notify();
+        }
+        self.send_out(out, cx);
+    }
+
+    /// Error callout: the message back in the prompt to change and send.
+    fn edit_resend(&mut self, out: &Outgoing, window: &mut Window, cx: &mut Context<Self>) {
+        self.prompt.update(cx, |p, cx| p.set_text(&out.text, cx));
+        let f = self.prompt.read(cx).focus.clone();
+        window.focus(&f, cx);
+        cx.notify();
+    }
+
+    fn refresh_tool(&mut self, id: &ToolCallId) {
         if let Some(ix) = self.chat.iter().rposition(|c| matches!(c, ChatItem::Tool(t) if t == id)) {
             self.list.splice(ix..ix + 1, 1);
         }
@@ -436,6 +543,7 @@ impl AgentTask {
                 return;
             }
         };
+        self.agent_cmd = Some(cmd);
         self.client = Some(client.clone());
         self.set_status(Status::Starting, cx);
         self._events = Some(cx.spawn(async move |this, cx| {
@@ -446,8 +554,6 @@ impl AgentTask {
                 }
             }
         }));
-        let saved = self.record.session_id.clone();
-        let cwd = self.record.worktree.clone();
         cx.spawn(async move |this, cx| {
             let init = client.initialize().await;
             let init = match init {
@@ -455,14 +561,25 @@ impl AgentTask {
                 Ok(Err(e)) => return this.update(cx, |t, cx| t.fail(format!("initialize: {e}"), cx)).ok(),
                 Err(_) => return this.update(cx, |t, cx| t.fail("agent exited during start".into(), cx)).ok(),
             };
-            let can_load = init.load_session;
             let images = init.raw["agentCapabilities"]["promptCapabilities"]["image"].as_bool().unwrap_or(false);
-            this.update(cx, |t, _| {
-                t.load_session = can_load;
+            this.update(cx, |t, cx| {
+                t.load_session = init.load_session;
                 t.images_ok = images;
+                t.auth_methods = init.auth_methods;
+                t.open_session(client, cx);
             })
-            .ok();
-            let session = match saved.filter(|_| can_load) {
+            .ok()
+        })
+        .detach();
+    }
+
+    /// Load the saved session (shows its history) or start a new one, then
+    /// send what's waiting. A sign-in refusal shows the sign-in callout.
+    fn open_session(&mut self, client: Client, cx: &mut Context<Self>) {
+        let saved = self.record.session_id.clone().filter(|_| self.load_session).map(SessionId::from);
+        let cwd = self.record.worktree.clone();
+        cx.spawn(async move |this, cx| {
+            let session = match saved {
                 Some(id) => match client.load_session(&id, &cwd).await {
                     Ok(Ok(settings)) => Some((id, settings)),
                     _ => None,
@@ -473,14 +590,16 @@ impl AgentTask {
                 Some(s) => s,
                 None => match client.new_session(&cwd).await {
                     Ok(Ok(s)) => s,
+                    Ok(Err(e)) if e.is_auth_required() => return this.update(cx, |t, cx| t.need_sign_in(&e, cx)).ok(),
                     Ok(Err(e)) => return this.update(cx, |t, cx| t.fail(format!("session/new: {e}"), cx)).ok(),
                     Err(_) => return this.update(cx, |t, cx| t.fail("agent exited during start".into(), cx)).ok(),
                 },
             };
             this.update(cx, |t, cx| {
+                t.sign_in = None;
                 t.settings = settings;
-                t.session_id = Some(session.clone());
-                t.record.session_id = Some(session);
+                t.record.session_id = Some(session.to_string());
+                t.session_id = Some(session);
                 t.set_status(Status::Idle, cx);
                 if let Some(out) = t.queued.take() {
                     t.send_out(out, cx);
@@ -493,8 +612,181 @@ impl AgentTask {
         .detach();
     }
 
+    // -- sign-in -------------------------------------------------------------------
+
+    /// The agent wants a sign-in (-32000): show the callout; queued messages
+    /// wait (`drain_pending` only runs once a session is ready again).
+    fn need_sign_in(&mut self, e: &AcpError, cx: &mut Context<Self>) {
+        let again = self.sign_in.as_ref().is_some_and(|s| s.login.is_some() || s.busy.is_some());
+        self.sign_in = Some(SignIn {
+            message: e.message.clone(),
+            busy: None,
+            login: None,
+            error: again.then(|| "Still not signed in. Finish signing in, then Continue.".to_string()),
+        });
+        self.set_status(Status::Error("sign-in required".into()), cx);
+    }
+
+    /// A sign-in button: a terminal login runs in a Qur terminal (then
+    /// Continue restarts the agent, which reads the new login); any other
+    /// method is `authenticate`, then the session is opened again.
+    fn sign_in_with(&mut self, method_id: &str, cx: &mut Context<Self>) {
+        let Some(m) = self.auth_methods.iter().find(|m| m.id == method_id).cloned() else { return };
+        let Some(s) = self.sign_in.as_mut() else { return };
+        s.error = None;
+        if let Some(t) = &m.terminal {
+            let Some(agent) = self.agent_cmd.as_ref() else { return };
+            let (program, args) = t.command_line(agent);
+            let env = t.env.iter().map(|(k, v)| format!("{k}={} ", shell_quote(v))).collect::<String>();
+            let command = format!("{env}{}", std::iter::once(&program).chain(&args).map(|a| shell_quote(a)).collect::<Vec<_>>().join(" "));
+            s.login = Some((m.name.clone(), command.clone()));
+            cx.emit(AgentEvent::RunInTerminal { label: t.label.clone().unwrap_or_else(|| m.name.clone()), command });
+            cx.notify();
+            return;
+        }
+        let Some(client) = self.client.clone() else { return self.continue_sign_in(cx) };
+        s.busy = Some(m.name.clone());
+        let pending = client.authenticate(&m.id);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let r = pending.await;
+            this.update(cx, |t, cx| {
+                match r {
+                    Ok(Ok(())) if t.session_id.is_some() => {
+                        // Signed in mid-session (a turn was refused): carry on.
+                        t.sign_in = None;
+                        t.set_status(Status::Idle, cx);
+                        t.drain_pending(cx);
+                    }
+                    Ok(Ok(())) => t.open_session(client, cx),
+                    Ok(Err(e)) => {
+                        if let Some(s) = t.sign_in.as_mut() {
+                            s.busy = None;
+                            s.error = Some(format!("Sign-in didn't complete: {e}"));
+                        }
+                    }
+                    Err(_) => t.sign_in = None,
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// After a terminal login (or with no method offered): restart the agent
+    /// so it picks up the new login, then open the session again.
+    fn continue_sign_in(&mut self, cx: &mut Context<Self>) {
+        if let Some(s) = self.sign_in.as_mut() {
+            s.busy = Some("Checking".into());
+            s.error = None;
+        }
+        // The saved session's history is replayed on load: rebuild the chat
+        // from it rather than show it twice.
+        if self.load_session && self.record.session_id.is_some() && self.session_id.is_some() {
+            self.chat.clear();
+            self.tools.clear();
+            self.toggled.clear();
+            self.list.reset(0);
+        }
+        if let Some(c) = self.client.take() {
+            std::thread::spawn(move || c.shutdown(Duration::from_secs(2)));
+        }
+        self._events = None;
+        self.session_id = None;
+        self.permission = None;
+        self.start(cx);
+        cx.notify();
+    }
+
+    /// The sign-in callout, above the prompt: one button per method the
+    /// agent offers, or the command to run when a terminal login started.
+    fn sign_in_bar(&self, look: &Look, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let s = self.sign_in.as_ref()?;
+        let ui = &look.theme.ui;
+        let button = |id: SharedString, label: String, primary: bool| {
+            div()
+                .id(id)
+                .px(look.z(10.))
+                .py(look.z(3.))
+                .rounded(look.z(4.))
+                .cursor_pointer()
+                .text_size(look.text(0.))
+                .bg(look.c(if primary { ui.button_primary_bg } else { ui.button_bg }))
+                .text_color(look.c(if primary { ui.button_primary_text } else { ui.button_text }))
+                .child(label)
+        };
+        let methods: Vec<_> = self
+            .auth_methods
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let id = m.id.clone();
+                let label = if m.name.trim().is_empty() { m.id.clone() } else { m.name.clone() };
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(look.z(2.))
+                    .child(button(SharedString::from(format!("auth-{}", m.id)), label, i == 0 && s.login.is_none()).on_click(cx.listener(move |t, _, _, cx| t.sign_in_with(&id, cx))))
+                    .children(m.description.clone().map(|d| div().text_size(look.text(0.)).text_color(look.c(ui.text_muted)).child(d)))
+            })
+            .collect();
+        let queued = self.pending.len() + usize::from(self.queued.is_some());
+        let login_cmd = s.login.as_ref().map(|(_, c)| c.clone());
+        Some(
+            div()
+                .flex_none()
+                .mx(look.z(12.))
+                .mb(look.z(6.))
+                .px(look.z(12.))
+                .py(look.z(8.))
+                .rounded(look.z(6.))
+                .border_1()
+                .border_color(look.c(self.accent))
+                .bg(look.c(ui.permission_bar_bg))
+                .flex()
+                .flex_col()
+                .gap(look.z(6.))
+                .text_color(look.c(ui.text))
+                .child(div().font_weight(gpui::FontWeight::MEDIUM).child(format!("Sign in to {}", self.def.label)))
+                .child(div().text_color(look.c(ui.text_secondary)).child(match &s.login {
+                    Some((name, _)) => format!("Finish \"{name}\" in the terminal that opened, then click Continue. Or run this yourself:"),
+                    // The agent offered no method: say how (Claude's own CLI login).
+                    None if self.auth_methods.is_empty() && self.def.command.contains("claude") => {
+                        format!("{}. Run `claude /login` in a terminal, then click Continue.", s.message.trim_end_matches('.'))
+                    }
+                    None if self.auth_methods.is_empty() => format!("{}. Sign in with {}'s own login, then click Continue.", s.message.trim_end_matches('.'), self.def.label),
+                    None => s.message.clone(),
+                }))
+                .children(login_cmd.map(|c| {
+                    let copy = c.clone();
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(look.z(6.))
+                        .child(code_block(&c, look).flex_1().min_w(px(0.)))
+                        .child(button("auth-copy".into(), "Copy".into(), false).on_click(move |_, _, cx: &mut App| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))))
+                }))
+                .children(s.error.clone().map(|e| div().text_color(look.c(ui.error)).child(e)))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_start()
+                        .gap(look.z(6.))
+                        .children(methods)
+                        .when(s.login.is_some() || self.auth_methods.is_empty(), |d| {
+                            d.child(button("auth-continue".into(), "Continue".into(), true).on_click(cx.listener(|t, _, _, cx| t.continue_sign_in(cx))))
+                        })
+                        .children(s.busy.clone().map(|b| div().py(look.z(3.)).text_color(look.c(ui.text_muted)).child(format!("{b}…")))),
+                )
+                .when(queued > 0, |d| d.child(div().text_size(look.text(0.)).text_color(look.c(ui.text_muted)).child(format!("{queued} message(s) will be sent once you're signed in.")))),
+        )
+    }
+
     fn fail(&mut self, msg: String, cx: &mut Context<Self>) {
-        self.push(ChatItem::Notice(msg.clone()));
+        self.sign_in = None;
+        self.push(ChatItem::Failure(Failure { title: "The agent couldn't start.".into(), detail: Some(msg.clone()), resend: None }));
         self.set_status(Status::Error(msg), cx);
         if let Some(c) = self.client.take() {
             std::thread::spawn(move || c.shutdown(Duration::from_secs(2)));
@@ -541,7 +833,7 @@ impl AgentTask {
                 out.images.push(png);
             }
         }
-        if matches!(self.status, Status::Working | Status::NeedsYou | Status::Starting) || self.setting_up {
+        if matches!(self.status, Status::Working | Status::NeedsYou | Status::Starting) || self.setting_up || self.sign_in.is_some() {
             // One turn at a time: queue it and send when the turn ends.
             self.pending.push(out);
             self.save_queue(cx);
@@ -659,6 +951,7 @@ impl AgentTask {
         self.chat.iter().rev().find_map(|c| match c {
             ChatItem::Agent(t) => t.lines().map(str::trim).rfind(|l| !l.is_empty() && !l.starts_with("```")).map(str::to_string),
             ChatItem::Notice(t) => Some(t.clone()),
+            ChatItem::Failure(f) => Some(f.title.clone()),
             _ => None,
         })
     }
@@ -679,9 +972,10 @@ impl AgentTask {
         if self.queued.is_none() && !matches!(self.chat.last(), Some(ChatItem::User(t)) if *t == shown) {
             self.push(ChatItem::User(shown));
         }
+        // Kept for Retry / Edit & resend, and re-queued if a sign-in is needed.
+        self.last_sent = Some(out.clone());
+        let sent = out.clone();
         let Outgoing { text, mentions, context, images, .. } = out;
-        // Put back in the prompt if the turn fails (as Zed does).
-        let resend = text.clone();
         let mut blocks = vec![PromptBlock::Text(text)];
         for c in context {
             blocks.push(PromptBlock::Text(c));
@@ -705,35 +999,29 @@ impl AgentTask {
             this.update(cx, |t, cx| {
                 t.permission = None;
                 match r {
+                    Ok(Ok(StopReason::EndTurn)) => t.set_status(Status::Done, cx),
                     Ok(Ok(StopReason::Cancelled)) => {
                         t.push(ChatItem::Notice("Stopped.".into()));
                         t.set_status(Status::Done, cx)
                     }
-                    Ok(Ok(StopReason::EndTurn)) => t.set_status(Status::Done, cx),
+                    // Cut short (length limit, refusal, too many steps…): say so, offer Retry.
                     Ok(Ok(other)) => {
-                        let label = t.def.label.clone();
-                        t.push(ChatItem::Notice(match other {
-                            StopReason::MaxTokens => "Stopped: the reply reached its length limit. Say \"continue\" to go on.".into(),
-                            StopReason::MaxTurnRequests => "Stopped: this turn took too many steps. Send a message to carry on.".into(),
-                            StopReason::Refusal => format!("{label} declined this request."),
-                            other => format!("Turn ended: {other:?}"),
-                        }));
+                        let title = other.describe(&t.def.label).unwrap_or_default();
+                        t.push(ChatItem::Failure(Failure { title, detail: None, resend: Some(sent) }));
                         t.set_status(Status::Done, cx)
                     }
+                    // Not signed in: the message waits at the front of the queue.
+                    Ok(Err(e)) if e.is_auth_required() => {
+                        t.pending.insert(0, sent);
+                        t.save_queue(cx);
+                        t.need_sign_in(&e, cx);
+                    }
+                    // The agent exited mid-turn: `Event::Exited`, right behind,
+                    // shows why (stderr) and offers Retry.
+                    Ok(Err(e)) if e.is_agent_exited() => {}
                     Ok(Err(e)) => {
-                        // -32000 is ACP's "authentication required".
-                        let msg = if e.code == Some(-32000) {
-                            format!("{} isn't signed in. Run `claude /login` in a terminal (or /login here), then send again.", t.def.label)
-                        } else {
-                            format!("Error: {e}")
-                        };
-                        t.push(ChatItem::Notice(msg));
-                        // Your message back in the prompt, to edit or resend.
-                        t.prompt.update(cx, |p, cx| {
-                            if p.text.trim().is_empty() {
-                                p.set_text(&resend, cx);
-                            }
-                        });
+                        let title = format!("{} couldn't finish this turn.", t.def.label);
+                        t.push(ChatItem::Failure(Failure { title, detail: Some(e.to_string()), resend: Some(sent) }));
                         t.set_status(Status::Error(e.to_string()), cx)
                     }
                     Err(_) => t.set_status(Status::Error("agent exited".into()), cx),
@@ -864,7 +1152,7 @@ impl AgentTask {
             // Our session id is known before session/load replays history, so
             // replayed subagent work is kept out of the chat too.
             Event::Update { session_id, update }
-                if !session_id.is_empty() && self.session_id.as_deref().or(self.record.session_id.as_deref()).is_some_and(|s| s != session_id) =>
+                if !session_id.is_empty() && self.session_id.as_deref().or(self.record.session_id.as_deref()).is_some_and(|s| s != session_id.as_str()) =>
             {
                 // A subagent's own work: keep it out of the chat, show its latest step.
                 let Some(sub) = self.subagents.iter_mut().find(|s| s.id == session_id) else { return };
@@ -883,8 +1171,17 @@ impl AgentTask {
                 cx.notify();
             }
             Event::Update { update, .. } => match update {
+                SessionUpdate::AgentMessage(c) | SessionUpdate::UserMessage(c) if c.media.is_some() => self.push_media(c.media),
                 SessionUpdate::AgentMessage(c) => self.append(false, &c.text),
                 SessionUpdate::AgentThought(c) => self.append(true, &c.text),
+                // The agent named the session: the task's title follows unless
+                // the user renamed it (saved, and the sidebar updates, on Changed).
+                SessionUpdate::SessionTitle(title) => {
+                    if !self.record.renamed && self.record.title != title {
+                        self.record.title = title;
+                        cx.emit(AgentEvent::Changed);
+                    }
+                }
                 SessionUpdate::UserMessage(c) => {
                     // Replayed history (session/load).
                     match self.chat.last_mut() {
@@ -973,9 +1270,15 @@ impl AgentTask {
                 self.session_id = None;
                 self.permission = None;
                 if !matches!(self.status, Status::Stopped) {
-                    let tail = stderr_tail.lines().last().unwrap_or("").to_string();
-                    let msg = format!("agent exited ({}){}", code.map(|c| c.to_string()).unwrap_or("signal".into()), if tail.is_empty() { String::new() } else { format!(": {tail}") });
-                    self.push(ChatItem::Notice(msg.clone()));
+                    // The status line gets the last stderr line; the callout the
+                    // whole tail (the real error is often a few lines up).
+                    let last = stderr_tail.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+                    let how = code.map(|c| format!("code {c}")).unwrap_or("a signal".into());
+                    let msg = format!("agent exited ({how}){}", if last.is_empty() { String::new() } else { format!(": {last}") });
+                    // Mid-turn, Retry sends that turn's message again (restarting the agent).
+                    let resend = self.last_sent.clone().filter(|_| matches!(self.status, Status::Working | Status::NeedsYou));
+                    let detail = Some(tail_lines(stderr_tail.trim_end(), MAX_STDERR_LINES)).filter(|d| !d.is_empty());
+                    self.push(ChatItem::Failure(Failure { title: format!("{} exited ({how}).", self.def.label), detail, resend }));
                     self.set_status(Status::Error(msg), cx);
                 }
             }
@@ -1062,6 +1365,42 @@ impl AgentTask {
                         .child(t.clone()),
                 )
                 .into_any_element(),
+            // At its own size, at most 480 high and never wider than the
+            // chat; the aspect ratio keeps the height right when it shrinks.
+            ChatItem::Image(image, (w, h)) => {
+                let (w, h) = (*w as f32, *h as f32);
+                let width = w * (480. / h).min(1.);
+                pad(div())
+                    .child(img(image.clone()).w(look.z(width)).max_w_full().aspect_ratio(w / h).rounded(look.z(4.)).border_1().border_color(look.c(ui.border)))
+                    .into_any_element()
+            }
+            ChatItem::Link { uri, name } => {
+                let target = uri.clone();
+                pad(div())
+                    .child(
+                        div()
+                            .id(("link", ix))
+                            .flex()
+                            .items_center()
+                            .gap(look.z(6.))
+                            .max_w_full()
+                            .px(look.z(8.))
+                            .py(look.z(2.))
+                            .rounded(look.z(4.))
+                            .border_1()
+                            .border_color(look.c(ui.border))
+                            .bg(look.c(ui.panel_bg))
+                            .cursor_pointer()
+                            .text_size(look.text(0.))
+                            .text_color(look.c(ui.text_secondary))
+                            .hover(|d| d.text_color(look.c(ui.text)).border_color(look.c(ui.border_strong)))
+                            .child(div().flex_none().text_color(look.c(ui.text_muted)).child(if uri.starts_with("file://") { "▤" } else { "↗" }))
+                            .child(div().min_w(px(0.)).truncate().child(name.clone()))
+                            .on_click(cx.listener(move |t, _, _, cx| t.open_link(&target, cx))),
+                    )
+                    .into_any_element()
+            }
+            ChatItem::Failure(f) => pad(div()).child(self.failure_callout(ix, f, look, cx)).into_any_element(),
             ChatItem::Tool(id) => {
                 let Some(t) = self.tools.get(id) else { return div().into_any_element() };
                 let (glyph, color) = match t.status {
@@ -1100,7 +1439,7 @@ impl AgentTask {
                 // streams (`terminal_output_delta`), then folds.
                 let running_cmd = t.content.iter().any(|c| matches!(c, ToolContent::Terminal(_))) && t.exit.is_none() && matches!(t.status, ToolStatus::Pending | ToolStatus::InProgress);
                 let default_open = matches!(t.kind, ToolKind::Edit | ToolKind::Delete | ToolKind::Move) || t.status == ToolStatus::Failed || running_cmd;
-                let open = body.is_some() && default_open != self.toggled.contains(id);
+                let open = body.is_some() && default_open != self.toggled.contains(id.as_str());
                 let expandable = body.is_some();
                 let tid = id.clone();
                 pad(div())
@@ -1125,7 +1464,7 @@ impl AgentTask {
                             .when(expandable, |d| d.child(div().flex_none().text_color(look.c(ui.text_muted)).child(if open { "▾" } else { "▸" })))
                             .on_click(cx.listener(move |t, _, _, cx| {
                                 if expandable {
-                                    t.toggle(tid.clone(), ix, cx);
+                                    t.toggle(tid.to_string(), ix, cx);
                                 } else if let Some(l) = &loc {
                                     cx.emit(AgentEvent::OpenFile(l.path.clone(), l.line));
                                 }
@@ -1145,6 +1484,58 @@ impl AgentTask {
         }
         self.list.splice(ix..ix + 1, 1);
         cx.notify();
+    }
+
+    /// An error-coloured callout: what went wrong, the full error (bounded,
+    /// scrolls), then Retry / Edit & resend when a message can be sent
+    /// again, and Copy error.
+    fn failure_callout(&self, ix: usize, f: &Failure, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = &look.theme.ui;
+        let button = |id: &'static str, label: &'static str| {
+            div()
+                .id((id, ix))
+                .px(look.z(10.))
+                .py(look.z(3.))
+                .rounded(look.z(4.))
+                .cursor_pointer()
+                .text_size(look.text(0.))
+                .bg(look.c(ui.button_bg))
+                .text_color(look.c(ui.button_text))
+                .hover(|d| d.bg(look.c(ui.hover_bg)))
+                .child(label)
+        };
+        let copy = match &f.detail {
+            Some(d) => format!("{}\n\n{d}", f.title),
+            None => f.title.clone(),
+        };
+        let (retry, edit) = (f.resend.clone(), f.resend.clone());
+        div()
+            .px(look.z(12.))
+            .py(look.z(8.))
+            .rounded(look.z(6.))
+            .border_1()
+            .border_color(look.c(ui.error))
+            .flex()
+            .flex_col()
+            .gap(look.z(6.))
+            .text_size(look.text(0.))
+            .child(div().text_color(look.c(ui.error)).child(f.title.clone()))
+            .children(f.detail.clone().map(|d| {
+                div()
+                    .id(("failure-detail", ix))
+                    .max_h(look.z(180.))
+                    .overflow_y_scroll()
+                    .child(code_block(&d, look))
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(look.z(6.))
+                    .children(retry.map(|out| button("failure-retry", "Retry").on_click(cx.listener(move |t, _, _, cx| t.retry(out.clone(), cx)))))
+                    .children(edit.map(|out| button("failure-edit", "Edit & resend").on_click(cx.listener(move |t, _, window, cx| t.edit_resend(&out, window, cx)))))
+                    .child(button("failure-copy", "Copy error").on_click(move |_, _, cx: &mut App| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone())))),
+            )
     }
 
     /// What an unfolded tool call shows: its text (code blocks in the code
@@ -1236,7 +1627,7 @@ impl AgentTask {
 
     /// A tool call of the running turn: remember it and recount the files
     /// the turn changed (the strip above the prompt).
-    fn track_turn_tool(&mut self, id: String) {
+    fn track_turn_tool(&mut self, id: ToolCallId) {
         if !matches!(self.status, Status::Working | Status::NeedsYou) {
             return;
         }
@@ -1472,6 +1863,16 @@ impl AgentTask {
 
 /// Lines an unfolded tool call shows of a diff, output or raw input.
 const MAX_TOOL_LINES: usize = 200;
+/// Lines of an exited agent's stderr an error callout keeps (of ~4 KB).
+const MAX_STDERR_LINES: usize = 80;
+
+/// `s` quoted for a POSIX shell when it needs it.
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-=:@%+,".contains(c)) {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
 
 /// The last `max` lines of `text`, with a note of how many were left out.
 fn tail_lines(text: &str, max: usize) -> String {
@@ -1601,17 +2002,17 @@ impl Focusable for AgentTask {
 impl AgentTask {
     /// To-do + Chat + permission bar + prompt (the "side notes").
     /// Show a subagent's work in place of the chat (`None`: back to the chat).
-    pub fn show_subagent(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+    pub fn show_subagent(&mut self, id: Option<SessionId>, cx: &mut Context<Self>) {
         self.open_subagent = id;
         cx.notify();
     }
 
     /// Stop a running subagent (the agent grants `cancel` on its session).
-    pub fn stop_subagent(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn stop_subagent(&mut self, id: &SessionId, cx: &mut Context<Self>) {
         if let Some(c) = &self.client {
             c.cancel(id);
         }
-        if let Some(s) = self.subagents.iter_mut().find(|s| s.id == id) {
+        if let Some(s) = self.subagents.iter_mut().find(|s| s.id == *id) {
             s.state = "stopped".into();
         }
         cx.emit(AgentEvent::Subagents);
@@ -1785,6 +2186,7 @@ impl AgentTask {
                 )
             })
             .when(!empty, |d| d.child(chat))
+            .children(self.sign_in_bar(look, cx))
             .children(self.permission_bar(look, cx))
             .children(self.files_strip(look, cx))
             .when(!self.pending.is_empty(), |d| d.child(self.queue_list(look, cx)))
@@ -1995,6 +2397,15 @@ mod tests {
         assert_eq!(got, [("/w/a.rs", 2, 2), ("/w/new.ts", 3, 0), ("/w/c.rs", 0, 0)]);
         assert_eq!(change_totals(&files), (5, 2));
         assert_eq!(change_totals(&[]), (0, 0));
+    }
+
+    #[test]
+    fn shell_quote_only_when_needed() {
+        assert_eq!(shell_quote("/usr/bin/node"), "/usr/bin/node");
+        assert_eq!(shell_quote("--claudeai"), "--claudeai");
+        assert_eq!(shell_quote("a b"), "'a b'");
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+        assert_eq!(shell_quote(""), "''");
     }
 
     #[test]

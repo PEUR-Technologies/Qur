@@ -3685,6 +3685,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_platform",
+ "image",
  "libc",
  "nucleo-matcher",
  "objc2 0.6.5",
