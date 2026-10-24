@@ -138,6 +138,8 @@ const B: Option<&str> = Some("Browser && !TextInput");
 /// Global, except where the terminal needs the key itself (Ctrl+G, Ctrl+Tab,
 /// chords that would shadow Cmd+K Clear).
 const NT: Option<&str> = Some("!Terminal");
+/// Permission answers: anywhere but where you're editing or typing a command.
+const PERM: Option<&str> = Some("!Editor && !Terminal && !Picker");
 use Tier::{Later as L, Ready as R};
 
 #[rustfmt::skip]
@@ -288,9 +290,11 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::TakeOver, "Agent", "Take Over", "", W, R),
     cmd!(qur::NextAgent, "Agent", "Next Session", "ctrl-alt-down", W, R),
     cmd!(qur::PrevAgent, "Agent", "Previous Session", "ctrl-alt-up", W, R),
-    cmd!(agent::AllowOnce, "Agent", "Permission: Allow Once", "", W, R),
-    cmd!(agent::AllowAlways, "Agent", "Permission: Allow for This Task", "", W, R),
-    cmd!(agent::Deny, "Agent", "Permission: Deny", "", W, R),
+    // Zed's keys. Not in the editor or a terminal (they'd answer an agent you
+    // can't see) or a picker; the workspace answers the selected agent first.
+    cmd!(agent::AllowOnce, "Agent", "Permission: Allow Once", "cmd-y", PERM, R),
+    cmd!(agent::AllowAlways, "Agent", "Permission: Allow for This Task", "cmd-alt-y", PERM, R),
+    cmd!(agent::Deny, "Agent", "Permission: Deny", "cmd-alt-z", PERM, R),
     cmd!(agent::CycleMode, "Agent", "Next Mode (Default / Accept Edits / Plan…)", "shift-tab", Some("AgentView"), R),
     cmd!(qur::ReviewChanges, "Agent", "Review Changes", "", W, R),
     cmd!(qur::Merge, "Agent", "Merge into My Branch", "", W, R),
