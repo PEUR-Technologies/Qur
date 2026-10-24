@@ -92,9 +92,9 @@ fn parses_schema_shaped_variants() {
     assert_eq!(entries[0].priority, "high");
 
     let thought = SessionUpdate::parse(&json!({ "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": "hmm" } }));
-    assert_eq!(thought, SessionUpdate::AgentThought(ContentChunk { text: "hmm".into() }));
+    assert_eq!(thought, SessionUpdate::AgentThought(ContentChunk::text("hmm")));
     let user = SessionUpdate::parse(&json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "image", "data": "..", "mimeType": "image/png" } }));
-    assert_eq!(user, SessionUpdate::UserMessage(ContentChunk { text: "[image]".into() }));
+    assert_eq!(user, SessionUpdate::UserMessage(ContentChunk::text("[image]")));
     let mode = SessionUpdate::parse(&json!({ "sessionUpdate": "current_mode_update", "currentModeId": "plan" }));
     assert_eq!(mode, SessionUpdate::CurrentMode("plan".into()));
     let sub = SessionUpdate::parse(&json!({ "sessionUpdate": "subagent_update", "sessionId": "c1", "description": "Find tests", "state": { "state": "running" } }));
@@ -167,7 +167,100 @@ fn json_shapes_we_send() {
     }));
     assert_eq!((init.protocol_version, init.load_session), (1, true));
     assert_eq!(init.agent_version.as_deref(), Some("1.2"));
-    assert_eq!(init.auth_methods, ["chat-gpt"]);
+    assert_eq!(init.auth_methods.iter().map(|m| (m.id.as_str(), m.name.as_str(), m.terminal.is_some())).collect::<Vec<_>>(), [("chat-gpt", "ChatGPT", false)]);
     let e = AcpError::from_rpc(&json!({ "code": -32603, "message": "Internal error", "data": "boom" }));
     assert_eq!(e.to_string(), "Internal error: \"boom\" (-32603)");
+}
+
+#[test]
+fn parses_claude_auth_methods() {
+    // What claude-agent-acp 0.94 answers a client with `auth.terminal` and
+    // `_meta["terminal-auth"]` (acp-agent.js `initialize`).
+    let init = InitializeResult::parse(json!({
+        "protocolVersion": 1,
+        "authMethods": [
+            { "description": "Use Claude subscription ", "name": "Claude Subscription", "id": "claude-ai-login", "type": "terminal",
+              "args": ["--cli", "auth", "login", "--claudeai"],
+              "_meta": { "terminal-auth": { "command": "/n/node", "args": ["/a/index.js", "--cli", "auth", "login", "--claudeai"], "label": "Claude Login" } } },
+            { "description": "Use Anthropic Console (API usage billing)", "name": "Anthropic Console", "id": "console-login", "type": "terminal",
+              "args": ["--cli", "auth", "login", "--console"], "env": [{ "name": "X", "value": "1" }] },
+            { "id": "gateway", "name": "Custom model gateway", "description": "", "_meta": { "gateway": { "protocol": "anthropic" } } },
+            { "name": "no id" }
+        ]
+    }));
+    let m = &init.auth_methods;
+    assert_eq!(m.len(), 3, "a method without an id is dropped");
+    assert_eq!((m[0].id.as_str(), m[0].name.as_str(), m[0].description.as_deref()), ("claude-ai-login", "Claude Subscription", Some("Use Claude subscription")));
+    let agent = AgentCommand { program: "/bin/claude-agent-acp".into(), args: vec!["--x".into()], env: vec![] };
+    // `_meta` names the exact program; it wins over `type: "terminal"`.
+    let t = m[0].terminal.as_ref().unwrap();
+    assert_eq!(t.label.as_deref(), Some("Claude Login"));
+    assert_eq!(t.command_line(&agent), ("/n/node".to_string(), vec!["/a/index.js".into(), "--cli".into(), "auth".into(), "login".into(), "--claudeai".into()]));
+    // The spec's form: the agent's own command plus `args`.
+    let t = m[1].terminal.as_ref().unwrap();
+    assert_eq!(t.command_line(&agent), ("/bin/claude-agent-acp".to_string(), vec!["--x".into(), "--cli".into(), "auth".into(), "login".into(), "--console".into()]));
+    assert_eq!(t.env, [("X".to_string(), "1".to_string())]);
+    // Not a terminal login: sign in with `authenticate`.
+    assert_eq!((m[2].terminal.as_ref(), m[2].description.as_ref()), (None, None));
+}
+
+#[test]
+fn detects_auth_required() {
+    let e = AcpError::from_rpc(&json!({ "code": -32000, "message": "Authentication required" }));
+    assert!(e.is_auth_required());
+    assert!(!AcpError::from_rpc(&json!({ "code": -32603, "message": "Internal error" })).is_auth_required());
+    assert!(!AcpError::new("agent exited").is_auth_required());
+}
+
+#[test]
+fn parses_session_title() {
+    let t = SessionUpdate::parse(&json!({ "sessionUpdate": "session_info_update", "title": " Fix the login bug ", "updatedAt": "2026-01-01T00:00:00.000Z" }));
+    assert_eq!(t, SessionUpdate::SessionTitle("Fix the login bug".into()));
+    // Only `_meta` (AIR extensions), or a null title: nothing to show.
+    let meta = SessionUpdate::parse(&json!({ "sessionUpdate": "session_info_update", "_meta": { "x": 1 } }));
+    assert!(matches!(meta, SessionUpdate::Other { kind, .. } if kind == "session_info_update"));
+    let null = SessionUpdate::parse(&json!({ "sessionUpdate": "session_info_update", "title": null }));
+    assert!(matches!(null, SessionUpdate::Other { .. }));
+}
+
+#[test]
+fn parses_image_and_link_blocks() {
+    let chunk = |content: Value| match SessionUpdate::parse(&json!({ "sessionUpdate": "agent_message_chunk", "content": content })) {
+        SessionUpdate::AgentMessage(c) => c,
+        other => panic!("{other:?}"),
+    };
+    // "hi!" in base64; the MIME type is kept.
+    let c = chunk(json!({ "type": "image", "mimeType": "image/jpeg", "data": "aGkh" }));
+    assert_eq!(c, ContentChunk { text: String::new(), media: Some(Media::Image { mime: "image/jpeg".into(), data: b"hi!".to_vec() }) });
+    // Claude's shape for an image given by URL: empty data, a uri.
+    let c = chunk(json!({ "type": "image", "mimeType": "", "data": "", "uri": "https://x.dev/cat.png" }));
+    assert_eq!(c.media, Some(Media::Link { uri: "https://x.dev/cat.png".into(), name: "cat.png".into() }));
+    let c = chunk(json!({ "type": "resource_link", "uri": "file:///w/src/a.ts", "name": "a.ts" }));
+    assert_eq!(c.media, Some(Media::Link { uri: "file:///w/src/a.ts".into(), name: "a.ts".into() }));
+    let c = chunk(json!({ "type": "resource", "resource": { "uri": "file:///w/b.rs", "text": "fn main() {}" } }));
+    assert_eq!(c.media, Some(Media::Link { uri: "file:///w/b.rs".into(), name: "b.rs".into() }));
+    // Neither usable data nor a uri: a placeholder, as before.
+    assert_eq!(chunk(json!({ "type": "image", "data": "%%%" })), ContentChunk::text("[image]"));
+    assert_eq!(decode_base64("aGVsbG8gd29ybGQ="), Some(b"hello world".to_vec()));
+    assert_eq!(decode_base64("aGVs\nbG8"), Some(b"hello".to_vec()));
+    assert_eq!(decode_base64("a*b"), None);
+}
+
+#[test]
+fn friendly_stop_reasons() {
+    assert_eq!(StopReason::EndTurn.describe("Claude"), None);
+    assert!(StopReason::Refusal.describe("Claude").unwrap().starts_with("Claude declined"));
+    assert!(StopReason::MaxTokens.describe("Claude").unwrap().contains("length limit"));
+    assert_eq!(StopReason::Other("tool_limit".into()).describe("Claude").unwrap(), "Claude ended the turn early (tool limit).");
+}
+
+#[test]
+fn ids_are_typed() {
+    let sub = SessionUpdate::parse(&json!({ "sessionUpdate": "subagent_update", "sessionId": "child-1" }));
+    let SessionUpdate::Subagent { id, .. } = sub else { panic!("subagent") };
+    assert_eq!(id, SessionId::from("child-1"));
+    let u = ToolCallUpdate::parse(&json!({ "toolCallId": "toolu_1" }));
+    assert_eq!(u.id, ToolCallId::from("toolu_1"));
+    let by_id = std::collections::HashMap::from([(u.id.clone(), 1)]);
+    assert_eq!(by_id.get("toolu_1"), Some(&1), "looked up by &str");
 }

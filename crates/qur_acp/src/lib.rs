@@ -18,7 +18,7 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -44,7 +44,7 @@ struct Inner {
     next_id: AtomicU64,
     events: mpsc::UnboundedSender<Event>,
     /// Permission requests not answered yet, by session (answered `Cancelled` on cancel).
-    open_permissions: Mutex<HashMap<String, Vec<RequestId>>>,
+    open_permissions: Mutex<HashMap<SessionId, Vec<RequestId>>>,
     answered: Mutex<HashSet<String>>,
     /// Set once the waiter has reaped the child; `exit_cv` wakes `shutdown`.
     exited: Mutex<bool>,
@@ -64,7 +64,7 @@ impl Inner {
     fn log(&self, dir: &str, msg: &Value) {
         if let Some(f) = &self.log {
             let line = json!({ "t_ms": self.start.elapsed().as_millis() as u64, "dir": dir, "msg": msg });
-            let _ = writeln!(f.lock().unwrap(), "{line}");
+            let _ = writeln!(f.lock().unwrap_or_else(PoisonError::into_inner), "{line}");
         }
     }
 
@@ -72,7 +72,7 @@ impl Inner {
         self.log("out", msg);
         let mut line = serde_json::to_string(msg).map_err(|e| AcpError::new(e.to_string()))?;
         line.push('\n');
-        let mut guard = self.stdin.lock().unwrap();
+        let mut guard = self.stdin.lock().unwrap_or_else(PoisonError::into_inner);
         let stdin = guard.as_mut().ok_or_else(|| AcpError::new("agent stdin is closed"))?;
         stdin
             .write_all(line.as_bytes())
@@ -82,13 +82,13 @@ impl Inner {
 
     fn request(&self, method: &str, params: Value, respond: Responder) {
         if self.closed.load(Ordering::SeqCst) {
-            return respond(Err(AcpError::new("agent exited")));
+            return respond(Err(AcpError::new(AGENT_EXITED)));
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        self.pending.lock().unwrap().insert(id, respond);
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner).insert(id, respond);
         let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         if let Err(e) = self.send(&msg)
-            && let Some(r) = self.pending.lock().unwrap().remove(&id)
+            && let Some(r) = self.pending.lock().unwrap_or_else(PoisonError::into_inner).remove(&id)
         {
             r(Err(e));
         }
@@ -113,7 +113,7 @@ impl Inner {
     /// Resolve every outstanding request with an error (agent gone).
     fn fail_all(&self, why: &str) {
         self.closed.store(true, Ordering::SeqCst);
-        let pending: Vec<_> = self.pending.lock().unwrap().drain().collect();
+        let pending: Vec<_> = self.pending.lock().unwrap_or_else(PoisonError::into_inner).drain().collect();
         for (_, r) in pending {
             r(Err(AcpError::new(why)));
         }
@@ -136,7 +136,7 @@ impl Inner {
                 let Some(n) = id.as_u64() else {
                     return self.emit(Event::Warning(format!("response with unknown id {id}")));
                 };
-                let Some(r) = self.pending.lock().unwrap().remove(&n) else {
+                let Some(r) = self.pending.lock().unwrap_or_else(PoisonError::into_inner).remove(&n) else {
                     return self.emit(Event::Warning(format!("response for unknown request {n}")));
                 };
                 match msg.get("error") {
@@ -148,9 +148,9 @@ impl Inner {
             (Some(method), Some(id)) => {
                 let params = msg.get("params").cloned().unwrap_or(Value::Null);
                 if method == "session/request_permission" {
-                    let session_id = params.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
+                    let session_id = SessionId::from(params.get("sessionId").and_then(Value::as_str).unwrap_or(""));
                     let rid = RequestId(id.clone());
-                    self.open_permissions.lock().unwrap().entry(session_id.clone()).or_default().push(rid.clone());
+                    self.open_permissions.lock().unwrap_or_else(PoisonError::into_inner).entry(session_id.clone()).or_default().push(rid.clone());
                     self.emit(Event::Permission {
                         id: rid,
                         session_id,
@@ -172,7 +172,7 @@ impl Inner {
             (Some(method), None) => {
                 if method == "session/update" {
                     let params = msg.get("params").cloned().unwrap_or(Value::Null);
-                    let session_id = params.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
+                    let session_id = SessionId::from(params.get("sessionId").and_then(Value::as_str).unwrap_or(""));
                     let update = params.get("update").map(SessionUpdate::parse).unwrap_or(SessionUpdate::Other {
                         kind: String::new(),
                         raw: Value::Null,
@@ -229,8 +229,9 @@ impl Client {
             .spawn()?;
         let pid = child.id() as i32;
         let stdin = child.stdin.take();
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
+        // Invariants: both were set to `Stdio::piped()` just above.
+        let stdout = child.stdout.take().expect("stdout is piped");
+        let stderr = child.stderr.take().expect("stderr is piped");
 
         let log = std::env::var_os("QUR_ACP_LOG").and_then(|dir| {
             let dir = std::path::PathBuf::from(dir);
@@ -288,7 +289,7 @@ impl Client {
                     if n == 0 {
                         break;
                     }
-                    let mut t = tail.lock().unwrap();
+                    let mut t = tail.lock().unwrap_or_else(PoisonError::into_inner);
                     t.extend(&chunk[..n]);
                     while t.len() > STDERR_TAIL {
                         t.pop_front();
@@ -306,11 +307,11 @@ impl Client {
                 // Responses already in the pipe still resolve their requests.
                 let _ = eof_rx.recv_timeout(Duration::from_millis(500));
                 thread::sleep(Duration::from_millis(20));
-                inner.fail_all("agent exited");
-                let stderr_tail = String::from_utf8_lossy(&tail.lock().unwrap().iter().copied().collect::<Vec<_>>()).into_owned();
-                inner.stdin.lock().unwrap().take();
+                inner.fail_all(AGENT_EXITED);
+                let stderr_tail = String::from_utf8_lossy(&tail.lock().unwrap_or_else(PoisonError::into_inner).iter().copied().collect::<Vec<_>>()).into_owned();
+                inner.stdin.lock().unwrap_or_else(PoisonError::into_inner).take();
                 inner.emit(Event::Exited { code, stderr_tail });
-                *inner.exited.lock().unwrap() = true;
+                *inner.exited.lock().unwrap_or_else(PoisonError::into_inner) = true;
                 inner.exit_cv.notify_all();
             })?;
         }
@@ -324,7 +325,7 @@ impl Client {
 
     /// True once the agent process has exited.
     pub fn has_exited(&self) -> bool {
-        *self.inner.exited.lock().unwrap()
+        *self.inner.exited.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     pub fn initialize(&self) -> Pending<InitializeResult> {
@@ -338,7 +339,14 @@ impl Client {
                 // reads) gets a command's output and exit code on its tool call.
                 // `subagents`: the agent reports the subagents it starts (`subagent_update`,
                 // their own updates under a child session id) instead of mixing them in.
-                "clientCapabilities": { "_meta": { "terminal_output": true }, "subagents": {} },
+                // Terminal auth (the spec's `auth.terminal` and Zed's `terminal-auth`
+                // meta): without it claude-agent-acp offers no sign-in methods; with
+                // it, each method names a login command Qur runs in a terminal.
+                "clientCapabilities": {
+                    "_meta": { "terminal_output": true, "terminal-auth": true },
+                    "auth": { "terminal": true },
+                    "subagents": {}
+                },
                 "clientInfo": { "name": "qur", "title": "Qur", "version": env!("CARGO_PKG_VERSION") }
             }),
             r,
@@ -346,13 +354,21 @@ impl Client {
         rx
     }
 
+    /// Sign in with one of the agent's `auth_methods` (one that isn't a
+    /// terminal login), then retry `session/new`.
+    pub fn authenticate(&self, method_id: &str) -> Pending<()> {
+        let (rx, r) = typed(|_| Ok(()));
+        self.inner.request("authenticate", json!({ "methodId": method_id }), r);
+        rx
+    }
+
     /// A new session: its id and the settings it offers (mode, model…).
-    pub fn new_session(&self, cwd: &Path) -> Pending<(String, Vec<ConfigOption>)> {
+    pub fn new_session(&self, cwd: &Path) -> Pending<(SessionId, Vec<ConfigOption>)> {
         let (rx, r) = typed(|v| {
             let id = v
                 .get("sessionId")
                 .and_then(Value::as_str)
-                .map(str::to_owned)
+                .map(SessionId::from)
                 .ok_or_else(|| AcpError::new("session/new returned no sessionId"))?;
             Ok((id, ConfigOption::parse_session(&v)))
         });
@@ -362,39 +378,39 @@ impl Client {
 
     /// Resume a session; the agent replays its history as `Update` events.
     /// Resolves with the session's settings.
-    pub fn load_session(&self, session_id: &str, cwd: &Path) -> Pending<Vec<ConfigOption>> {
+    pub fn load_session(&self, session_id: &SessionId, cwd: &Path) -> Pending<Vec<ConfigOption>> {
         let (rx, r) = typed(|v| Ok(ConfigOption::parse_session(&v)));
-        self.inner.request("session/load", json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [] }), r);
+        self.inner.request("session/load", json!({ "sessionId": session_id.as_str(), "cwd": cwd, "mcpServers": [] }), r);
         rx
     }
 
     /// Change a session setting. Resolves with the agent's full new set of
     /// settings, or None for a mode set the old way (`session/set_mode`
     /// answers with nothing; the agent sends `current_mode_update`).
-    pub fn set_option(&self, session_id: &str, option: &ConfigOption, value: &str) -> Pending<Option<Vec<ConfigOption>>> {
+    pub fn set_option(&self, session_id: &SessionId, option: &ConfigOption, value: &str) -> Pending<Option<Vec<ConfigOption>>> {
         if option.legacy_mode {
             let (rx, r) = typed(|_| Ok(None));
-            self.inner.request("session/set_mode", json!({ "sessionId": session_id, "modeId": value }), r);
+            self.inner.request("session/set_mode", json!({ "sessionId": session_id.as_str(), "modeId": value }), r);
             return rx;
         }
         let (rx, r) = typed(|v| Ok(Some(ConfigOption::parse_list(&v))));
-        self.inner.request("session/set_config_option", json!({ "sessionId": session_id, "configId": option.id, "value": value }), r);
+        self.inner.request("session/set_config_option", json!({ "sessionId": session_id.as_str(), "configId": option.id, "value": value }), r);
         rx
     }
 
-    pub fn prompt(&self, session_id: &str, blocks: Vec<PromptBlock>) -> Pending<StopReason> {
+    pub fn prompt(&self, session_id: &SessionId, blocks: Vec<PromptBlock>) -> Pending<StopReason> {
         let (rx, r) = typed(|v| Ok(StopReason::parse(&v)));
         let prompt: Vec<Value> = blocks.iter().map(PromptBlock::to_json).collect();
-        self.inner.request("session/prompt", json!({ "sessionId": session_id, "prompt": prompt }), r);
+        self.inner.request("session/prompt", json!({ "sessionId": session_id.as_str(), "prompt": prompt }), r);
         rx
     }
 
     /// Cancel the running turn. Open permission requests for the session are
     /// answered `Cancelled`, as the spec requires. The pending `prompt`
     /// still resolves with the agent's reply (normally `Cancelled`).
-    pub fn cancel(&self, session_id: &str) {
-        self.inner.notify("session/cancel", json!({ "sessionId": session_id }));
-        let open = self.inner.open_permissions.lock().unwrap().remove(session_id).unwrap_or_default();
+    pub fn cancel(&self, session_id: &SessionId) {
+        self.inner.notify("session/cancel", json!({ "sessionId": session_id.as_str() }));
+        let open = self.inner.open_permissions.lock().unwrap_or_else(PoisonError::into_inner).remove(session_id).unwrap_or_default();
         for id in open {
             self.respond_permission(id, PermissionOutcome::Cancelled);
         }
@@ -402,10 +418,10 @@ impl Client {
 
     pub fn respond_permission(&self, request: RequestId, outcome: PermissionOutcome) {
         let key = request.0.to_string();
-        if !self.inner.answered.lock().unwrap().insert(key) {
+        if !self.inner.answered.lock().unwrap_or_else(PoisonError::into_inner).insert(key) {
             return; // already answered (e.g. by cancel)
         }
-        for list in self.inner.open_permissions.lock().unwrap().values_mut() {
+        for list in self.inner.open_permissions.lock().unwrap_or_else(PoisonError::into_inner).values_mut() {
             list.retain(|r| *r != request);
         }
         self.inner.respond(&request.0, outcome.to_json());
@@ -416,7 +432,7 @@ impl Client {
     /// SIGKILL). Idempotent.
     pub fn shutdown(&self, grace: Duration) {
         let pgid = self.inner.pid;
-        self.inner.stdin.lock().unwrap().take();
+        self.inner.stdin.lock().unwrap_or_else(PoisonError::into_inner).take();
         if group_alive(pgid) {
             unsafe { libc::killpg(pgid, libc::SIGTERM) };
         }
@@ -430,7 +446,7 @@ impl Client {
 
     /// Wait until the child is reaped and nothing is left in its group.
     fn wait_gone(&self, deadline: Instant) -> bool {
-        let mut exited = self.inner.exited.lock().unwrap();
+        let mut exited = self.inner.exited.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
             if *exited && !group_alive(self.inner.pid) {
                 return true;
@@ -440,7 +456,7 @@ impl Client {
                 return false;
             }
             let wait = (deadline - now).min(Duration::from_millis(20));
-            exited = self.inner.exit_cv.wait_timeout(exited, wait).unwrap().0;
+            exited = self.inner.exit_cv.wait_timeout(exited, wait).unwrap_or_else(PoisonError::into_inner).0;
         }
     }
 }
