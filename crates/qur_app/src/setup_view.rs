@@ -12,11 +12,14 @@ use qur_theme::{Registry, Theme};
 use crate::assets;
 use crate::look::Look;
 
-/// Agents Qur knows how to run (decision 6: no Codex for now). Others can be
+/// Agents Qur knows how to run (Codex since decision 44). Others can be
 /// added to agents.toml by hand.
 const KNOWN: &[(&str, &str, Mode, &str, Option<&str>)] = &[
     ("claude", "Claude Code", Mode::Acp, "claude-agent-acp", None),
     ("claude-cli", "Claude Code (terminal)", Mode::Terminal, "claude", Some("arg")),
+    // Zed's ACP adapter for OpenAI's Codex CLI; signs in with ChatGPT.
+    ("codex", "Codex", Mode::Acp, "codex-acp", None),
+    ("codex-cli", "Codex (terminal)", Mode::Terminal, "codex", Some("arg")),
     ("aider", "Aider (terminal)", Mode::Terminal, "aider", Some("--message")),
 ];
 

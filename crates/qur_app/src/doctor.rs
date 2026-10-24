@@ -62,13 +62,18 @@ pub fn agent(def: &AgentDef) -> Check {
         Ok(s) => s,
         Err(e) => return check(Level::Fail, name, e),
     };
-    // The Claude adapter is pinned (HANDOFF: never npx at runtime).
-    if def.command == "claude-agent-acp"
+    // The ACP adapters are pinned (HANDOFF: never npx at runtime).
+    let tested = match def.command.as_str() {
+        "claude-agent-acp" => Some("0.94.0"),
+        "codex-acp" => Some("0.16.0"),
+        _ => None,
+    };
+    if let Some(tested) = tested
         && let Some(v) = npm_package_version(&program)
     {
         detail = format!("{detail} · adapter {v}");
-        if v != "0.94.0" {
-            return check(Level::Warn, name, format!("{detail} (Qur is tested with 0.94.0)"));
+        if v != tested {
+            return check(Level::Warn, name, format!("{detail} (Qur is tested with {tested})"));
         }
     }
     check(Level::Ok, name, detail)
