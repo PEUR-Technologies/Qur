@@ -88,7 +88,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Stop `Cmd+.`
 - Take Over (Live, when an agent is editing)
 - Rename Agent… (also double-click the agent's button)
-- Permission: Allow Once · Allow for This Task · Deny
+- Permission: Allow Once `Cmd+Y` · Allow for This Task `Cmd+Opt+Y` · Deny `Cmd+Opt+Z`
 - ---
 - Next Agent · Previous Agent · Agent 1–9 `Ctrl+1..9`
 - ---

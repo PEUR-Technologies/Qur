@@ -18,7 +18,7 @@ use qur_acp::{
 use qur_agents::{AgentDef, QueuedMessage, TaskRecord};
 use qur_theme::Rgba;
 
-use crate::browser_view::{BrowserPane, BrowserPaneEvent, base64};
+use crate::browser_view::{Attachment, BrowserPane, BrowserPaneEvent, base64};
 use crate::commands::agent as aa;
 use crate::changes_view::{ChangesEvent, ChangesView};
 use crate::dock::{self, Docks, Kind, Panel};
@@ -240,6 +240,10 @@ pub struct AgentTask {
     pub setting_up: bool,
     focus: FocusHandle,
     turn_started: Option<Instant>,
+    /// Tool calls of the current (or last) turn, and the files they changed:
+    /// the strip above the prompt. Cleared when the next turn starts.
+    turn_tools: Vec<String>,
+    turn_files: Vec<FileChange>,
     _events: Option<Task<()>>,
     _subs: Vec<Subscription>,
 }
@@ -306,6 +310,7 @@ impl AgentTask {
             PromptEvent::Cancel => this.stop(cx),
             PromptEvent::MentionRequested => cx.emit(AgentEvent::MentionRequested),
             PromptEvent::SlashRequested => cx.emit(AgentEvent::SlashRequested),
+            PromptEvent::UpInEmpty => this.edit_queued(this.pending.len().wrapping_sub(1), cx),
             PromptEvent::Changed => {}
         });
         let list = ListState::new(0, ListAlignment::Bottom, px(400.));
@@ -353,6 +358,8 @@ impl AgentTask {
             setting_up: false,
             focus: cx.focus_handle(),
             turn_started: None,
+            turn_tools: Vec::new(),
+            turn_files: Vec::new(),
             _events: None,
             _subs: vec![sub, live_sub, monitor_sub, browser_sub, files_sub, changes_sub],
         }
@@ -562,6 +569,55 @@ impl AgentTask {
         }
     }
 
+    /// Queue row "Send now": this message goes next, and the current turn
+    /// stops (the stop path's `drain_pending` then sends it).
+    fn send_queued_now(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix >= self.pending.len() {
+            return;
+        }
+        let out = self.pending.remove(ix);
+        self.pending.insert(0, out);
+        self.save_queue(cx);
+        if matches!(self.status, Status::Working | Status::NeedsYou) {
+            self.stop(cx);
+        } else {
+            self.drain_pending(cx);
+        }
+        self.follow_bottom();
+        cx.notify();
+    }
+
+    /// Queue row "Edit" (and Up in an empty prompt for the last one): take
+    /// the message out of the queue and back into the prompt. What you'd
+    /// typed since stays, after it.
+    fn edit_queued(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix >= self.pending.len() {
+            return;
+        }
+        let o = self.pending.remove(ix);
+        self.save_queue(cx);
+        // Context and screenshots come back as chips (what's sent is the
+        // same; a pick with both shows as two).
+        let named = o.labels.len() == o.context.len();
+        let mut atts: Vec<Attachment> = o
+            .context
+            .iter()
+            .enumerate()
+            .map(|(i, c)| Attachment { label: if named { o.labels[i].clone().into() } else { "Context".into() }, context: c.clone(), png: None })
+            .collect();
+        atts.extend(o.images.into_iter().map(|png| Attachment { label: "Image".into(), context: String::new(), png: Some(png) }));
+        self.prompt.update(cx, |p, cx| {
+            let typed = p.text.trim().to_string();
+            let text = if typed.is_empty() { o.text.clone() } else { format!("{}\n{typed}", o.text) };
+            p.set_text(&text, cx);
+            p.mentions.extend(o.mentions);
+            for a in atts {
+                p.attach(a, cx);
+            }
+        });
+        cx.notify();
+    }
+
     /// Mirror the queue into the task record, which the workspace saves on
     /// `Changed`: queued messages survive a quit or a crash.
     fn save_queue(&mut self, cx: &mut Context<Self>) {
@@ -640,6 +696,8 @@ impl AgentTask {
             blocks.push(PromptBlock::ResourceLink { uri: format!("file://{}", m.display()), name });
         }
         self.turn_started = Some(Instant::now());
+        self.turn_tools.clear();
+        self.turn_files.clear();
         self.set_status(Status::Working, cx);
         let rx = client.prompt(&session, blocks);
         cx.spawn(async move |this, cx| {
@@ -719,8 +777,15 @@ impl AgentTask {
     }
 
     /// Answer by kind (the Agent menu's Allow Once / Allow for This Task / Deny).
+    /// Does nothing when the agent doesn't offer that kind (Cmd+Opt+Y on a
+    /// request without "always" mustn't cancel it); Deny without a reject
+    /// option cancels the request.
     pub fn answer_permission(&mut self, kind: PermissionKind, cx: &mut Context<Self>) {
-        let id = self.permission.as_ref().and_then(|p| p.options.iter().find(|o| o.kind == kind)).map(|o| o.id.clone());
+        let Some(p) = &self.permission else { return };
+        let id = p.options.iter().find(|o| o.kind == kind).map(|o| o.id.clone());
+        if id.is_none() && kind != PermissionKind::RejectOnce {
+            return;
+        }
         self.answer_with(id, cx);
     }
 
@@ -839,7 +904,8 @@ impl AgentTask {
                         }
                     });
                     self.tools.insert(id.clone(), t);
-                    self.push(ChatItem::Tool(id));
+                    self.push(ChatItem::Tool(id.clone()));
+                    self.track_turn_tool(id);
                 }
                 SessionUpdate::ToolCallUpdate(u) => {
                     let id = u.id.clone();
@@ -861,6 +927,7 @@ impl AgentTask {
                         }
                     }
                     self.refresh_tool(&id);
+                    self.track_turn_tool(id);
                 }
                 SessionUpdate::Plan(p) => self.plan = p,
                 SessionUpdate::AvailableCommands(c) => self.commands = c,
@@ -1029,7 +1096,10 @@ impl AgentTask {
                 let title = if t.title.is_empty() { kind.to_string() } else { t.title.clone() };
                 let body = self.tool_body(t, &diffs, look, cx);
                 // Edits and failures start open; the rest folded (click toggles).
-                let default_open = matches!(t.kind, ToolKind::Edit | ToolKind::Delete | ToolKind::Move) || t.status == ToolStatus::Failed;
+                // A command stays open while it runs, so its output shows as it
+                // streams (`terminal_output_delta`), then folds.
+                let running_cmd = t.content.iter().any(|c| matches!(c, ToolContent::Terminal(_))) && t.exit.is_none() && matches!(t.status, ToolStatus::Pending | ToolStatus::InProgress);
+                let default_open = matches!(t.kind, ToolKind::Edit | ToolKind::Delete | ToolKind::Move) || t.status == ToolStatus::Failed || running_cmd;
                 let open = body.is_some() && default_open != self.toggled.contains(id);
                 let expandable = body.is_some();
                 let tid = id.clone();
@@ -1095,13 +1165,15 @@ impl AgentTask {
                         Some(None) => "ended".into(),
                     };
                     let failed = matches!(t.exit, Some(Some(c)) if c != 0);
-                    let block = code_block(&tail_lines(out, MAX_TOOL_LINES), look).when(out.is_empty(), |d| d.child("(no output)"));
+                    // Still running with nothing yet: just "running…" (the
+                    // Claude adapter sends the output when the command ends).
+                    let block = (!out.is_empty() || t.exit.is_some()).then(|| code_block(&tail_lines(out, MAX_TOOL_LINES), look).when(out.is_empty(), |d| d.child("(no output)")));
                     parts.push(
                         div()
                             .flex()
                             .flex_col()
                             .gap(look.z(2.))
-                            .child(block)
+                            .children(block)
                             .child(div().text_size(look.text(0.)).text_color(look.c(if failed { ui.error } else { ui.text_muted })).child(status))
                             .into_any_element(),
                     );
@@ -1162,6 +1234,90 @@ impl AgentTask {
         (!parts.is_empty()).then(|| div().flex().flex_col().gap(look.z(6.)).children(parts).into_any_element())
     }
 
+    /// A tool call of the running turn: remember it and recount the files
+    /// the turn changed (the strip above the prompt).
+    fn track_turn_tool(&mut self, id: String) {
+        if !matches!(self.status, Status::Working | Status::NeedsYou) {
+            return;
+        }
+        if !self.turn_tools.contains(&id) {
+            self.turn_tools.push(id);
+        }
+        let tools: Vec<&ToolCall> = self.turn_tools.iter().filter_map(|id| self.tools.get(id)).collect();
+        self.turn_files = turn_changes(&tools);
+    }
+
+    /// "3 files changed · +40 −12 · Review", then a chip per file (opens it).
+    fn files_strip(&self, look: &Look, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if self.turn_files.is_empty() {
+            return None;
+        }
+        let ui = &look.theme.ui;
+        let (add, del) = change_totals(&self.turn_files);
+        let n = self.turn_files.len();
+        let counts = |d: gpui::Stateful<gpui::Div>, add: usize, del: usize| {
+            d.when(add > 0, |d| d.child(div().flex_none().text_color(look.c(look.theme.diff.added_text)).child(format!("+{add}"))))
+                .when(del > 0, |d| d.child(div().flex_none().text_color(look.c(look.theme.diff.removed_text)).child(format!("−{del}"))))
+        };
+        let chips: Vec<_> = self
+            .turn_files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let path = f.path.clone();
+                let name = f.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| self.rel(&f.path));
+                let chip = div()
+                    .id(("turn-file", i))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(look.z(4.))
+                    .px(look.z(6.))
+                    .py(look.z(1.))
+                    .rounded(look.z(4.))
+                    .cursor_pointer()
+                    .bg(look.c(ui.active_bg))
+                    .text_color(look.c(ui.text_secondary))
+                    .hover(|d| d.text_color(look.c(ui.text)))
+                    .child(div().max_w(look.z(220.)).truncate().child(name));
+                counts(chip, f.add, f.del).on_click(cx.listener(move |_, _, _, cx| cx.emit(AgentEvent::OpenFile(path.clone(), None))))
+            })
+            .collect();
+        let summary = div()
+            .id("turn-files")
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(look.z(6.))
+            .text_color(look.c(ui.text_secondary))
+            .child(format!("{n} file{} changed", if n == 1 { "" } else { "s" }));
+        Some(
+            div()
+                .flex_none()
+                .mx(look.z(12.))
+                .mb(look.z(6.))
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(look.z(6.))
+                .text_size(look.text(0.))
+                .child(counts(summary, add, del))
+                .child(
+                    div()
+                        .id("turn-review")
+                        .flex_none()
+                        .px(look.z(6.))
+                        .rounded(look.z(4.))
+                        .cursor_pointer()
+                        .text_color(look.c(self.accent))
+                        .hover(|d| d.bg(look.c(ui.hover_bg)))
+                        .child("Review")
+                        .on_click(cx.listener(|t, _, _, cx| t.show_changes(cx))),
+                )
+                .children(chips),
+        )
+    }
+
     fn plan_strip(&self, look: &Look) -> Option<impl IntoElement> {
         if self.plan.is_empty() {
             return None;
@@ -1220,6 +1376,18 @@ impl AgentTask {
         // Every option the agent offers, in its words ("Yes, and auto-accept
         // edits", "No, keep planning"…); the first allow is the primary one.
         let primary = p.options.iter().position(|o| o.kind == PermissionKind::AllowOnce).or_else(|| p.options.iter().position(|o| matches!(o.kind, PermissionKind::AllowAlways)));
+        // Cmd+Y / Cmd+Opt+Y / Cmd+Opt+Z answer with the first option of their kind.
+        let key_for = |i: usize, o: &PermissionOption| -> Option<String> {
+            let action: Box<dyn gpui::Action> = match o.kind {
+                PermissionKind::AllowOnce => Box::new(aa::AllowOnce),
+                PermissionKind::AllowAlways => Box::new(aa::AllowAlways),
+                PermissionKind::RejectOnce => Box::new(aa::Deny),
+                PermissionKind::RejectAlways => return None,
+            };
+            let first = p.options.iter().position(|x| x.kind == o.kind) == Some(i);
+            let keys = crate::commands::find(action.as_ref())?.first_keys();
+            (first && !keys.is_empty()).then(|| crate::commands::display_keys(keys))
+        };
         let buttons: Vec<_> = p
             .options
             .iter()
@@ -1239,6 +1407,7 @@ impl AgentTask {
                     o.name.clone()
                 };
                 let id = o.id.clone();
+                let key = key_for(i, o);
                 div()
                     .id(("perm-option", i))
                     .px(look.z(10.))
@@ -1248,7 +1417,11 @@ impl AgentTask {
                     .text_size(look.text(0.))
                     .bg(look.c(if is_primary { ui.button_primary_bg } else { ui.button_bg }))
                     .text_color(look.c(if is_primary { ui.button_primary_text } else if reject { ui.text_secondary } else { ui.button_text }))
+                    .flex()
+                    .items_center()
+                    .gap(look.z(6.))
                     .child(label)
+                    .children(key.map(|k| div().text_size(look.text(-2.)).opacity(0.6).child(k)))
                     .on_click(cx.listener(move |t, _, _, cx| t.answer_option(&id, cx)))
             })
             .collect();
@@ -1307,6 +1480,48 @@ fn tail_lines(text: &str, max: usize) -> String {
         return text.to_string();
     }
     format!("… {} earlier lines\n{}", lines.len() - max, lines[lines.len() - max..].join("\n"))
+}
+
+/// One file a turn changed, with its changed-line counts.
+#[derive(Clone, Debug, PartialEq)]
+struct FileChange {
+    path: PathBuf,
+    add: usize,
+    del: usize,
+}
+
+/// The files these tool calls changed, first-touched first: each diff's
+/// changed lines, summed per file; an edit without a diff counts its
+/// locations. Failed calls changed nothing.
+fn turn_changes(tools: &[&ToolCall]) -> Vec<FileChange> {
+    let mut out: Vec<FileChange> = Vec::new();
+    let mut add_to = |path: &Path, add: usize, del: usize| match out.iter_mut().find(|f| f.path == path) {
+        Some(f) => {
+            f.add += add;
+            f.del += del;
+        }
+        None => out.push(FileChange { path: path.to_path_buf(), add, del }),
+    };
+    for t in tools.iter().filter(|t| t.status != ToolStatus::Failed) {
+        let mut diffed = false;
+        for c in &t.content {
+            if let ToolContent::Diff { path, old_text, new_text } = c {
+                let d = line_diff(old_text.as_deref().unwrap_or(""), new_text);
+                add_to(path, d.iter().filter(|(k, _)| *k == '+').count(), d.iter().filter(|(k, _)| *k == '-').count());
+                diffed = true;
+            }
+        }
+        if !diffed && matches!(t.kind, ToolKind::Edit | ToolKind::Delete | ToolKind::Move) {
+            for l in &t.locations {
+                add_to(&l.path, 0, 0);
+            }
+        }
+    }
+    out
+}
+
+fn change_totals(files: &[FileChange]) -> (usize, usize) {
+    files.iter().fold((0, 0), |(a, d), f| (a + f.add, d + f.del))
 }
 
 fn code_block(text: &str, look: &Look) -> gpui::Div {
@@ -1571,6 +1786,7 @@ impl AgentTask {
             })
             .when(!empty, |d| d.child(chat))
             .children(self.permission_bar(look, cx))
+            .children(self.files_strip(look, cx))
             .when(!self.pending.is_empty(), |d| d.child(self.queue_list(look, cx)))
             .children(hints)
             .child(prompt_bar)
@@ -1579,6 +1795,18 @@ impl AgentTask {
     /// Queued messages, oldest (next to send) first, each removable.
     fn queue_list(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
         let ui = &look.theme.ui;
+        let row_button = |label: &'static str, id: (&'static str, usize)| {
+            div()
+                .id(id)
+                .flex_none()
+                .px(look.z(6.))
+                .rounded(look.z(4.))
+                .cursor_pointer()
+                .text_size(look.text(-1.))
+                .text_color(look.c(ui.text_muted))
+                .hover(|d| d.bg(look.c(ui.hover_bg)).text_color(look.c(ui.text)))
+                .child(label)
+        };
         div()
             .flex_none()
             .mx(look.z(12.))
@@ -1599,12 +1827,19 @@ impl AgentTask {
                     .bg(look.c(ui.active_bg))
                     .text_color(look.c(ui.text_secondary))
                     .child(div().flex_1().min_w(px(0.)).child(format!("{}{labels}", o.text.trim())))
+                    .child(row_button("Send now", ("queue-send", i)).on_click(cx.listener(move |t, _, _, cx| t.send_queued_now(i, cx))))
+                    .child(row_button("Edit", ("queue-edit", i)).on_click(cx.listener(move |t, _, window, cx| {
+                        t.edit_queued(i, cx);
+                        let f = t.prompt.read(cx).focus.clone();
+                        window.focus(&f, cx);
+                    })))
                     .child(
                         div()
                             .id(("queue-x", i))
                             .flex_none()
                             .cursor_pointer()
                             .text_color(look.c(ui.text_muted))
+                            .hover(|d| d.text_color(look.c(ui.text)))
                             .child("✕")
                             .on_click(cx.listener(move |t, _, _, cx| t.unqueue(i, cx))),
                     )
@@ -1742,6 +1977,24 @@ mod tests {
         assert!(changed(&line_diff("same\n", "same\n")).is_empty());
         // Middle edits around repeated lines.
         assert_eq!(changed(&line_diff("x\na\nx\nb\nx", "x\nb\nx\na\nx")).len(), 4);
+    }
+
+    #[test]
+    fn turn_changes_sums_per_file() {
+        let diff = |p: &str, old: Option<&str>, new: &str| ToolContent::Diff { path: p.into(), old_text: old.map(str::to_string), new_text: new.into() };
+        let loc = |p: &str| vec![qur_acp::Location { path: p.into(), line: None }];
+        let edit1 = ToolCall { kind: ToolKind::Edit, status: ToolStatus::Completed, content: vec![diff("/w/a.rs", Some("x\ny"), "x\nY\nz")], ..Default::default() };
+        let edit2 = ToolCall { kind: ToolKind::Edit, status: ToolStatus::InProgress, content: vec![diff("/w/a.rs", Some("q"), "")], ..Default::default() };
+        let write = ToolCall { kind: ToolKind::Edit, status: ToolStatus::Completed, content: vec![diff("/w/new.ts", None, "1\n2\n3")], ..Default::default() };
+        let failed = ToolCall { kind: ToolKind::Edit, status: ToolStatus::Failed, content: vec![diff("/w/b.rs", None, "nope")], ..Default::default() };
+        let moved = ToolCall { kind: ToolKind::Move, status: ToolStatus::Completed, locations: loc("/w/c.rs"), ..Default::default() };
+        let read = ToolCall { kind: ToolKind::Read, status: ToolStatus::Completed, locations: loc("/w/d.rs"), ..Default::default() };
+        let files = turn_changes(&[&edit1, &read, &write, &edit2, &failed, &moved]);
+        let got: Vec<(&str, usize, usize)> = files.iter().map(|f| (f.path.to_str().unwrap(), f.add, f.del)).collect();
+        // a.rs: y -> Y, +z (+2 -1), then q removed (-1).
+        assert_eq!(got, [("/w/a.rs", 2, 2), ("/w/new.ts", 3, 0), ("/w/c.rs", 0, 0)]);
+        assert_eq!(change_totals(&files), (5, 2));
+        assert_eq!(change_totals(&[]), (0, 0));
     }
 
     #[test]

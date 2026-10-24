@@ -3279,7 +3279,7 @@ impl Workspace {
                 this.mention_over_dialog = Some(p);
                 cx.notify();
             }
-            PromptEvent::Changed | PromptEvent::SlashRequested => {}
+            PromptEvent::Changed | PromptEvent::SlashRequested | PromptEvent::UpInEmpty => {}
         });
         self._subs.push(sub);
         let f = input.read(cx).focus.clone();
