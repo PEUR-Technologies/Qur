@@ -393,6 +393,20 @@ impl Tile {
         }
     }
 
+    /// Whether the split directly holding `id` stacks top/bottom.
+    fn parent_vertical(&self, id: usize) -> Option<bool> {
+        match self {
+            Tile::Term(_) => None,
+            Tile::Split { vertical, a, b, .. } => {
+                if matches!(**a, Tile::Term(t) if t == id) || matches!(**b, Tile::Term(t) if t == id) {
+                    Some(*vertical)
+                } else {
+                    a.parent_vertical(id).or_else(|| b.parent_vertical(id))
+                }
+            }
+        }
+    }
+
     /// Without `id`; a split left with one pane collapses into it.
     fn without(self, id: usize) -> Option<Tile> {
         match self {
@@ -657,7 +671,12 @@ impl TerminalPanel {
     /// pane along its longer side, so new terminals keep filling the view.
     pub fn tile_active(&mut self, cwd: &Path, cx: &mut Context<Self>) -> Option<usize> {
         let target = self.active_session()?.id;
-        let vertical = self.pane_bounds.get(&target).is_some_and(|b| b.size.height > b.size.width);
+        // A pane not drawn yet (just made, or the window is covered) has no
+        // size: turn the other way from the split that made it.
+        let vertical = match self.pane_bounds.get(&target) {
+            Some(b) => b.size.height > b.size.width,
+            None => self.groups.iter().find_map(|g| g.tile.parent_vertical(target)).is_some_and(|v| !v),
+        };
         self.split_active(cwd, vertical, cx)
     }
 
@@ -1771,6 +1790,14 @@ fn classify_link(tok: &str) -> Option<Link> {
     Some(Link::Path(path.to_string(), line.map(|l| (l, col.unwrap_or(1)))))
 }
 
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:@+%,".contains(c)) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1849,6 +1876,16 @@ mod tests {
     }
 
     #[test]
+    fn parent_direction() {
+        let mut t = Tile::Term(1);
+        t.split_at(1, 2, false);
+        assert_eq!(t.parent_vertical(2), Some(false));
+        t.split_at(2, 3, true);
+        assert_eq!((t.parent_vertical(1), t.parent_vertical(3)), (Some(false), Some(true)));
+        assert_eq!(Tile::Term(1).parent_vertical(1), None);
+    }
+
+    #[test]
     fn split_tiles() {
         let mut t = Tile::Term(1);
         assert!(t.split_at(1, 2, false));
@@ -1879,13 +1916,5 @@ mod tests {
         assert_eq!(classify_link("hello"), None);
         assert_eq!(classify_link("-->"), None);
         assert_eq!(link_at("error: 'lib/a.py', line 3", 9).as_deref(), Some("lib/a.py"));
-    }
-}
-
-fn shell_quote(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:@+%,".contains(c)) {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace('\'', "'\\''"))
     }
 }

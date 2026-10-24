@@ -354,12 +354,17 @@ fn hash_of(a: impl Hash, b: impl Hash) -> u64 {
 /// Past this many entries a cache is just cleared (it refills from what's on screen).
 const CACHE_MAX: usize = 512;
 
+/// (hash of text and root, blocks).
+type Parsed = (u64, Rc<Vec<Block>>);
+/// Byte ranges and their highlight ids.
+type Highlights = Rc<Vec<(Range<usize>, usize)>>;
+
 thread_local! {
-    /// Parsed blocks per caller id: (hash of text and root, blocks).
-    static PARSED: RefCell<HashMap<SharedString, (u64, Rc<Vec<Block>>)>> = RefCell::default();
+    /// Parsed blocks per caller id.
+    static PARSED: RefCell<HashMap<SharedString, Parsed>> = RefCell::default();
     /// Syntax highlights per (language, code) hash: a streaming reply only
     /// re-highlights the block being written.
-    static HIGHLIGHTS: RefCell<HashMap<u64, Rc<Vec<(Range<usize>, usize)>>>> = RefCell::default();
+    static HIGHLIGHTS: RefCell<HashMap<u64, Highlights>> = RefCell::default();
 }
 
 fn cached(id: &SharedString, text: &str, root: Option<&Path>) -> Rc<Vec<Block>> {
@@ -528,7 +533,7 @@ impl Renderer<'_> {
                 .children(items.iter().enumerate().map(|(n, item)| {
                     let marker = match start {
                         Some(s) => format!("{}.", s + n as u64),
-                        None => if depth % 2 == 0 { "•" } else { "◦" }.to_string(),
+                        None => if depth.is_multiple_of(2) { "•" } else { "◦" }.to_string(),
                     };
                     div()
                         .flex()

@@ -4600,22 +4600,6 @@ fn local_port(url: &str) -> Option<u16> {
     port.parse().ok()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::local_port;
-
-    #[test]
-    fn run_project_urls_are_local_only() {
-        assert_eq!(local_port("http://localhost:5173"), Some(5173));
-        assert_eq!(local_port("http://127.0.0.1:8080/app?x=1"), Some(8080));
-        assert_eq!(local_port("localhost:3000"), Some(3000));
-        assert_eq!(local_port("http://[::1]:4000/"), Some(4000));
-        assert_eq!(local_port("https://example.com:443"), None);
-        assert_eq!(local_port("http://localhost.evil.com:80"), None);
-        assert_eq!(local_port("http://localhost"), None);
-    }
-}
-
 /// Notification tag for an agent: `qur:<window>:<task id>` (main.rs parses it).
 fn alert_tag(window: &Window, id: &str) -> String {
     format!("qur:{}:{id}", window.window_handle().window_id().as_u64())
@@ -4675,4 +4659,20 @@ fn todo_panel(todos: &[qur_agents::todos::Todo], accent: Rgba, look: &Look) -> g
                 .child(div().flex_none().text_color(look.c(accent)).child(g))
                 .child(div().min_w(px(0.)).child(t.content.clone()))
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_port;
+
+    #[test]
+    fn run_project_urls_are_local_only() {
+        assert_eq!(local_port("http://localhost:5173"), Some(5173));
+        assert_eq!(local_port("http://127.0.0.1:8080/app?x=1"), Some(8080));
+        assert_eq!(local_port("localhost:3000"), Some(3000));
+        assert_eq!(local_port("http://[::1]:4000/"), Some(4000));
+        assert_eq!(local_port("https://example.com:443"), None);
+        assert_eq!(local_port("http://localhost.evil.com:80"), None);
+        assert_eq!(local_port("http://localhost"), None);
+    }
 }
