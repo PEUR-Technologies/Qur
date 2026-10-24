@@ -97,6 +97,8 @@ fn parses_schema_shaped_variants() {
     assert_eq!(user, SessionUpdate::UserMessage(ContentChunk { text: "[image]".into() }));
     let mode = SessionUpdate::parse(&json!({ "sessionUpdate": "current_mode_update", "currentModeId": "plan" }));
     assert_eq!(mode, SessionUpdate::CurrentMode("plan".into()));
+    let sub = SessionUpdate::parse(&json!({ "sessionUpdate": "subagent_update", "sessionId": "c1", "description": "Find tests", "state": { "state": "running" } }));
+    assert_eq!(sub, SessionUpdate::Subagent { id: "c1".into(), title: Some("Find tests".into()), state: Some("running".into()) });
     let unknown = SessionUpdate::parse(&json!({ "sessionUpdate": "brand_new_thing", "x": 1 }));
     assert!(matches!(unknown, SessionUpdate::Other { kind, .. } if kind == "brand_new_thing"));
 

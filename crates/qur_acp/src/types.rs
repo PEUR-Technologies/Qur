@@ -145,6 +145,9 @@ pub enum SessionUpdate {
     /// `usage_update`: context tokens used of the window, and the session's
     /// cost so far (USD) when the agent knows it.
     Usage { used: u64, size: u64, cost: Option<f64> },
+    /// A subagent the agent started (Claude's Agent/Task tool): announced, renamed
+    /// or changed state. Its own updates arrive under `id` as the session.
+    Subagent { id: String, title: Option<String>, state: Option<String> },
     Other { kind: String, raw: Value },
 }
 
@@ -263,6 +266,11 @@ impl SessionUpdate {
                 used: u.get("used").and_then(Value::as_u64).unwrap_or(0),
                 size: u.get("size").and_then(Value::as_u64).unwrap_or(0),
                 cost: u.pointer("/cost/amount").and_then(Value::as_f64),
+            },
+            "subagent_update" => SessionUpdate::Subagent {
+                id: s(u, "sessionId").unwrap_or_default(),
+                title: s(u, "title").or_else(|| s(u, "description")),
+                state: u.pointer("/state/state").and_then(Value::as_str).map(str::to_string),
             },
             k => SessionUpdate::Other { kind: k.to_string(), raw: u.clone() },
         }

@@ -87,7 +87,10 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 |---|---|---|
 | `Cmd+T` | New terminal | S |
 | `Cmd+Shift+T` | New Agent Terminal: a Claude agent task in its own worktree, shown as a terminal (decisions 12, 17) | S |
-| `Cmd+W` | Close focused terminal | S |
+| `Cmd+W` | Close focused terminal (or split pane) | S |
+| `Cmd+D` / `Cmd+Shift+D` (terminal focused) | Split right / split down: a new shell in the project folder beside the focused one (decision 39) | S |
+| `Cmd+Opt+Arrows` (terminal focused) | Focus the split pane in that direction | S |
+| `Cmd+Enter` | New Tiled Terminal: a shell tiled into the terminal on screen, splitting the focused pane along its longer side (like i3/Hyprland); with no terminal shown, a new one. Insert Line Below in the editor | S |
 | `` Ctrl+` `` | Toggle terminal / focus it | S |
 | `Cmd+K` (terminal focused) | Clear terminal | S |
 | `Cmd+C` / `Cmd+V` (terminal focused) | Copy selection / paste (Ctrl+C still sends SIGINT) | S |
@@ -113,6 +116,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Ctrl+1..9` | Select session N in the sidebar | M2 ✅ |
 | `Ctrl+Opt+Up/Down` | Previous / next session | M2 ✅ |
 | `Cmd+I` | Focus the prompt bar | M2 ✅ |
+| `/` (not typing) | Focus Input Field: the agent's prompt, the search box or the terminal, like a browser's search shortcut | ✅ |
 | `Enter` / `Shift+Enter` | Send (queues during a turn) / newline | M2 ✅ |
 | `Esc` (prompt) / `Cmd+.` | Stop the agent's turn (`session/cancel`) | M2 ✅ |
 | `@` / `/` in the prompt | Mention a file / pick an agent slash command | M2 ✅ |

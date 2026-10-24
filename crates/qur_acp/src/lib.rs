@@ -336,7 +336,9 @@ impl Client {
                 // No fs, no terminal: agents use their own tools in the worktree.
                 // `terminal_output` (Zed's extension, which claude-agent-acp
                 // reads) gets a command's output and exit code on its tool call.
-                "clientCapabilities": { "_meta": { "terminal_output": true } },
+                // `subagents`: the agent reports the subagents it starts (`subagent_update`,
+                // their own updates under a child session id) instead of mixing them in.
+                "clientCapabilities": { "_meta": { "terminal_output": true }, "subagents": {} },
                 "clientInfo": { "name": "qur", "title": "Qur", "version": env!("CARGO_PKG_VERSION") }
             }),
             r,

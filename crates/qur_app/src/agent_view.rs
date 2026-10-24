@@ -67,6 +67,18 @@ impl Status {
     }
 }
 
+/// A subagent (Claude's Agent/Task tool) running inside an agent's session.
+pub struct Subagent {
+    pub id: String,
+    pub title: String,
+    /// "running", "requires_action", "idle" (done), or what the agent sent.
+    pub state: String,
+    /// What it's doing: its latest tool call or message line.
+    pub last: Option<String>,
+    /// Its work so far: (is a tool call, text), oldest first.
+    pub log: Vec<(bool, String)>,
+}
+
 pub enum AgentEvent {
     /// Status, title or session changed (sidebar, task store).
     Changed,
@@ -76,6 +88,8 @@ pub enum AgentEvent {
     MentionRequested,
     /// `/` typed: offer this agent's slash commands.
     SlashRequested,
+    /// A subagent started, changed state or did something (sidebar).
+    Subagents,
     /// Changes view: merge this task's branch into the user's branch.
     Merge,
     /// Changes view: discard the task.
@@ -218,6 +232,10 @@ pub struct AgentTask {
     toggled: HashSet<String>,
     /// Context tokens used / window, and session cost (USD) if known.
     usage: Option<(u64, u64, Option<f64>)>,
+    /// Subagents this agent started, oldest first (shown under it in the sidebar).
+    pub subagents: Vec<Subagent>,
+    /// The subagent shown in place of the chat (clicked in the sidebar).
+    pub open_subagent: Option<String>,
     /// Setup command still running for a new worktree.
     pub setting_up: bool,
     focus: FocusHandle,
@@ -330,6 +348,8 @@ impl AgentTask {
             settings: Vec::new(),
             toggled: HashSet::new(),
             usage: None,
+            subagents: Vec::new(),
+            open_subagent: None,
             setting_up: false,
             focus: cx.focus_handle(),
             turn_started: None,
@@ -530,6 +550,15 @@ impl AgentTask {
             let out = self.pending.remove(0);
             self.save_queue(cx);
             self.send_out(out, cx);
+        }
+    }
+
+    /// Drop a queued message before it's sent.
+    fn unqueue(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix < self.pending.len() {
+            self.pending.remove(ix);
+            self.save_queue(cx);
+            cx.notify();
         }
     }
 
@@ -767,6 +796,27 @@ impl AgentTask {
 
     fn on_event(&mut self, ev: Event, cx: &mut Context<Self>) {
         match ev {
+            // Our session id is known before session/load replays history, so
+            // replayed subagent work is kept out of the chat too.
+            Event::Update { session_id, update }
+                if !session_id.is_empty() && self.session_id.as_deref().or(self.record.session_id.as_deref()).is_some_and(|s| s != session_id) =>
+            {
+                // A subagent's own work: keep it out of the chat, show its latest step.
+                let Some(sub) = self.subagents.iter_mut().find(|s| s.id == session_id) else { return };
+                match update {
+                    SessionUpdate::ToolCall(t) if !t.title.trim().is_empty() => {
+                        sub.last = Some(t.title.clone());
+                        sub.log.push((true, t.title));
+                    }
+                    SessionUpdate::AgentMessage(c) | SessionUpdate::UserMessage(c) => match sub.log.last_mut() {
+                        Some((false, s)) => s.push_str(&c.text),
+                        _ => sub.log.push((false, c.text)),
+                    },
+                    _ => return,
+                }
+                cx.emit(AgentEvent::Subagents);
+                cx.notify();
+            }
             Event::Update { update, .. } => match update {
                 SessionUpdate::AgentMessage(c) => self.append(false, &c.text),
                 SessionUpdate::AgentThought(c) => self.append(true, &c.text),
@@ -826,6 +876,23 @@ impl AgentTask {
                     let cost = cost.or(self.usage.and_then(|u| u.2));
                     self.usage = Some((used, size, cost));
                 }
+                SessionUpdate::Subagent { id, title, state } => {
+                    let ix = match self.subagents.iter().position(|s| s.id == id) {
+                        Some(ix) => ix,
+                        None => {
+                            self.subagents.push(Subagent { id, title: "Subagent".into(), state: "running".into(), last: None, log: Vec::new() });
+                            self.subagents.len() - 1
+                        }
+                    };
+                    let s = &mut self.subagents[ix];
+                    if let Some(t) = title {
+                        s.title = t;
+                    }
+                    if let Some(st) = state {
+                        s.state = st;
+                    }
+                    cx.emit(AgentEvent::Subagents);
+                }
                 _ => {}
             },
             Event::Permission { id, tool_call, options, .. } => {
@@ -880,7 +947,7 @@ impl AgentTask {
                 let t = t.trim();
                 let first = t.lines().next().unwrap_or("").to_string();
                 pad(div())
-                    .text_size(look.text(-1.))
+                    .text_size(look.text(0.))
                     .text_color(look.c(ui.text_muted))
                     .child(
                         div()
@@ -896,7 +963,7 @@ impl AgentTask {
                     .when(open, |d| d.child(div().pl(look.z(14.)).pt(look.z(2.)).italic().child(t.to_string())))
                     .into_any_element()
             }
-            ChatItem::Notice(t) => pad(div()).text_size(look.text(-1.)).text_color(look.c(ui.text_muted)).child(t.clone()).into_any_element(),
+            ChatItem::Notice(t) => pad(div()).text_size(look.text(0.)).text_color(look.c(ui.text_muted)).child(t.clone()).into_any_element(),
             ChatItem::Output(t) => pad(div())
                 .child(
                     div()
@@ -907,7 +974,7 @@ impl AgentTask {
                         .border_1()
                         .border_color(look.c(ui.border))
                         .font_family(look.code_font.clone())
-                        .text_size(look.text(-2.))
+                        .text_size(look.text(0.))
                         .text_color(look.c(ui.text_secondary))
                         .child(t.clone()),
                 )
@@ -958,7 +1025,7 @@ impl AgentTask {
                             .flex()
                             .items_center()
                             .gap(look.z(8.))
-                            .text_size(look.text(-1.))
+                            .text_size(look.text(0.))
                             .text_color(look.c(ui.text_secondary))
                             .when(expandable || loc.is_some(), |d| d.cursor_pointer().hover(|d| d.text_color(look.c(ui.text))))
                             .child(div().w(look.z(40.)).flex_none().text_color(look.c(ui.text_muted)).child(kind))
@@ -1019,7 +1086,7 @@ impl AgentTask {
                             .flex_col()
                             .gap(look.z(2.))
                             .child(block)
-                            .child(div().text_size(look.text(-2.)).text_color(look.c(if failed { ui.error } else { ui.text_muted })).child(status))
+                            .child(div().text_size(look.text(0.)).text_color(look.c(if failed { ui.error } else { ui.text_muted })).child(status))
                             .into_any_element(),
                     );
                 }
@@ -1042,7 +1109,7 @@ impl AgentTask {
                     .child(
                         div()
                             .id(SharedString::from(format!("diff-{}", path.display())))
-                            .text_size(look.text(-2.))
+                            .text_size(look.text(0.))
                             .text_color(look.c(ui.text_muted))
                             .cursor_pointer()
                             .hover(|d| d.text_color(look.c(ui.text)))
@@ -1056,7 +1123,7 @@ impl AgentTask {
                             .border_color(look.c(ui.border))
                             .overflow_hidden()
                             .font_family(look.code_font.clone())
-                            .text_size(look.text(-2.))
+                            .text_size(look.text(0.))
                             .children(rows)
                             .when(more > 0, |d| d.child(div().px(look.z(6.)).text_color(look.c(ui.text_muted)).child(format!("… {more} more changed lines")))),
                     )
@@ -1095,8 +1162,8 @@ impl AgentTask {
                 .flex()
                 .flex_col()
                 .gap(look.z(3.))
-                .text_size(look.text(-1.))
-                .child(div().text_size(look.text(-2.)).font_weight(gpui::FontWeight::MEDIUM).text_color(look.c(ui.text_muted)).child(format!("TO-DO  {done}/{}", self.plan.len())))
+                .text_size(look.text(0.))
+                .child(div().text_size(look.text(0.)).font_weight(gpui::FontWeight::MEDIUM).text_color(look.c(ui.text_muted)).child(format!("TO-DO  {done}/{}", self.plan.len())))
                 .children(self.plan.iter().map(|p| {
                     let (g, c) = match p.status {
                         PlanStatus::Completed => ("●", ui.text_muted),
@@ -1162,7 +1229,7 @@ impl AgentTask {
                     .py(look.z(3.))
                     .rounded(look.z(4.))
                     .cursor_pointer()
-                    .text_size(look.text(-1.))
+                    .text_size(look.text(0.))
                     .bg(look.c(if is_primary { ui.button_primary_bg } else { ui.button_bg }))
                     .text_color(look.c(if is_primary { ui.button_primary_text } else if reject { ui.text_secondary } else { ui.button_text }))
                     .child(label)
@@ -1183,22 +1250,33 @@ impl AgentTask {
                 .flex()
                 .flex_col()
                 .gap(look.z(6.))
-                // A long command or edit as the title scrolls here instead of
-                // growing the bar over the chat (which then couldn't scroll).
+                // The buttons come right after the title, so a long command or
+                // diff can't push them off screen; both of those scroll in
+                // their own boxes instead of growing the bar over the chat.
                 .child(
                     div()
-                        .id("perm-what")
+                        .id("perm-title")
                         .min_w(px(0.))
-                        .max_h(look.z(260.))
+                        .max_h(look.z(90.))
                         .overflow_y_scroll()
-                        .flex()
-                        .flex_col()
-                        .gap(look.z(4.))
-                        .child(div().text_color(look.c(ui.text)).child(format!("{} wants to {what}", self.def.label)))
-                        .children(file.map(|f| div().truncate().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(f)))
-                        .children(detail),
+                        .text_color(look.c(ui.text))
+                        .child(format!("{} wants to {what}", self.def.label)),
                 )
-                .child(div().flex().flex_wrap().gap(look.z(6.)).children(buttons)),
+                .child(div().flex().flex_wrap().gap(look.z(6.)).children(buttons))
+                .when(file.is_some() || detail.is_some(), |d| {
+                    d.child(
+                        div()
+                            .id("perm-what")
+                            .min_w(px(0.))
+                            .max_h(look.z(220.))
+                            .overflow_y_scroll()
+                            .flex()
+                            .flex_col()
+                            .gap(look.z(4.))
+                            .children(file.map(|f| div().truncate().text_color(look.c(ui.text_muted)).child(f)))
+                            .children(detail),
+                    )
+                }),
         )
     }
 }
@@ -1225,7 +1303,7 @@ fn code_block(text: &str, look: &Look) -> gpui::Div {
         .border_1()
         .border_color(look.c(ui.border))
         .font_family(look.code_font.clone())
-        .text_size(look.text(-2.))
+        .text_size(look.text(0.))
         .text_color(look.c(ui.text_secondary))
         .when(!text.is_empty(), |d| d.child(text.to_string()))
 }
@@ -1294,7 +1372,7 @@ fn markdownish(text: &str, look: &Look) -> gpui::Div {
                     .border_1()
                     .border_color(look.c(ui.border))
                     .font_family(look.code_font.clone())
-                    .text_size(look.text(-1.))
+                    .text_size(look.text(0.))
                     .child(t),
             )
         } else {
@@ -1320,7 +1398,76 @@ impl Focusable for AgentTask {
 
 impl AgentTask {
     /// To-do + Chat + permission bar + prompt (the "side notes").
+    /// Show a subagent's work in place of the chat (`None`: back to the chat).
+    pub fn show_subagent(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        self.open_subagent = id;
+        cx.notify();
+    }
+
+    /// Stop a running subagent (the agent grants `cancel` on its session).
+    pub fn stop_subagent(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(c) = &self.client {
+            c.cancel(id);
+        }
+        if let Some(s) = self.subagents.iter_mut().find(|s| s.id == id) {
+            s.state = "stopped".into();
+        }
+        cx.emit(AgentEvent::Subagents);
+        cx.notify();
+    }
+
+    fn subagent_view(&self, sub: &Subagent, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = &look.theme.ui;
+        let running = sub.state == "running";
+        let id = sub.id.clone();
+        let button = |label: &'static str, key: &'static str| {
+            div().id(key).flex_none().px(look.z(8.)).py(look.z(2.)).rounded(look.z(4.)).cursor_pointer().bg(look.c(ui.button_bg)).text_color(look.c(ui.button_text)).child(label)
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_none()
+                    .px(look.z(16.))
+                    .py(look.z(8.))
+                    .flex()
+                    .items_center()
+                    .gap(look.z(8.))
+                    .border_b_1()
+                    .border_color(look.c(ui.border))
+                    .child(button("← Chat", "sub-back").on_click(cx.listener(|t, _, _, cx| t.show_subagent(None, cx))))
+                    .child(div().flex_1().min_w(px(0.)).truncate().font_weight(gpui::FontWeight::MEDIUM).child(format!("↳ {}", sub.title)))
+                    .child(div().flex_none().text_color(look.c(ui.text_muted)).child(sub.state.replace('_', " ")))
+                    .when(running, |d| d.child(button("Stop", "sub-stop").on_click(cx.listener(move |t, _, _, cx| t.stop_subagent(&id, cx))))),
+            )
+            .child(
+                div()
+                    .id("sub-log")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .px(look.z(16.))
+                    .py(look.z(8.))
+                    .flex()
+                    .flex_col()
+                    .gap(look.z(6.))
+                    .when(sub.log.is_empty(), |d| d.child(div().text_color(look.c(ui.text_muted)).child("Nothing from this subagent yet.")))
+                    .children(sub.log.iter().map(|(tool, text)| {
+                        if *tool {
+                            div().text_color(look.c(ui.text_secondary)).child(format!("· {}", text.trim()))
+                        } else {
+                            markdownish(text.trim(), look)
+                        }
+                    })),
+            )
+    }
+
     fn notes(&self, show_plan: bool, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        if let Some(sub) = self.open_subagent.as_ref().and_then(|id| self.subagents.iter().find(|s| s.id == *id)) {
+            return self.subagent_view(sub, look, cx);
+        }
         let ui = look.theme.ui.clone();
         let me = cx.entity();
         let look2 = look.clone();
@@ -1339,7 +1486,7 @@ impl AgentTask {
                 .border_1()
                 .border_color(look.c(ui.border_strong))
                 .bg(look.c(ui.overlay_bg))
-                .text_size(look.text(-1.))
+                .text_size(look.text(0.))
                 .text_color(look.c(ui.text_secondary))
                 .hover(|d| d.text_color(look.c(ui.text)))
                 .child("↓")
@@ -1405,7 +1552,7 @@ impl AgentTask {
                 .flex()
                 .items_center()
                 .gap(look.z(2.))
-                .text_size(look.text(-3.))
+                .text_size(look.text(0.))
                 .text_color(look.c(ui.text_muted))
                 .children(chips)
                 .child(div().flex_1())
@@ -1437,8 +1584,44 @@ impl AgentTask {
             })
             .when(!empty, |d| d.child(chat))
             .children(self.permission_bar(look, cx))
+            .when(!self.pending.is_empty(), |d| d.child(self.queue_list(look, cx)))
             .children(hints)
             .child(prompt_bar)
+    }
+
+    /// Queued messages, oldest (next to send) first, each removable.
+    fn queue_list(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = &look.theme.ui;
+        div()
+            .flex_none()
+            .mx(look.z(12.))
+            .mb(look.z(6.))
+            .flex()
+            .flex_col()
+            .gap(look.z(4.))
+            .child(div().text_size(look.text(0.)).font_weight(gpui::FontWeight::MEDIUM).text_color(look.c(ui.text_muted)).child(format!("QUEUED  {}", self.pending.len())))
+            .children(self.pending.iter().enumerate().map(|(i, o)| {
+                let labels = if o.labels.is_empty() { String::new() } else { format!("  [{}]", o.labels.join(", ")) };
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(look.z(8.))
+                    .px(look.z(10.))
+                    .py(look.z(4.))
+                    .rounded(look.z(4.))
+                    .bg(look.c(ui.active_bg))
+                    .text_color(look.c(ui.text_secondary))
+                    .child(div().flex_1().min_w(px(0.)).child(format!("{}{labels}", o.text.trim())))
+                    .child(
+                        div()
+                            .id(("queue-x", i))
+                            .flex_none()
+                            .cursor_pointer()
+                            .text_color(look.c(ui.text_muted))
+                            .child("✕")
+                            .on_click(cx.listener(move |t, _, _, cx| t.unqueue(i, cx))),
+                    )
+            }))
     }
 
     fn header(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
