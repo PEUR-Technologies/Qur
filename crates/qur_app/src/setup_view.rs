@@ -119,9 +119,12 @@ impl SetupView {
             .iter()
             .map(|(id, label, mode, command, prompt)| {
                 let existing = roster.get(id).cloned();
-                let path = qur_agents::which(command);
+                let path = qur_agents::which(existing.as_ref().map_or(*command, |d| d.command.as_str()));
                 Found {
-                    enabled: existing.is_some() || (path.is_some() && *id == "claude"),
+                    // Only what's installed: agents.toml starts out listing
+                    // Claude Code whether or not it is. Signing in or
+                    // installing later ticks the account's agent (`set_login`).
+                    enabled: path.is_some() && (existing.is_some() || *id == "claude"),
                     def: existing.unwrap_or(AgentDef {
                         id: id.to_string(),
                         label: label.to_string(),
