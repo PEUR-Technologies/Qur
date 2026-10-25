@@ -758,7 +758,7 @@ mod tests {
     use super::*;
 
     fn cx<'a>() -> Ctx<'a> {
-        Ctx { page_rows: 10, clipboard_in: None, clipboard_out: None, line_comment: Some("//"), block_comment: None, indent_unit: "    ", matching_bracket: None }
+        Ctx { page_rows: 10, clipboard_in: None, clipboard_out: None, line_comment: Some("//"), block_comment: None, indent_unit: "    ", matching_bracket: None, expand: None }
     }
 
     /// Feed keys; `<esc>` and `<C-r>` are special.

@@ -81,6 +81,7 @@ fn cx<'a>() -> Ctx<'a> {
         block_comment: Some(("/*", "*/")),
         indent_unit: "    ",
         matching_bracket: None,
+        expand: None,
     }
 }
 
@@ -778,4 +779,106 @@ fn perf_large_file() {
     assert!(ms(find) < 5.0, "find {:.2} ms", ms(find));
     assert!(ms(type_with_find) < 1.0, "type with find {:.3} ms", ms(type_with_find));
     assert!(ms(rewrap) < 10.0, "set_wrap_width {:.2} ms", ms(rewrap));
+}
+
+// --- Soft-wrap Home/End, Expand/Shrink Selection ---------------------------
+
+#[test]
+fn home_end_by_visual_row_when_wrapped() {
+    // Width 10: rows "hello ", "brave new ", "world".
+    let mut e = ed("hello bra|ve new world\nx");
+    e.set_wrap_width(Some(10));
+    run(&mut e, Command::LineEnd { select: false });
+    assert_eq!(show(&e), "hello brave new| world\nx", "row end, before the break");
+    run(&mut e, Command::LineEnd { select: false });
+    assert_eq!(show(&e), "hello brave new world|\nx", "again: the line end");
+    run(&mut e, Command::LineStart { select: false });
+    assert_eq!(show(&e), "hello brave new |world\nx", "row start");
+    run(&mut e, Command::LineStart { select: false });
+    assert_eq!(show(&e), "|hello brave new world\nx", "again: smart home");
+
+    let mut e = ed("hello bra|ve new world");
+    e.set_wrap_width(Some(10));
+    run(&mut e, Command::LineEnd { select: true });
+    assert_eq!(show(&e), "hello bra«ve new» world");
+    // First row: plain smart home.
+    let mut e = ed("  hel|lo brave new world");
+    e.set_wrap_width(Some(10));
+    run(&mut e, Command::LineStart { select: false });
+    assert_eq!(show(&e), "  |hello brave new world");
+    // No wrap: the line ends, as before.
+    check("hello bra|ve new world", Command::LineEnd { select: false }, "hello brave new world|");
+}
+
+/// Expand through fixed "syntax nodes" (byte ranges), smallest first.
+fn run_expand(e: &mut Editor, nodes: &[Range<usize>], cmd: Command) -> Outcome {
+    let f = |r: Range<usize>| {
+        nodes.iter().filter(|n| n.start <= r.start && n.end >= r.end && **n != r).min_by_key(|n| n.len()).cloned()
+    };
+    let mut c = cx();
+    c.expand = Some(&f);
+    e.run(cmd, &mut c)
+}
+
+#[test]
+fn expand_and_shrink_through_syntax_nodes() {
+    // let x = foo(bar);
+    // 0   4   8  11 15
+    let nodes = [8..11, 12..15, 11..16, 8..16, 0..17];
+    let mut e = ed("let x = foo(b|ar);");
+    let steps = ["let x = foo(«bar»);", "let x = foo«(bar)»;", "let x = «foo(bar)»;", "«let x = foo(bar);»"];
+    for want in steps {
+        run_expand(&mut e, &nodes, Command::ExpandSelection);
+        assert_eq!(show(&e), want);
+    }
+    // Nothing bigger: no change, nothing pushed.
+    let out = run_expand(&mut e, &nodes, Command::ExpandSelection);
+    assert!(!out.selections_changed);
+    for want in steps.iter().rev().skip(1).chain(["let x = foo(b|ar);"].iter()) {
+        run_expand(&mut e, &nodes, Command::ShrinkSelection);
+        assert_eq!(show(&e), *want);
+    }
+    // An empty stack shrinks nothing.
+    let out = run_expand(&mut e, &nodes, Command::ShrinkSelection);
+    assert!(!out.selections_changed);
+    assert_eq!(show(&e), "let x = foo(b|ar);");
+}
+
+#[test]
+fn expand_multi_cursor_falls_back_to_word_line_file() {
+    let mut e = ed("a|b cd\nef g|h");
+    run(&mut e, Command::ExpandSelection);
+    assert_eq!(show(&e), "«ab» cd\nef «gh»");
+    run(&mut e, Command::ExpandSelection);
+    assert_eq!(show(&e), "«ab cd»\n«ef gh»");
+    run(&mut e, Command::ExpandSelection);
+    assert_eq!(show(&e), "«ab cd\nef gh»", "merged into one");
+    run(&mut e, Command::ShrinkSelection);
+    assert_eq!(show(&e), "«ab cd»\n«ef gh»", "split again");
+    run(&mut e, Command::ShrinkSelection);
+    run(&mut e, Command::ShrinkSelection);
+    assert_eq!(show(&e), "a|b cd\nef g|h");
+    assert_eq!(e.selections().len(), 2);
+}
+
+#[test]
+fn shrink_forgets_after_a_move_or_an_edit() {
+    let mut e = ed("a|b cd");
+    run(&mut e, Command::ExpandSelection);
+    run(&mut e, Command::Right { select: false });
+    assert_eq!(show(&e), "ab| cd");
+    run(&mut e, Command::ShrinkSelection);
+    assert_eq!(show(&e), "ab| cd", "the stack is stale after a move");
+
+    let mut e = ed("a|b cd");
+    run(&mut e, Command::ExpandSelection);
+    run(&mut e, Command::ExpandSelection);
+    run(&mut e, ins("x"));
+    run(&mut e, Command::ShrinkSelection);
+    assert_eq!(show(&e), "x|", "and after an edit");
+    // A fresh expand starts a new stack.
+    run(&mut e, Command::ExpandSelection);
+    assert_eq!(show(&e), "«x»");
+    run(&mut e, Command::ShrinkSelection);
+    assert_eq!(show(&e), "x|");
 }

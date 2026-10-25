@@ -37,11 +37,8 @@ impl Editor {
             PageDown { select } => self.move_vertical(select, cx.page_rows.max(1) as isize),
             WordLeft { select } => self.move_with(select, |ed, s| ed.word_left(s.head)),
             WordRight { select } => self.move_with(select, |ed, s| ed.word_right(s.head)),
-            LineStart { select } => self.move_with(select, |ed, s| ed.smart_home(s.head)),
-            LineEnd { select } => self.move_with(select, |ed, s| Point {
-                line: s.head.line,
-                col: line_len(&ed.rope, s.head.line),
-            }),
+            LineStart { select } => self.move_with(select, |ed, s| ed.home(s.head)),
+            LineEnd { select } => self.move_with(select, |ed, s| ed.end(s.head)),
             DocStart { select } => self.move_with(select, |_, _| Point::default()),
             DocEnd { select } => self.move_with(select, |ed, _| ed.end_point()),
             GoToLine(n) => {
@@ -83,6 +80,8 @@ impl Editor {
             AddCursorAbove => self.add_cursor_vertical(-1),
             AddCursorBelow => self.add_cursor_vertical(1),
             JumpToMatchingBracket => self.jump_to_bracket(cx),
+            ExpandSelection => self.expand_selection(cx),
+            ShrinkSelection => self.shrink_selection(),
 
             Copy => {
                 cx.clipboard_out = Some(self.copy_text());
@@ -166,6 +165,33 @@ impl Editor {
             }
         }
         Point { line: p.line, col: i }
+    }
+
+    /// Home / Cmd+Left: under soft wrap, the start of the visual row first;
+    /// on the first row (or already at a row start), smart home.
+    fn home(&self, p: Point) -> Point {
+        if self.wrap.width().is_some() {
+            let (row, _) = self.wrap.point_to_row(&self.rope, p);
+            let start = self.wrap.row_to_point(&self.rope, row, 0);
+            if start.line == p.line && start.col > 0 && start.col < p.col {
+                return start;
+            }
+        }
+        self.smart_home(p)
+    }
+
+    /// End / Cmd+Right: under soft wrap, the end of the visual row first
+    /// (before its break char, like a click past the row's end); pressed
+    /// again there, the end of the line.
+    fn end(&self, p: Point) -> Point {
+        if self.wrap.width().is_some() {
+            let (row, _) = self.wrap.point_to_row(&self.rope, p);
+            let e = self.wrap.row_to_point(&self.rope, row, usize::MAX);
+            if e.line == p.line && e.col > p.col {
+                return e;
+            }
+        }
+        Point { line: p.line, col: line_len(&self.rope, p.line) }
     }
 
     fn smart_home(&self, p: Point) -> Point {
@@ -819,6 +845,71 @@ impl Editor {
             .collect();
         self.set_sels(sels, self.primary);
         MOVED
+    }
+
+    // --- Expand / shrink selection ----------------------------------------
+
+    /// Whether the shrink stack still describes the current selections.
+    fn expand_current(&self) -> bool {
+        self.expanded.as_ref().is_some_and(|(v, sels)| *v == self.version && *sels == self.sels)
+    }
+
+    fn expand_selection(&mut self, cx: &Ctx) -> Outcome {
+        if !self.expand_current() {
+            self.expand_stack.clear();
+        }
+        let sels: Vec<Selection> = self
+            .sels
+            .iter()
+            .map(|s| {
+                let (a, b) = (self.point_to_byte(s.start()), self.point_to_byte(s.end()));
+                let node = cx
+                    .expand
+                    .and_then(|f| f(a..b))
+                    .filter(|r| r.start <= a && r.end >= b && r.end <= self.rope.len_bytes() && (r.start < a || r.end > b));
+                let (start, end) = match node {
+                    Some(r) => (self.byte_to_point(r.start), self.byte_to_point(r.end)),
+                    None => self.plain_expand(s),
+                };
+                Selection { anchor: start, head: end, goal: None }
+            })
+            .collect();
+        if sels == self.sels {
+            return Outcome::default();
+        }
+        self.break_group = true;
+        self.expand_stack.push((self.sels.clone(), self.primary));
+        self.set_sels(sels, self.primary);
+        self.expanded = Some((self.version, self.sels.clone()));
+        MOVED
+    }
+
+    fn shrink_selection(&mut self) -> Outcome {
+        if !self.expand_current() {
+            self.expand_stack.clear();
+            return Outcome::default();
+        }
+        let Some((sels, primary)) = self.expand_stack.pop() else { return Outcome::default() };
+        self.break_group = true;
+        self.set_sels(sels, primary);
+        self.expanded = Some((self.version, self.sels.clone()));
+        MOVED
+    }
+
+    /// Without a syntax node: the word at a caret, then the selection's whole
+    /// lines (without the last newline), then the file.
+    fn plain_expand(&self, s: &Selection) -> (Point, Point) {
+        if s.is_empty()
+            && let Some(w) = self.word_selection_at(s.head)
+        {
+            return (w.start(), w.end());
+        }
+        let (a, b) = (s.start(), s.end());
+        let lines = (Point { line: a.line, col: 0 }, Point { line: b.line, col: line_len(&self.rope, b.line) });
+        if lines != (a, b) && !(a <= lines.0 && b >= lines.1) {
+            return lines;
+        }
+        (Point::default(), self.end_point())
     }
 
     /// Plain-text bracket matching (no syntax awareness) for char at `at`.

@@ -119,6 +119,9 @@ enum PickKind {
     Slash { agent: Entity<AgentTask>, settings: Vec<String>, names: Vec<String>, target: Entity<PromptInput> },
     /// A session setting's values (mode, model…) for one agent.
     Setting { agent: Entity<AgentTask>, id: String, values: Vec<String> },
+    /// Go to Symbol in the code modal: each symbol's name (bytes), and the
+    /// selections to put back on Esc (highlighting previews a symbol).
+    Symbols { targets: Vec<std::ops::Range<usize>>, restore: (Vec<qur_editor::Selection>, usize) },
 }
 
 enum Overlay {
@@ -479,6 +482,7 @@ impl Workspace {
             merging: self.merge.is_some(),
             vim: self.config.keys.vim,
             keep_awake: self.config.ui.keep_awake,
+            keymap: commands::keymap_generation(),
         }
     }
 
@@ -2449,6 +2453,9 @@ impl Workspace {
                     self.reload_settings(window, cx);
                     self.broadcast_reload(cx);
                 }
+                if clean && path.as_deref() == Some(qur_config::keymap_path().as_path()) {
+                    self.reload_keymap(cx);
+                }
                 if clean && path.as_deref() == Some(qur_agents::roster_path().as_path()) {
                     let (r, err) = Roster::load();
                     self.roster = r;
@@ -2637,6 +2644,30 @@ impl Workspace {
         }
         self.open_path(&path, window, cx);
     }
+    fn open_keymap(&mut self, _: &qur::OpenKeymap, window: &mut Window, cx: &mut Context<Self>) {
+        let path = qur_config::keymap_path();
+        if !path.exists() {
+            let _ = std::fs::create_dir_all(path.parent().unwrap());
+            let _ = std::fs::write(&path, KEYMAP_TEMPLATE);
+        }
+        self.open_path(&path, window, cx);
+    }
+
+    /// Re-read keymap.toml (saved in Qur): rebinds keys app-wide, updates the
+    /// menu shortcuts, and reports skipped entries (also in the log).
+    fn reload_keymap(&mut self, cx: &mut Context<Self>) {
+        let errors = commands::reload_keymap(cx);
+        for e in &errors {
+            crate::log(e);
+        }
+        self.sync_menus(cx);
+        match errors.as_slice() {
+            [] => self.flash("keymap.toml applied", cx),
+            [one] => self.flash(one.clone(), cx),
+            [first, rest @ ..] => self.flash(format!("{first} (and {} more, see Help > Show Logs)", rest.len()), cx),
+        }
+    }
+
     fn open_agents(&mut self, _: &qur::OpenAgents, window: &mut Window, cx: &mut Context<Self>) {
         let _ = Roster::load(); // writes the defaults when missing
         self.open_path(&qur_agents::roster_path(), window, cx);
@@ -2838,6 +2869,28 @@ impl Workspace {
                 self.apply_look(window, cx);
                 self.close_overlays(window, cx);
             }
+            (PickerEvent::Highlight(i), PickKind::Symbols { targets, .. }) => {
+                if let (Some(r), Some(code)) = (targets.get(*i).cloned(), self.code.clone()) {
+                    code.update(cx, |c, cx| c.select_bytes(r, cx));
+                }
+            }
+            (PickerEvent::Confirm(i), PickKind::Symbols { targets, .. }) => {
+                let r = targets.get(*i).cloned();
+                self.close_overlays(window, cx);
+                if let (Some(r), Some(code)) = (r, self.code.clone()) {
+                    code.update(cx, |c, cx| c.select_bytes(r, cx));
+                    if std::env::var_os("QUR_DEBUG_ACTIONS").is_some() {
+                        println!("SYMBOL {}", code.read(cx).selected_text().unwrap_or_default());
+                    }
+                }
+            }
+            (PickerEvent::Dismiss, PickKind::Symbols { restore, .. }) => {
+                let restore = restore.clone();
+                self.close_overlays(window, cx);
+                if let Some(code) = self.code.clone() {
+                    code.update(cx, |c, cx| c.restore_selections(restore, cx));
+                }
+            }
             (PickerEvent::Dismiss, _) => self.close_overlays(window, cx),
             _ => {}
         }
@@ -2873,7 +2926,7 @@ impl Workspace {
             .iter()
             .map(|c| {
                 let right = match c.tier {
-                    commands::Tier::Ready => commands::display_keys(c.first_keys()),
+                    commands::Tier::Ready => commands::display_keys(&c.first_keys()),
                     commands::Tier::Later(m) => format!("coming in {m}"),
                 };
                 PickItem::new(format!("{}: {}", c.category, c.title)).right(right).enabled(c.ready())
@@ -2940,6 +2993,48 @@ impl Workspace {
             .collect();
         items.push(PickItem::new("Open Folder…").right(commands::display_keys("cmd-o")));
         self.open_picker("Switch project…", items, PickKind::Projects(list), false, window, cx);
+    }
+
+    /// Go to Symbol in File… (Cmd+Shift+O): the code modal's tree-sitter
+    /// outline in a picker, indented by nesting; arrows preview, Esc goes back.
+    fn go_to_symbol(&mut self, _: &qur::GoToSymbol, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(active) = self.code.clone() else {
+            return self.flash("Open a file first (Cmd+P), then Go to Symbol", cx);
+        };
+        let (symbols, has_language, cursor, restore) = {
+            let a = active.read(cx);
+            (a.symbols(), a.language.is_some(), a.model.point_to_byte(a.cursor()), a.selections())
+        };
+        if symbols.is_empty() {
+            let why = if has_language { "No symbols in this file" } else { "No symbols: Qur doesn't parse this kind of file" };
+            return self.flash(why, cx);
+        }
+        let current = symbols.iter().rposition(|s| s.range.start <= cursor && cursor <= s.range.end).unwrap_or(0);
+        let items = symbols
+            .iter()
+            .map(|s| {
+                let line = active.read(cx).model.byte_to_point(s.name_range.start).line + 1;
+                PickItem::new(format!("{}{}", "  ".repeat(s.depth.min(8)), s.name)).detail(s.kind).right(line.to_string())
+            })
+            .collect();
+        let targets = symbols.into_iter().map(|s| s.name_range).collect();
+        let p = self.open_picker("Go to symbol…", items, PickKind::Symbols { targets, restore }, false, window, cx);
+        p.update(cx, |p, cx| p.select_item(current, cx));
+        // Esc puts the cursor back where it was (previews move it).
+        self.prev_focus = Some(active.read(cx).focus.clone());
+    }
+
+    /// Expand/Shrink Selection when the code modal isn't the focused view
+    /// (menu or scripted runs): act on the modal's editor.
+    fn expand_selection(&mut self, _: &qur::ExpandSelection, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(code) = self.code.clone() {
+            code.update(cx, |c, cx| c.expand_selection(true, cx));
+        }
+    }
+    fn shrink_selection(&mut self, _: &qur::ShrinkSelection, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(code) = self.code.clone() {
+            code.update(cx, |c, cx| c.expand_selection(false, cx));
+        }
     }
 
     fn goto_line(&mut self, _: &qur::GoToLine, window: &mut Window, cx: &mut Context<Self>) {
@@ -4626,6 +4721,21 @@ const CONFIG_TEMPLATE: &str = r#"# Qur settings. Saved changes apply right away.
 # vim = false
 "#;
 
+const KEYMAP_TEMPLATE: &str = r#"# Qur key bindings. Saved changes apply right away; entries Qur can't use
+# are skipped and reported (Help > Show Logs). See docs/guide.md, "Keymap".
+#
+# Name a command by its action ("qur::GoToSymbol", "editor::DeleteLine") or
+# its command palette entry ("Go: Go to Symbol in File…", or just the title
+# when only one command has it). Keys use the form "cmd-shift-o"; a chord is
+# "cmd-k cmd-t"; a list binds several; "" unbinds. Each binding keeps the
+# command's usual context (editor, terminal…).
+
+[bindings]
+# "Go to Symbol in File" = "cmd-r"
+# "editor::DeleteLine" = ["cmd-shift-k", "ctrl-shift-k"]
+# "View: Sidebar" = ""
+"#;
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.fullscreen = window.is_fullscreen();
@@ -4732,6 +4842,10 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::use_default_theme))
             .on_action(cx.listener(Self::project_switcher))
             .on_action(cx.listener(Self::goto_line))
+            .on_action(cx.listener(Self::go_to_symbol))
+            .on_action(cx.listener(Self::expand_selection))
+            .on_action(cx.listener(Self::shrink_selection))
+            .on_action(cx.listener(Self::open_keymap))
             .on_action(cx.listener(Self::transparency))
             .on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::new_agent_terminal))

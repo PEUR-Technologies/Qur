@@ -226,7 +226,11 @@ fn main() {
             .expect("bundled fonts");
         mark("fonts_added");
         qur_agents::warm_login_path();
-        commands::bind_keys(cx);
+        // Default keys plus keymap.toml; bad entries are logged and skipped.
+        for e in commands::reload_keymap(cx) {
+            log(&e);
+            eprintln!("KEYMAP {e}");
+        }
         // A clicked alert (M6) shows its agent: tag = qur:<window>:<task id>.
         cx.on_system_notification_response(|resp, cx| {
             let Some((win, id)) = resp.tag.strip_prefix("qur:").and_then(|t| t.split_once(':')) else { return };
