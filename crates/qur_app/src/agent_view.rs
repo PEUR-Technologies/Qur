@@ -1787,7 +1787,7 @@ impl AgentTask {
             };
             let first = p.options.iter().position(|x| x.kind == o.kind) == Some(i);
             let keys = crate::commands::find(action.as_ref())?.first_keys();
-            (first && !keys.is_empty()).then(|| crate::commands::display_keys(keys))
+            (first && !keys.is_empty()).then(|| crate::commands::display_keys(&keys))
         };
         let buttons: Vec<_> = p
             .options

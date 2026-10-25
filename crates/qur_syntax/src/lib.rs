@@ -10,6 +10,9 @@
 //! signatures. Implementation details are free.
 
 mod grammars;
+mod outline;
+
+pub use outline::Symbol;
 
 use std::collections::HashMap;
 use std::ops::Range;

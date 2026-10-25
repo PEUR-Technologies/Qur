@@ -110,7 +110,17 @@ pub struct EditorView {
     /// Opened during a merge with conflicts: show the resolve bar (M4).
     pub merge_conflicts: bool,
     conflict_cache: Option<(u64, Vec<qur_git::Conflict>)>,
+    /// IME composition (marked text): drawn underlined at the primary
+    /// cursor, not in the buffer until committed (then typed at every cursor).
+    marked: Option<Marked>,
     bench: Bench,
+}
+
+/// The IME's text being composed, and the part it has selected (UTF-16
+/// offsets into `text`; the clause being converted).
+struct Marked {
+    text: String,
+    selected: Option<Range<usize>>,
 }
 
 impl EventEmitter<EditorEvent> for EditorView {}
@@ -164,6 +174,7 @@ impl EditorView {
             disk_changed: false,
             merge_conflicts: false,
             conflict_cache: None,
+            marked: None,
             bench,
         };
         if view.syntax.is_none() {
@@ -413,10 +424,11 @@ impl EditorView {
         let clip = paste.then(|| cx.read_from_clipboard().and_then(|c| c.text())).flatten();
         let lang = self.language;
         let page_rows = self.bounds.map(|b| (b.size.height / self.line_h).floor() as usize).unwrap_or(30).max(1);
-        // Bracket lookup goes through the syntax tree when there is one.
+        // Bracket lookup and Expand Selection go through the syntax tree when there is one.
         let syntax = self.syntax.clone();
-        let rope = self.model.rope().clone();
-        let bracket = move |b: usize| syntax.as_ref().and_then(|s| s.matching_bracket(&RopeText(rope.clone()), b));
+        let text = RopeText(self.model.rope().clone());
+        let bracket = |b: usize| syntax.as_ref().and_then(|s| s.matching_bracket(&text, b));
+        let expand = |r: Range<usize>| syntax.as_ref().and_then(|s| s.expand_range(&text, r));
         let mut ctx = Ctx {
             page_rows,
             clipboard_in: clip.as_deref(),
@@ -425,6 +437,7 @@ impl EditorView {
             block_comment: lang.and_then(|l| l.block_comment()),
             indent_unit: lang.map(|l| l.indent_unit()).unwrap_or("    "),
             matching_bracket: Some(&bracket),
+            expand: Some(&expand),
         };
         let was_dirty = self.model.is_dirty();
         let out = f(&mut self.model, &mut ctx);
@@ -511,6 +524,52 @@ impl EditorView {
         self.center_cursor();
         cx.emit(EditorEvent::Changed);
         cx.notify();
+    }
+
+    /// The file's outline for Go to Symbol (empty while the first parse runs).
+    pub fn symbols(&self) -> Vec<qur_syntax::Symbol> {
+        match &self.syntax {
+            Some(s) => s.symbols(&RopeText(self.model.rope().clone())),
+            None => Vec::new(),
+        }
+    }
+
+    /// Select a byte range (a symbol's name) and center it.
+    pub fn select_bytes(&mut self, r: Range<usize>, cx: &mut Context<Self>) {
+        let (a, b) = (self.model.byte_to_point(r.start), self.model.byte_to_point(r.end));
+        self.model.set_selections(vec![Selection { anchor: a, head: b, goal: None }], 0);
+        self.center_cursor();
+        cx.notify();
+    }
+
+    /// The selections, to put back after a preview (Go to Symbol's Esc).
+    pub fn selections(&self) -> (Vec<Selection>, usize) {
+        (self.model.selections().to_vec(), self.model.primary_index())
+    }
+
+    pub fn restore_selections(&mut self, (sels, primary): (Vec<Selection>, usize), cx: &mut Context<Self>) {
+        self.model.set_selections(sels, primary);
+        self.center_cursor();
+        cx.notify();
+    }
+
+    /// Expand (or shrink) every selection by syntax node (Selection menu).
+    pub fn expand_selection(&mut self, grow: bool, cx: &mut Context<Self>) {
+        self.run(if grow { Command::ExpandSelection } else { Command::ShrinkSelection }, cx);
+        // Scripted runs (QUR_DEBUG_ACTIONS) log where the selections went.
+        if std::env::var_os("QUR_DEBUG_ACTIONS").is_some() {
+            let rope = self.model.rope();
+            let shown: Vec<String> = self
+                .model
+                .selections()
+                .iter()
+                .map(|s| {
+                    let (a, b) = (rope.line_to_char(s.start().line) + s.start().col, rope.line_to_char(s.end().line) + s.end().col);
+                    format!("{}:{}-{}:{} {:?}", s.start().line + 1, s.start().col + 1, s.end().line + 1, s.end().col + 1, rope.slice(a..b).to_string())
+                })
+                .collect();
+            println!("SELECTION {}", shown.join(" | "));
+        }
     }
 
     pub fn toggle_soft_wrap(&mut self, cx: &mut Context<Self>) {
@@ -937,6 +996,13 @@ impl EditorView {
         }
     }
 
+    fn a_expand(&mut self, _: &crate::commands::qur::ExpandSelection, _: &mut Window, cx: &mut Context<Self>) {
+        self.expand_selection(true, cx);
+    }
+    fn a_shrink(&mut self, _: &crate::commands::qur::ShrinkSelection, _: &mut Window, cx: &mut Context<Self>) {
+        self.expand_selection(false, cx);
+    }
+
     fn a_save(&mut self, _: &ea::Save, _: &mut Window, cx: &mut Context<Self>) {
         self.save(cx);
     }
@@ -966,23 +1032,73 @@ impl Focusable for EditorView {
     }
 }
 
-/// Committed text goes in at every cursor. IME composition is inserted when
-/// committed (marked text isn't drawn yet).
-impl EntityInputHandler for EditorView {
-    fn text_for_range(&mut self, _: Range<usize>, _: &mut Option<Range<usize>>, _: &mut Window, _: &mut Context<Self>) -> Option<String> {
-        None
-    }
-    fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
+/// Committed text goes in at every cursor. While an IME composes, its
+/// marked text is drawn underlined at the primary cursor (prepaint) and
+/// only enters the buffer when committed. The "document" the IME sees is the
+/// primary cursor's line, in UTF-16 offsets, with the marked text spliced in
+/// at the cursor.
+impl EditorView {
+    /// UTF-16 offset of the primary cursor in its line.
+    fn caret_utf16(&self) -> usize {
         let h = self.cursor();
         let line = self.model.rope().line(h.line);
-        let u = line.slice(..h.col.min(line.len_chars())).chars().map(char::len_utf16).sum();
-        Some(UTF16Selection { range: u..u, reversed: false })
+        line.slice(..h.col.min(line.len_chars())).chars().map(char::len_utf16).sum()
+    }
+
+    /// The primary cursor's line (no newline), with the marked text at the cursor.
+    fn ime_line(&self) -> String {
+        let h = self.cursor();
+        let mut line: String = self.model.rope().line(h.line).chars().filter(|&c| c != '\n' && c != '\r').collect();
+        if let Some(m) = &self.marked {
+            let at = line.char_indices().nth(h.col).map_or(line.len(), |(i, _)| i);
+            line.insert_str(at, &m.text);
+        }
+        line
+    }
+}
+
+fn utf16_len(s: &str) -> usize {
+    s.chars().map(char::len_utf16).sum()
+}
+
+impl EntityInputHandler for EditorView {
+    fn text_for_range(&mut self, r: Range<usize>, adjusted: &mut Option<Range<usize>>, _: &mut Window, _: &mut Context<Self>) -> Option<String> {
+        let units: Vec<u16> = self.ime_line().encode_utf16().collect();
+        let r = r.start.min(units.len())..r.end.min(units.len());
+        *adjusted = Some(r.clone());
+        Some(String::from_utf16_lossy(&units[r]))
+    }
+    fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
+        let u = self.caret_utf16();
+        let range = match &self.marked {
+            Some(m) => {
+                let n = utf16_len(&m.text);
+                let sel = m.selected.clone().unwrap_or(n..n);
+                u + sel.start.min(n)..u + sel.end.min(n)
+            }
+            None => u..u,
+        };
+        Some(UTF16Selection { range, reversed: false })
     }
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
-        None
+        let m = self.marked.as_ref()?;
+        let u = self.caret_utf16();
+        Some(u..u + utf16_len(&m.text))
     }
-    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {}
-    fn replace_text_in_range(&mut self, _: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
+    /// The IME gave up composing (focus moved…): keep what was typed.
+    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(m) = self.marked.take() {
+            if !m.text.is_empty() && !self.read_only {
+                self.insert_text(&m.text, cx);
+            }
+            cx.notify();
+        }
+    }
+    fn replace_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
+        let composing = self.marked.take().is_some();
+        if composing {
+            cx.notify();
+        }
         if text.is_empty() {
             return;
         }
@@ -993,20 +1109,62 @@ impl EntityInputHandler for EditorView {
             }
             return;
         }
+        // Press-and-hold accents replace the letter before the caret (one cursor).
+        let u = self.caret_utf16();
+        if let Some(r) = range
+            && !composing
+            && !self.read_only
+            && self.model.selections().len() == 1
+            && self.model.primary().is_empty()
+            && r.end == u
+            && r.start < u
+        {
+            let h = self.cursor();
+            let line = self.model.rope().line(h.line);
+            let mut acc = 0;
+            let mut col = 0;
+            for c in line.chars() {
+                if acc >= r.start {
+                    break;
+                }
+                acc += c.len_utf16();
+                col += 1;
+            }
+            let from = Point { line: h.line, col };
+            self.model.set_selections(vec![Selection { anchor: from, head: h, goal: None }], 0);
+        }
         self.insert_text(text, cx);
     }
     fn replace_and_mark_text_in_range(
         &mut self,
-        r: Option<Range<usize>>,
+        range: Option<Range<usize>>,
         text: &str,
-        _: Option<Range<usize>>,
+        selected: Option<Range<usize>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.replace_text_in_range(r, text, window, cx);
+        // Nothing to compose into: Vim normal mode and read-only Live views.
+        if self.read_only || self.vim.as_ref().is_some_and(|v| v.mode() != VimMode::Insert) {
+            return self.replace_text_in_range(range, text, window, cx);
+        }
+        self.marked = (!text.is_empty()).then(|| Marked { text: text.to_string(), selected });
+        self.reveal();
+        cx.notify();
     }
-    fn bounds_for_range(&mut self, _: Range<usize>, bounds: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
-        let (row, col) = self.model.wrap().point_to_row(self.model.rope(), self.cursor());
+    fn bounds_for_range(&mut self, r: Range<usize>, bounds: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
+        let (row, mut col) = self.model.wrap().point_to_row(self.model.rope(), self.cursor());
+        // Inside the marked text (the IME's candidate window follows the clause).
+        if let Some(m) = &self.marked {
+            let into = r.start.saturating_sub(self.caret_utf16());
+            let mut acc = 0;
+            for c in m.text.chars() {
+                if acc >= into {
+                    break;
+                }
+                acc += c.len_utf16();
+                col += char_width(c);
+            }
+        }
         let y = bounds.top() + self.line_h * row as f32 - self.scroll_y;
         let x = bounds.left() + self.text_x + self.cell_w * col as f32 - self.scroll_x;
         Some(Bounds::new(point(x, y), size(px(2.), self.line_h)))
@@ -1133,6 +1291,7 @@ impl Element for EditorElement {
         let styles: Vec<qur_theme::Style> = HIGHLIGHT_NAMES.iter().map(|n| theme.syntax_style(n)).collect();
         let default_color = look.c(theme.editor.text);
         let primary_line = v.model.primary().head.line;
+        let primary_head = v.model.primary().head;
         let tab_w = v.tab_width.max(1);
 
         let mut out = Vec::with_capacity(rows.len());
@@ -1146,13 +1305,49 @@ impl Element for EditorElement {
             let content_end = if has_nl { line_chars - 1 } else { line_chars };
             let content_end = if content_end > 0 && line.char(content_end - 1) == '\r' { content_end - 1 } else { content_end };
             let end = r.chars.end.min(content_end);
+            let line_end = r.chars.end >= content_end;
             let mut text = String::new();
             let mut runs: Vec<TextRun> = Vec::new();
             let mut vcols = Vec::with_capacity(end.saturating_sub(r.chars.start) + 1);
             // Visual column at the row start: wrapped rows start at 0.
             let mut vcol = 0usize;
             let mut byte = line_byte0 + line.char_to_byte(r.chars.start.min(line_chars));
+            // The IME's marked text goes in before the char at the primary
+            // cursor; that cursor (and everything after) shifts right.
+            let ime_col = v.marked.as_ref().filter(|_| {
+                let h = primary_head;
+                h.line == r.line && h.col >= r.chars.start && (h.col < end || (h.col == end && line_end))
+            });
+            let ime = |text: &mut String, runs: &mut Vec<TextRun>, vcol: &mut usize| {
+                let Some(m) = ime_col else { return };
+                let mut u = 0;
+                for c in m.text.chars() {
+                    let in_clause = m.selected.as_ref().is_some_and(|s| !s.is_empty() && s.contains(&u));
+                    u += c.len_utf16();
+                    let mut b = [0u8; 4];
+                    let piece = c.encode_utf8(&mut b);
+                    let underline = gpui::UnderlineStyle { thickness: px(if in_clause { 2. } else { 1. }), color: Some(default_color), wavy: false };
+                    match runs.last_mut() {
+                        Some(run) if run.underline == Some(underline) => run.len += piece.len(),
+                        _ => runs.push(TextRun {
+                            len: piece.len(),
+                            font: code_font.clone(),
+                            color: default_color,
+                            background_color: None,
+                            underline: Some(underline),
+                            strikethrough: None,
+                        }),
+                    }
+                    text.push_str(piece);
+                    *vcol += char_width(c);
+                }
+            };
+            let mut col = r.chars.start;
             for c in line.slice(r.chars.start.min(end)..end).chars() {
+                if ime_col.is_some() && col == primary_head.col {
+                    ime(&mut text, &mut runs, &mut vcol);
+                }
+                col += 1;
                 vcols.push(vcol);
                 while span_ix < spans.len() && spans[span_ix].range.end <= byte {
                     span_ix += 1;
@@ -1173,7 +1368,9 @@ impl Element for EditorElement {
                 let weight = if style.bold { gpui::FontWeight::BOLD } else { gpui::FontWeight::NORMAL };
                 let fstyle = if style.italic { gpui::FontStyle::Italic } else { gpui::FontStyle::Normal };
                 match runs.last_mut() {
-                    Some(run) if run.color == color && run.font.weight == weight && run.font.style == fstyle => run.len += piece.len(),
+                    Some(run) if run.color == color && run.font.weight == weight && run.font.style == fstyle && run.underline.is_none() => {
+                        run.len += piece.len()
+                    }
                     _ => runs.push(TextRun {
                         len: piece.len(),
                         font: gpui::Font { weight, style: fstyle, ..code_font.clone() },
@@ -1187,6 +1384,9 @@ impl Element for EditorElement {
                 vcol += w;
                 byte += c.len_utf8();
             }
+            if ime_col.is_some() && col == primary_head.col {
+                ime(&mut text, &mut runs, &mut vcol);
+            }
             vcols.push(vcol);
             max_vcol = max_vcol.max(vcol);
             let shaped = ts.shape_line(SharedString::from(text), fs, &runs, None);
@@ -1196,7 +1396,6 @@ impl Element for EditorElement {
                 let run = TextRun { len: num.len(), font: code_font.clone(), color: look.c(color), background_color: None, underline: None, strikethrough: None };
                 ts.shape_line(num, fs, &[run], None)
             });
-            let line_end = r.chars.end >= content_end;
             out.push(Row { y: bounds.top() + lh * i as f32 - offset, line: r.line, chars: r.chars.start..end, vcols, line_end, gutter, text: shaped });
         }
         let content_w = cell_w * max_vcol as f32;
@@ -1336,7 +1535,8 @@ fn mutates(cmd: &Command) -> bool {
             | Command::PageUp { .. } | Command::PageDown { .. } | Command::GoToLine(_)
             | Command::SelectAll | Command::SelectLine | Command::SingleCursor | Command::AddNextMatch
             | Command::SelectAllMatches | Command::AddCursorAbove | Command::AddCursorBelow
-            | Command::JumpToMatchingBracket | Command::Copy
+            | Command::JumpToMatchingBracket | Command::ExpandSelection | Command::ShrinkSelection
+            | Command::Copy
     )
 }
 
@@ -1582,6 +1782,8 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::a_cursor_above))
             .on_action(cx.listener(Self::a_cursor_below))
             .on_action(cx.listener(Self::a_bracket))
+            .on_action(cx.listener(Self::a_expand))
+            .on_action(cx.listener(Self::a_shrink))
             .on_action(cx.listener(Self::a_newline))
             .on_action(cx.listener(Self::a_undo))
             .on_action(cx.listener(Self::a_redo))

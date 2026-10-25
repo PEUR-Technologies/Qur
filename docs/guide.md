@@ -90,6 +90,10 @@ One window is one project. There's no permanent editor area: the window is for a
 ### Editor and looks
 
 - Code modal with tree-sitter highlighting for 13 languages, multi-cursor, regex find/replace, soft wrap and VS Code keybindings, plus optional Vim mode (Qur > Vim Mode).
+- **Go to Symbol in File** (`Cmd+Shift+O`): functions, methods, types, classes, headings, keys… from the same tree-sitter parse as the colors (no language server). Arrow keys preview each symbol; Esc puts the cursor back.
+- **Expand / Shrink Selection** (`Ctrl+Shift+Cmd+→` / `←`): grows every cursor's selection to the enclosing syntax node (word, call, statement, block, function…), and shrinks back one step at a time. Files Qur doesn't parse grow by word, line, then the whole file.
+- With soft wrap on, `End` / `Cmd+→` stops at the end of the visual row first, then the line; `Home` / `Cmd+←` likewise.
+- Input methods (Japanese, Chinese, Korean, press-and-hold accents): the text being composed shows underlined at the cursor until you commit it.
 - A first-run picker for agents, layout, keys and theme (Qur > Setup… reopens it).
 - 17 built-in themes plus Auto (follows macOS), a theme per project, and window transparency with blur. Every theme passes a contrast test.
 - Every command is in the macOS menu bar and the command palette (`Cmd+Shift+P`). No toolbars or settings screens.
@@ -103,6 +107,7 @@ One window is one project. There's no permanent editor area: the window is for a
 | `Ctrl+T`, `Ctrl+1..9`, `Ctrl+Opt+↑/↓` | Switch sessions (`Ctrl+T` picks one by name) |
 | `Cmd+I`, `Esc` / `Cmd+.` | Focus the prompt, stop the agent |
 | `Cmd+P`, `Cmd+Shift+P` | Go to file, command palette |
+| `Cmd+Shift+O`, `Ctrl+Shift+Cmd+→/←` | Go to symbol in file; expand / shrink selection |
 | `Cmd+K Cmd+L`, `Cmd+1..5` | Structured agents: cycle layouts; Live / To-do / Chat / Changes / Browser (`Cmd+5` works for Agent Terminals too) |
 | `Cmd+Shift+C` | Browser: inspect element |
 | `Ctrl+Shift+G` | Source control |
@@ -118,11 +123,29 @@ Everything lives in `~/Library/Application Support/Qur/`. Qur never writes into 
 |---|---|
 | `config.toml` | Theme, window opacity/blur, editor font, soft wrap, peek layout, `[keys] vim`, `[alerts]`. Qur > Settings opens it; saved changes apply right away. |
 | `agents.toml` | Which agents Qur can start (ACP or terminal mode). Written on first launch. |
+| `keymap.toml` | Your own key bindings (see below). Qur > Settings > Open keymap.toml; saved changes apply right away. |
 | `projects/<id>.toml` | Per-project theme, opacity, `[worktree] setup = "pnpm install"` (runs in each new worktree before the agent starts), `[checks] command = "cargo check"` (runs after each agent turn that changed files), and `[run] command` / `url` with `$PORT` (Run Project). |
 | `projects/<id>.tasks.toml` | Tasks, so they survive restarts and resume their sessions. |
 | `worktrees/<id>/<task>/` | The task worktrees. |
 
 In your repo, an optional **`.worktreeinclude`** file lists one path per line (e.g. `.env`, `node_modules`). Qur copies those into each new worktree with APFS copy-on-write: instant, no extra disk.
+
+### Keymap
+
+`keymap.toml` rebinds commands by name, under `[bindings]`:
+
+```toml
+[bindings]
+"Go to Symbol in File" = "cmd-r"                        # replaces Cmd+Shift+O
+"editor::DeleteLine" = ["cmd-shift-k", "ctrl-shift-k"]  # several keys
+"View: Sidebar" = ""                                     # unbound
+```
+
+- **Command names:** the action (`qur::GoToSymbol`, `editor::DeleteLine`; `QUR_DEBUG_ACTIONS` uses the same names), the command palette entry (`Go: Go to Symbol in File…`), or just its title when only one command has it. Case and a trailing `…` don't matter.
+- **Keys:** modifiers `cmd`, `ctrl`, `alt` (Option), `shift`, joined with `-` before the key: `cmd-shift-o`, `` ctrl-` ``, `alt-up`, `f5`. A chord is two keystrokes with a space: `cmd-k cmd-s`. A list binds several keys; `""` or `[]` unbinds.
+- A binding replaces all of that command's default keys and keeps where the command works (the editor, a terminal, anywhere).
+- Entries Qur can't use (an unknown or ambiguous name, a malformed key, a value that isn't a string or list) are skipped and written to the log (Help > Show Logs), and shown in the top bar when you save the file in Qur; the rest still apply. Qur never fails to start over keymap.toml.
+- The menu bar and the palette show your keys.
 
 ## Lightness
 

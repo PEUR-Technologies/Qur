@@ -2,7 +2,9 @@
 //! Key bindings, the command palette and the native menu bar are all built
 //! from `COMMANDS` (docs/keymap.md, docs/menus.md).
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::{Action, App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType};
 
@@ -17,7 +19,6 @@ pub mod qur {
             NextTerminal, PrevTerminal, CloseTerminal, OpenConfig, ThemePicker, NewWindow,
             OpenFolder, QuickOpen, SaveAll, RevertFile, NavBack, NavForward, RecentFile,
             UseDefaultTheme, ProjectSwitcher, PeekBrowser, ToggleInspect,
-            // Listed in menus/palette, built in later milestones (shown disabled).
             About, CheckSetup, OpenKeymap, OpenAgents, VimMode, NewAgentTask, FindInProject,
             ReplaceInProject, GitPanel, SearchPanel, PeekLayoutA, PeekLayoutB, PeekLayoutC,
             CyclePeekLayout, PeekLive, PeekTodo, PeekChat, PeekChanges, FollowAgent, GoToSymbol,
@@ -100,6 +101,7 @@ pub mod input {
 pub enum Tier {
     Ready,
     /// Built in a later milestone; shown disabled.
+    #[allow(dead_code)]
     Later(&'static str),
 }
 
@@ -118,9 +120,33 @@ impl Cmd {
         self.tier == Tier::Ready
     }
 
-    pub fn first_keys(&self) -> &'static str {
-        self.keys.split('|').next().unwrap_or("")
+    /// The keys in effect: keymap.toml's, else the default (`|`-separated).
+    pub fn keys(&self) -> String {
+        let i = COMMANDS.iter().position(|c| std::ptr::eq(c, self));
+        let o = OVERRIDES.read().unwrap_or_else(|e| e.into_inner());
+        match i.and_then(|i| o.get(&i)) {
+            Some(keys) => keys.join("|"),
+            None => self.keys.to_string(),
+        }
     }
+
+    pub fn first_keys(&self) -> String {
+        self.keys().split('|').next().unwrap_or("").to_string()
+    }
+
+    /// `qur::GoToSymbol`, as keymap.toml and QUR_DEBUG_ACTIONS name it.
+    pub fn action_name(&self) -> &'static str {
+        (self.action)().name()
+    }
+}
+
+/// keymap.toml's rebindings: command index -> keys (empty = unbound).
+static OVERRIDES: std::sync::RwLock<BTreeMap<usize, Vec<String>>> = std::sync::RwLock::new(BTreeMap::new());
+/// Bumped on every keymap load, so the menu bar picks up the new shortcuts.
+static KEYMAP_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub fn keymap_generation() -> u64 {
+    KEYMAP_GENERATION.load(Ordering::Relaxed)
 }
 
 macro_rules! cmd {
@@ -140,7 +166,7 @@ const B: Option<&str> = Some("Browser && !TextInput");
 const NT: Option<&str> = Some("!Terminal");
 /// Permission answers: anywhere but where you're editing or typing a command.
 const PERM: Option<&str> = Some("!Editor && !Terminal && !Picker");
-use Tier::{Later as L, Ready as R};
+use Tier::Ready as R;
 
 #[rustfmt::skip]
 pub static COMMANDS: &[Cmd] = &[
@@ -152,7 +178,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::About, "Qur", "About Qur", "", W, R),
     cmd!(qur::CheckSetup, "Qur", "Setup…", "", W, R),
     cmd!(qur::OpenConfig, "Qur", "Open config.toml", "cmd-,", W, R),
-    cmd!(qur::OpenKeymap, "Qur", "Open keymap.toml", "", W, L("a later version")),
+    cmd!(qur::OpenKeymap, "Qur", "Open keymap.toml", "", W, R),
     cmd!(qur::OpenAgents, "Qur", "Agents (agents.toml)", "", W, R),
     cmd!(qur::ThemePicker, "Qur", "Theme…", "cmd-k cmd-t", NT, R),
     cmd!(qur::AccentColor, "Qur", "Accent Color…", "", W, R),
@@ -182,7 +208,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::GoToLine, "Go", "Go to Line…", "ctrl-g", NT, R),
     cmd!(qur::NavBack, "Go", "Back", "ctrl--", NT, R),
     cmd!(qur::NavForward, "Go", "Forward", "ctrl-shift--", NT, R),
-    cmd!(qur::GoToSymbol, "Go", "Go to Symbol in File…", "cmd-shift-o", W, L("a later version")),
+    cmd!(qur::GoToSymbol, "Go", "Go to Symbol in File…", "cmd-shift-o", W, R),
     cmd!(editor::JumpToBracket, "Go", "Jump to Matching Bracket", "cmd-shift-\\", E, R),
     // Editing
     cmd!(edit::Undo, "Edit", "Undo", "cmd-z", W, R),
@@ -234,8 +260,9 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(editor::ToggleComment, "Edit", "Toggle Line Comment", "cmd-/", E, R),
     cmd!(editor::ToggleBlockComment, "Edit", "Toggle Block Comment", "shift-alt-a", E, R),
     cmd!(editor::SelectLine, "Selection", "Select Line", "cmd-l", E, R),
-    cmd!(qur::ExpandSelection, "Selection", "Expand Selection", "", W, L("a later version")),
-    cmd!(qur::ShrinkSelection, "Selection", "Shrink Selection", "", W, L("a later version")),
+    // VS Code's keys (Smart Select).
+    cmd!(qur::ExpandSelection, "Selection", "Expand Selection", "ctrl-shift-cmd-right", E, R),
+    cmd!(qur::ShrinkSelection, "Selection", "Shrink Selection", "ctrl-shift-cmd-left", E, R),
     cmd!(editor::AddNextMatch, "Selection", "Add Next Match", "cmd-d", E, R),
     cmd!(editor::SelectAllMatches, "Selection", "Select All Matches", "cmd-shift-l", E, R),
     cmd!(editor::AddCursorAbove, "Selection", "Add Cursor Above", "cmd-alt-up", E, R),
@@ -372,12 +399,72 @@ pub fn palette_commands() -> impl Iterator<Item = &'static Cmd> {
     COMMANDS.iter().filter(|c| !matches!(c.category, "Editor" | "Input"))
 }
 
+fn binding(c: &Cmd, keys: &str, cx: &App) -> Result<KeyBinding, String> {
+    let predicate = c.context.map(|ctx| gpui::KeyBindingContextPredicate::parse(ctx).unwrap().into());
+    KeyBinding::load(keys, (c.action)(), predicate, false, None, cx).map_err(|e| e.to_string())
+}
+
+/// The command keymap.toml means by `name`: an action name
+/// (`qur::GoToSymbol`), a palette entry (`Go: Go to Symbol in File…`) or a
+/// title alone when only one command has it. Case and a trailing `…` don't matter.
+pub fn resolve(name: &str) -> Result<usize, String> {
+    let norm = |s: &str| s.trim().trim_end_matches('…').trim_end_matches("...").trim().to_lowercase();
+    let want = norm(name);
+    if let Some(i) = COMMANDS.iter().position(|c| c.action_name().eq_ignore_ascii_case(name.trim())) {
+        return Ok(i);
+    }
+    if let Some(i) = COMMANDS.iter().position(|c| norm(&format!("{}: {}", c.category, c.title)) == want) {
+        return Ok(i);
+    }
+    let hits: Vec<usize> = (0..COMMANDS.len()).filter(|&i| norm(COMMANDS[i].title) == want).collect();
+    match hits.as_slice() {
+        [i] => Ok(*i),
+        [] => Err(format!("no command named `{name}`")),
+        many => Err(format!(
+            "`{name}` is ambiguous; use one of {}",
+            many.iter().map(|&i| format!("`{}`", COMMANDS[i].action_name())).collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
+/// Load keymap.toml and rebind every key. Returns one message per entry that
+/// was skipped (unknown command, bad keystroke, wrong shape); the rest apply.
+pub fn reload_keymap(cx: &mut App) -> Vec<String> {
+    let (entries, mut errors) = qur_config::load_keymap();
+    let mut map = BTreeMap::new();
+    for e in entries {
+        let at = if e.line > 0 { format!("keymap.toml line {}", e.line) } else { "keymap.toml".to_string() };
+        let i = match resolve(&e.command) {
+            Ok(i) => i,
+            Err(msg) => {
+                errors.push(format!("{at}: {msg}"));
+                continue;
+            }
+        };
+        let mut keys = Vec::new();
+        for k in e.keys {
+            match binding(&COMMANDS[i], &k, cx) {
+                Ok(_) => keys.push(k),
+                Err(msg) => errors.push(format!("{at}: `{k}` for `{}`: {msg}", e.command)),
+            }
+        }
+        map.insert(i, keys);
+    }
+    *OVERRIDES.write().unwrap_or_else(|e| e.into_inner()) = map;
+    KEYMAP_GENERATION.fetch_add(1, Ordering::Relaxed);
+    cx.clear_key_bindings();
+    bind_keys(cx);
+    errors
+}
+
 pub fn bind_keys(cx: &mut App) {
     let mut bindings = Vec::new();
     for c in COMMANDS {
-        for keys in c.keys.split('|').filter(|k| !k.is_empty()) {
-            let predicate = c.context.map(|ctx| gpui::KeyBindingContextPredicate::parse(ctx).unwrap().into());
-            bindings.push(KeyBinding::load(keys, (c.action)(), predicate, false, None, cx).unwrap());
+        for keys in c.keys().split('|').filter(|k| !k.is_empty()) {
+            // Defaults always load; user keys were checked by `reload_keymap`.
+            if let Ok(b) = binding(c, keys, cx) {
+                bindings.push(b);
+            }
         }
     }
     const SESSION_KEYS: [&str; 9] = ["ctrl-1", "ctrl-2", "ctrl-3", "ctrl-4", "ctrl-5", "ctrl-6", "ctrl-7", "ctrl-8", "ctrl-9"];
@@ -439,6 +526,8 @@ pub struct MenuState {
     pub vim: bool,
     pub keep_awake: bool,
     pub zen: bool,
+    /// `keymap_generation()`: new shortcuts rebuild the menus.
+    pub keymap: u64,
 }
 
 fn item(action: impl Action) -> MenuItem {
@@ -658,4 +747,38 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             titled("About Qur", qur::About),
         ]),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn name(r: Result<usize, String>) -> Result<&'static str, String> {
+        r.map(|i| COMMANDS[i].action_name())
+    }
+
+    #[test]
+    fn keymap_names_resolve() {
+        assert_eq!(name(resolve("qur::GoToSymbol")), Ok("qur::GoToSymbol"));
+        assert_eq!(name(resolve("Go: Go to Symbol in File…")), Ok("qur::GoToSymbol"));
+        assert_eq!(name(resolve("go to symbol in file")), Ok("qur::GoToSymbol"));
+        assert_eq!(name(resolve("Expand Selection")), Ok("qur::ExpandSelection"));
+        assert_eq!(name(resolve("Selection: Delete Line")), Ok("editor::DeleteLine"));
+        let e = resolve("Line Start").unwrap_err();
+        assert!(e.contains("editor::LineStart") && e.contains("terminal::SendLineStart"), "{e}");
+        assert!(resolve("No Such Command").unwrap_err().contains("no command"));
+    }
+
+    #[test]
+    fn nothing_left_greyed_out() {
+        for c in COMMANDS {
+            assert!(c.ready(), "{} is still 'coming in a later version'", c.title);
+        }
+        for a in ["qur::GoToSymbol", "qur::ExpandSelection", "qur::ShrinkSelection", "qur::OpenKeymap"] {
+            let c = &COMMANDS[resolve(a).unwrap()];
+            assert!(c.ready());
+        }
+        assert_eq!(COMMANDS[resolve("qur::ExpandSelection").unwrap()].keys(), "ctrl-shift-cmd-right");
+        assert_eq!(COMMANDS[resolve("qur::ShrinkSelection").unwrap()].keys(), "ctrl-shift-cmd-left");
+    }
 }

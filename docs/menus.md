@@ -18,7 +18,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - ---
 - Settings ▸
   - Open config.toml `Cmd+,`
-  - Open keymap.toml
+  - Open keymap.toml (created with examples when missing)
   - Agents (agents.toml)
 - ---
 - Hide Qur `Cmd+H` · Hide Others `Cmd+Opt+H` · Show All
@@ -56,7 +56,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - (macOS adds Start Dictation / Emoji & Symbols)
 
 ## Selection
-- Select Line `Cmd+L` · Expand / Shrink Selection (tree-sitter, M1+)
+- Select Line `Cmd+L` · Expand Selection `Ctrl+Shift+Cmd+→` · Shrink Selection `Ctrl+Shift+Cmd+←` (tree-sitter nodes)
 - ---
 - Copy Line Up/Down · Move Line Up/Down · Delete Line `Cmd+Shift+K`
 - Insert Line Below/Above

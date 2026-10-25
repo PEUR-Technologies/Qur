@@ -35,7 +35,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+Shift+E` | Reveal in Files (opens the Files dropdown) | S |
 | `Ctrl+G` | Go to Line… | S |
 | `Ctrl+-` / `Ctrl+Shift+-` | Navigate Back / Forward | M1 |
-| `Cmd+Shift+O` | Go to Symbol in File (tree-sitter outline, no LSP) | M1+ |
+| `Cmd+Shift+O` | Go to Symbol in File (tree-sitter outline, no LSP; arrows preview, Esc goes back) | ✅ |
 
 ## Editing
 
@@ -46,7 +46,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+A` | Select All | S |
 | `Shift+arrows` | Extend selection | S |
 | `Opt+Left/Right` | Word left/right (`Shift` extends) | S |
-| `Cmd+Left/Right` | Line start (smart home) / end (`Shift` extends) | S |
+| `Cmd+Left/Right`, `Home`/`End` | Line start (smart home) / end (`Shift` extends); with soft wrap, the visual row's start / end first, pressed again the line's | S |
 | `Cmd+Up/Down` | File start / end (`Shift` extends) | S |
 | `PageUp/PageDown`, `Fn+arrows` | Page up/down | S |
 | `Opt+Backspace` / `Opt+Delete` | Delete word left / right | S |
@@ -60,6 +60,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+/` | Toggle line comment (per language) | S |
 | `Shift+Opt+A` | Toggle block comment | M1 |
 | `Cmd+L` | Select line (repeat to extend) | S |
+| `Ctrl+Shift+Cmd+Right` / `Ctrl+Shift+Cmd+Left` | Expand / Shrink Selection by tree-sitter node (every cursor; shrink retraces the expands) | ✅ |
 | `Cmd+D` | Add selection to next match (multi-cursor) | M1 |
 | `Cmd+Shift+L` | Select all matches | M1 |
 | `Opt+Click` / `Cmd+Opt+Up/Down` | Add cursor | M1 |
@@ -155,7 +156,7 @@ Normal/insert/visual basics: `hjkl wbe 0$ gg G`, `i a o O A I`, `x dd yy p P u C
 
 ## Rules
 
-- One table of bindings in `qur_config` (TOML, embedded default). Users may override in `~/Library/Application Support/Qur/keymap.toml`; no keymap UI.
+- One table of bindings (`qur_app/src/commands.rs`). Users override in `~/Library/Application Support/Qur/keymap.toml` (`[bindings]`, command name = keys; format in `docs/guide.md`, "Keymap"); no keymap UI. Bad entries are skipped and reported.
 - Chords (`Cmd+K …`) time out after 1.5 s and show the pending chord in the status area.
 - Shortcuts are routed by context (editor, terminal, prompt, sidebar, palette), like VS Code `when` clauses, but simpler: the focused element's context, then the window.
 - The macOS menu bar is native (File, Edit, Selection, View, Window, Help) and lists the shortcuts. Edit menu items use the standard selectors so system features (Emoji & Symbols, Dictation, AutoFill) work.
