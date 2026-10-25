@@ -196,6 +196,8 @@ pub struct Workspace {
     slider: Rc<Cell<Bounds<Pixels>>>,
     sliding: bool,
     title_drag: bool,
+    /// Full screen hides the traffic lights, so the title bar starts at the edge.
+    fullscreen: bool,
     first_frame: bool,
     _subs: Vec<Subscription>,
 }
@@ -303,6 +305,7 @@ impl Workspace {
             slider: Rc::new(Cell::new(Bounds::default())),
             sliding: false,
             title_drag: false,
+            fullscreen: false,
             first_frame: false,
             _subs: subs,
         };
@@ -460,6 +463,7 @@ impl Workspace {
             recent: qur_config::State::load().recent_projects,
             merging: self.merge.is_some(),
             vim: self.config.keys.vim,
+            keep_awake: self.config.ui.keep_awake,
         }
     }
 
@@ -3195,6 +3199,15 @@ impl Workspace {
         self.flash(if on { "Vim mode on (Esc for normal mode)" } else { "Vim mode off" }, cx);
     }
 
+    /// View > Show Keep Awake in Sidebar, saved as `[ui] keep_awake`.
+    fn toggle_keep_awake(&mut self, _: &qur::ShowKeepAwake, window: &mut Window, cx: &mut Context<Self>) {
+        let on = !self.config.ui.keep_awake;
+        self.write_setting(false, "ui.keep_awake", Some(Value::Bool(on)), cx);
+        self.reload_settings(window, cx);
+        self.broadcast_reload(cx);
+        self.sync_menus(cx);
+    }
+
     fn open_setup(&mut self, _: &qur::CheckSetup, window: &mut Window, cx: &mut Context<Self>) {
         self.close_overlays(window, cx);
         self.prev_focus = window.focused(cx);
@@ -3504,6 +3517,11 @@ impl Workspace {
         }
     }
 
+    /// Where title bar content starts: past the traffic lights, or near the edge in full screen.
+    fn title_lead(&self, look: &Look) -> Pixels {
+        if self.fullscreen { look.z(8.) } else { px(TRAFFIC_LIGHTS_W) }
+    }
+
     fn title_bar(&self, look: &Look, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = &look.theme.ui;
         let session = self.session_title(cx);
@@ -3517,7 +3535,7 @@ impl Workspace {
             .flex()
             .items_center()
             .gap(look.z(8.))
-            .pl(px(TRAFFIC_LIGHTS_W))
+            .pl(self.title_lead(look))
             .pr(look.z(12.))
             .bg(look.bg(ui.top_bar_bg))
             .border_b_1()
@@ -3796,7 +3814,25 @@ impl Workspace {
                 let sel = self.selected == Some(Selected::Shell(tid));
                 Some(
                     self.session_row(format!("sh-{tid}").into(), None, s.label.clone(), String::new(), if s.is_busy() { "~" } else { "" }, sel, look)
+                        .group("shell-row")
                         .on_click(cx.listener(move |this, _, window, cx| this.select(Some(Selected::Shell(tid)), window, cx)))
+                        // Close the terminal (and its splits), shown on hover.
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("sh-close-{tid}")))
+                                .flex_none()
+                                .px(look.z(4.))
+                                .rounded(look.z(3.))
+                                .invisible()
+                                .group_hover("shell-row", |d| d.visible())
+                                .hover(|d| d.bg(look.c(ui.hover_bg)))
+                                .text_color(look.c(ui.text_muted))
+                                .child("✕")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.terms.update(cx, |p, cx| p.close_row(tid, cx));
+                                })),
+                        )
                         .into_any_element(),
                 )
             })
@@ -3823,8 +3859,8 @@ impl Workspace {
             .bg(look.bg(ui.sidebar_bg))
             .border_r_1()
             .border_color(look.c(ui.border))
-            .child({
-                // Keep Awake toggle, above the agents.
+            .when(self.config.ui.keep_awake, |d| d.child({
+                // Keep Awake toggle, above the agents (View > Show Keep Awake in Sidebar).
                 let on = self.caffeinate.is_some();
                 div()
                     .id("caffeinate")
@@ -3855,7 +3891,7 @@ impl Workspace {
                     )
                     .child(if on { "Keep awake · on" } else { "Keep awake" })
                     .on_click(cx.listener(|this, _, window, cx| this.caffeinate(&qur::Caffeinate, window, cx)))
-            })
+            }))
             // Like TERMINALS: the section only appears once there's something in it
             // (Cmd+Shift+N or File > New Agent Task starts one).
             .when(!empty_agents, |d| {
@@ -4244,7 +4280,7 @@ impl Workspace {
         div()
             .absolute()
             .top(look.z(TITLEBAR_H + 4.))
-            .left(px(TRAFFIC_LIGHTS_W))
+            .left(self.title_lead(look))
             .occlude()
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.sliding = false))
             .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, window, cx| {
@@ -4393,6 +4429,7 @@ const CONFIG_TEMPLATE: &str = r#"# Qur settings. Saved changes apply right away.
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.fullscreen = window.is_fullscreen();
         let look = Look::of(window, cx);
         let ui = look.theme.ui.clone();
         if !self.first_frame {
@@ -4526,6 +4563,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::rename_agent))
             .on_action(cx.listener(Self::open_setup))
             .on_action(cx.listener(Self::toggle_vim))
+            .on_action(cx.listener(Self::toggle_keep_awake))
             .on_action(cx.listener(Self::run_doctor))
             .on_action(cx.listener(Self::keyboard_shortcuts))
             .on_action(cx.listener(Self::show_logs))
