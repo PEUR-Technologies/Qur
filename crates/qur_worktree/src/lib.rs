@@ -113,8 +113,10 @@ pub fn copy_includes(root: &Path, worktree: &Path) -> Result<Vec<PathBuf>, Strin
     let Ok(list) = std::fs::read_to_string(root.join(".worktreeinclude")) else { return Ok(Vec::new()) };
     let mut copied = Vec::new();
     for line in list.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
-        let pat = line.trim_start_matches("./").trim_end_matches('/');
-        if pat.split('/').any(|c| c == "..") {
+        // A leading `/` anchors to the repo root, as in .gitignore (it must never be
+        // read as an absolute path).
+        let pat = line.trim_start_matches("./").trim_start_matches('/').trim_end_matches('/');
+        if pat.is_empty() || pat.split('/').any(|c| c == "..") {
             continue; // never reach outside the repo
         }
         for rel in expand(root, pat) {
@@ -349,6 +351,113 @@ mod tests {
         assert!(!ok && out.contains("check stopped"), "{out}");
         assert!(t0.elapsed() < std::time::Duration::from_secs(5), "timeout kills the group: {:?}", t0.elapsed());
         remove(&r, &c.path, &c.branch, true).unwrap();
+    }
+
+    fn commit_all(r: &Path, msg: &str) {
+        git(r, &["add", "-A"]).unwrap();
+        git(r, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", msg]).unwrap();
+    }
+
+    #[test]
+    fn created_from_head_with_the_repos_files_only() {
+        let r = repo("head");
+        std::fs::write(r.join("b.txt"), "b\n").unwrap();
+        commit_all(&r, "second");
+        let head = git(&r, &["rev-parse", "HEAD"]).unwrap();
+        // Uncommitted and ignored work in the main checkout stays there.
+        std::fs::write(r.join("a.txt"), "edited\n").unwrap();
+        std::fs::write(r.join("scratch.txt"), "untracked\n").unwrap();
+        let dir = r.with_extension("wt");
+        let c = create(&r, &dir, "claude", "head").unwrap();
+        assert_eq!(c.base, head);
+        assert_eq!(git(&c.path, &["rev-parse", "HEAD"]).unwrap(), head);
+        assert_eq!(git(&c.path, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(), "qur/claude/head");
+        assert_eq!(std::fs::read_to_string(c.path.join("a.txt")).unwrap(), "a\n");
+        assert!(c.path.join("b.txt").exists() && !c.path.join("scratch.txt").exists());
+        assert!(!is_dirty(&c.path));
+        assert!(is_dirty(&r), "the main checkout keeps its own changes");
+        // A leftover folder (not a branch) also makes the slug taken.
+        std::fs::create_dir_all(dir.join("taken")).unwrap();
+        assert_eq!(create(&r, &dir, "claude", "taken").unwrap().slug, "taken-2");
+        // ...and so does a leftover branch without a folder.
+        git(&r, &["branch", "qur/codex/br"]).unwrap();
+        assert_eq!(create(&r, &dir, "codex", "br").unwrap().branch, "qur/codex/br-2");
+        // The same slug under another agent is a different branch.
+        assert_eq!(create(&r, &dir, "gemini", "only").unwrap().branch, "qur/gemini/only");
+    }
+
+    #[test]
+    fn remove_refuses_the_project_folder_under_any_name() {
+        let r = repo("refuse");
+        let alias = r.with_extension("alias");
+        let _ = std::fs::remove_file(&alias);
+        std::os::unix::fs::symlink(&r, &alias).unwrap();
+        for p in [r.clone(), r.join("."), alias.clone(), r.canonicalize().unwrap()] {
+            let e = remove(&r, &p, "main", true).unwrap_err();
+            assert!(e.contains("project folder"), "{p:?}: {e}");
+        }
+        assert!(r.join(".git").exists() && r.join("a.txt").exists());
+        assert!(git(&r, &["rev-parse", "--verify", "main"]).is_ok(), "branch kept");
+    }
+
+    #[test]
+    fn remove_after_the_folder_is_gone_and_unmerged_work() {
+        let r = repo("gone");
+        let dir = r.with_extension("wt");
+        // The worktree folder was deleted by hand: git forgets it, the branch goes.
+        let a = create(&r, &dir, "claude", "gone").unwrap();
+        std::fs::remove_dir_all(&a.path).unwrap();
+        remove(&r, &a.path, &a.branch, true).unwrap();
+        assert_eq!(git(&r, &["worktree", "list"]).unwrap().lines().count(), 1, "pruned");
+        assert!(git(&r, &["branch", "--list", &a.branch]).unwrap().is_empty());
+        // Committed but unmerged work: only a forced remove deletes the branch.
+        let b = create(&r, &dir, "claude", "work").unwrap();
+        std::fs::write(b.path.join("w.txt"), "w\n").unwrap();
+        commit_all(&b.path, "agent work");
+        assert!(remove(&r, &b.path, &b.branch, false).is_err(), "branch -d refuses unmerged work");
+        assert!(git(&r, &["rev-parse", "--verify", &b.branch]).is_ok());
+        remove(&r, &b.path, &b.branch, true).unwrap();
+        assert!(git(&r, &["rev-parse", "--verify", &b.branch]).is_err());
+        assert!(!b.path.exists());
+    }
+
+    #[test]
+    fn worktreeinclude_edge_cases() {
+        let r = repo("inc2");
+        let w = |p: &str, s: &str| {
+            let f = r.join(p);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, s).unwrap();
+        };
+        w(".gitignore", "*.local\n.env*\nconfig/secrets/\n");
+        w(".worktreeinclude", "  /.env.local  \n./config/secrets/\n*.local\nconfig/*/key.pem\n/\n\n# comment\n");
+        w(".env.local", "main env\n");
+        w("db.local", "db\n");
+        w("config/secrets/key.pem", "k1\n");
+        w("config/secrets/nested/deep.txt", "d\n");
+        w("config/prod/key.pem", "k2\n");
+        std::os::unix::fs::symlink("db.local", r.join("link.local")).unwrap();
+        commit_all(&r, "inc");
+        // No .worktreeinclude: nothing to do.
+        let none = repo("inc2-none");
+        let c0 = create(&none, &none.with_extension("wt"), "claude", "x").unwrap();
+        assert!(copy_includes(&none, &c0.path).unwrap().is_empty());
+
+        let c = create(&r, &r.with_extension("wt"), "claude", "inc2").unwrap();
+        // A file the worktree already has is never overwritten.
+        std::fs::write(c.path.join("db.local"), "worktree's own\n").unwrap();
+        let mut copied: Vec<String> = copy_includes(&r, &c.path).unwrap().iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        copied.sort();
+        // config/prod/key.pem is tracked (already in the worktree); config/secrets/key.pem
+        // came with its folder; `/` alone is skipped.
+        assert_eq!(copied, [".env.local", "config/secrets", "link.local"]);
+        assert_eq!(std::fs::read_to_string(c.path.join(".env.local")).unwrap(), "main env\n", "leading / is the repo root");
+        assert_eq!(std::fs::read_to_string(c.path.join("db.local")).unwrap(), "worktree's own\n");
+        assert_eq!(std::fs::read_to_string(c.path.join("config/secrets/nested/deep.txt")).unwrap(), "d\n", "folders copy whole");
+        assert!(std::fs::symlink_metadata(c.path.join("link.local")).unwrap().file_type().is_symlink(), "links stay links");
+        // Copies are independent of the main checkout (copy-on-write, not hard links).
+        std::fs::write(c.path.join(".env.local"), "changed in worktree\n").unwrap();
+        assert_eq!(std::fs::read_to_string(r.join(".env.local")).unwrap(), "main env\n");
     }
 
     #[test]

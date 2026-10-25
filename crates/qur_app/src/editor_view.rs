@@ -1009,7 +1009,13 @@ impl EditorView {
 
     pub fn save(&mut self, cx: &mut Context<Self>) {
         match self.model.save() {
-            Ok(()) => cx.emit(EditorEvent::Changed),
+            Ok(()) => {
+                // Your save, not an agent's edit: the heatmap leaves it out.
+                if let Some(p) = self.model.path() {
+                    qur_heat::own_writes().lock().unwrap_or_else(|e| e.into_inner()).note(p, std::time::Instant::now());
+                }
+                cx.emit(EditorEvent::Changed)
+            }
             Err(e) => cx.emit(EditorEvent::Error(format!("Couldn't save {}: {e}", self.title()))),
         }
         cx.notify();
