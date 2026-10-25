@@ -89,7 +89,7 @@ pub enum AgentEvent {
     OpenFile(PathBuf, Option<u32>),
     /// `@` typed in the prompt: open the mention picker for this worktree.
     MentionRequested,
-    /// `/` typed: offer this agent's slash commands.
+    /// `/` typed: offer this agent's settings and slash commands.
     SlashRequested,
     /// A subagent started, changed state or did something (sidebar).
     Subagents,
@@ -99,8 +99,6 @@ pub enum AgentEvent {
     Discard,
     /// A turn ended after changing files: run the project's checks.
     TurnChangedFiles,
-    /// A setting chip (mode, model…) was clicked: offer its values.
-    PickSetting(String),
     /// Sign-in: run this login command in a terminal in the task's worktree.
     RunInTerminal { label: String, command: String },
 }
@@ -2119,32 +2117,6 @@ impl AgentTask {
             .border_color(look.c(ui.border_strong))
             .bg(look.c(ui.editor_bg))
             .child(self.prompt.clone());
-        // Just above the field, outside it (inside, they squeezed it): the
-        // session's settings on the left (click to choose; Shift+Tab cycles
-        // the mode), queue and Esc hints on the right while working.
-        let chips: Vec<_> = self
-            .settings
-            .iter()
-            .map(|o| {
-                let id = o.id.clone();
-                div()
-                    .id(SharedString::from(format!("setting-{}", o.id)))
-                    .flex_none()
-                    .px(look.z(6.))
-                    .py(look.z(1.))
-                    .rounded(look.z(4.))
-                    .cursor_pointer()
-                    .text_color(look.c(if o.is_mode() && o.current != o.values.first().map(|v| v.value.clone()).unwrap_or_default() { self.accent } else { ui.text_secondary }))
-                    .hover(|d| d.bg(look.c(ui.hover_bg)))
-                    // Mode and model read on their own; others need their name
-                    // ("Effort: high", "Fast: off").
-                    .child(match o.category.as_deref() {
-                        Some("mode" | "model") => format!("{} ▾", o.current_name()),
-                        _ => format!("{}: {} ▾", o.name, o.current_name()),
-                    })
-                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(AgentEvent::PickSetting(id.clone()))))
-            })
-            .collect();
         let busy = working || !self.pending.is_empty();
         // "24k / 1M · $0.31": context used of the window (warning colour
         // past 80 %, as Zed does), and the session's cost.
@@ -2154,20 +2126,19 @@ impl AgentTask {
             let hot = used as f64 >= size as f64 * 0.8;
             div().flex_none().mr(look.z(6.)).when(hot, |d| d.text_color(look.c(ui.warning))).child(text)
         });
-        let hints = (busy || !chips.is_empty() || usage.is_some()).then(|| {
+        // Just above the field, on the right: usage, then queue and Esc
+        // hints while working. Settings are in the `/` menu, not here.
+        let hints = (busy || usage.is_some()).then(|| {
             div()
                 .flex_none()
                 .mx(look.z(12.))
                 .mb(look.z(3.))
                 .flex()
-                // Codex has three settings (mode, model, effort): wrap, don't clip.
-                .flex_wrap()
+                .justify_end()
                 .items_center()
                 .gap(look.z(2.))
                 .text_size(look.text(0.))
                 .text_color(look.c(ui.text_muted))
-                .children(chips)
-                .child(div().flex_1())
                 .children(usage)
                 .when(!self.pending.is_empty(), |d| d.child(div().flex_none().mr(look.z(6.)).text_color(look.c(ui.text_secondary)).child(format!("{} queued", self.pending.len()))))
                 .when(working, |d| d.child(div().min_w(px(0.)).mr(look.z(2.)).truncate().child("esc to stop")))
