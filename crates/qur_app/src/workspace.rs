@@ -3796,7 +3796,25 @@ impl Workspace {
                 let sel = self.selected == Some(Selected::Shell(tid));
                 Some(
                     self.session_row(format!("sh-{tid}").into(), None, s.label.clone(), String::new(), if s.is_busy() { "~" } else { "" }, sel, look)
+                        .group("shell-row")
                         .on_click(cx.listener(move |this, _, window, cx| this.select(Some(Selected::Shell(tid)), window, cx)))
+                        // Close the terminal (and its splits), shown on hover.
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("sh-close-{tid}")))
+                                .flex_none()
+                                .px(look.z(4.))
+                                .rounded(look.z(3.))
+                                .invisible()
+                                .group_hover("shell-row", |d| d.visible())
+                                .hover(|d| d.bg(look.c(ui.hover_bg)))
+                                .text_color(look.c(ui.text_muted))
+                                .child("✕")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.terms.update(cx, |p, cx| p.close_row(tid, cx));
+                                })),
+                        )
                         .into_any_element(),
                 )
             })
