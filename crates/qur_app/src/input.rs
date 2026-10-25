@@ -1,6 +1,7 @@
 //! A small single-line text field (find, replace, go to line, pickers).
 
 use std::ops::Range;
+use std::time::Instant;
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, ElementId, ElementInputHandler, Entity, EntityInputHandler,
@@ -10,6 +11,7 @@ use gpui::{
 
 use crate::commands::{edit, input};
 use crate::look::Look;
+use crate::undo::{History, Kind, insert_kind};
 
 pub enum InputEvent {
     Changed,
@@ -28,6 +30,8 @@ pub struct TextInput {
     caret: usize,
     select_all: bool,
     placeholder: SharedString,
+    /// Text and caret before each edit.
+    history: History<(String, usize)>,
 }
 
 impl EventEmitter<InputEvent> for TextInput {}
@@ -38,11 +42,21 @@ fn is_word(c: char) -> bool {
 
 impl TextInput {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
-        TextInput { focus: cx.focus_handle(), text: String::new(), caret: 0, select_all: false, placeholder: placeholder.into() }
+        TextInput {
+            focus: cx.focus_handle(),
+            text: String::new(),
+            caret: 0,
+            select_all: false,
+            placeholder: placeholder.into(),
+            history: History::default(),
+        }
     }
 
     /// Replace the text and select it all (typing replaces it).
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.text != text {
+            self.record(Kind::Other, text.len());
+        }
         self.text = text.to_string();
         self.caret = self.text.len();
         self.select_all = !text.is_empty();
@@ -50,7 +64,26 @@ impl TextInput {
         cx.notify();
     }
 
+    /// Note the state before an edit that leaves the caret at `to`, for undo.
+    fn record(&mut self, kind: Kind, to: usize) {
+        let before = (self.text.clone(), self.caret);
+        self.history.record(before, kind, self.caret, to, Instant::now());
+    }
+
+    fn restore(&mut self, (text, caret): (String, usize), cx: &mut Context<Self>) {
+        self.text = text;
+        self.caret = caret.min(self.text.len());
+        self.select_all = false;
+        cx.emit(InputEvent::Changed);
+        cx.notify();
+    }
+
     fn replace(&mut self, new: &str, cx: &mut Context<Self>) {
+        if new.is_empty() && (self.text.is_empty() || !self.select_all) {
+            return;
+        }
+        let to = if self.select_all { new.len() } else { self.caret + new.len() };
+        self.record(insert_kind(new, self.select_all), to);
         if self.select_all {
             self.text.clear();
             self.caret = 0;
@@ -69,6 +102,7 @@ impl TextInput {
         if r.is_empty() {
             return;
         }
+        self.record(Kind::Erase, r.start);
         self.text.replace_range(r.clone(), "");
         self.caret = r.start;
         cx.emit(InputEvent::Changed);
@@ -97,6 +131,7 @@ impl TextInput {
     }
 
     fn mv(&mut self, to: usize, cx: &mut Context<Self>) {
+        self.history.seal();
         self.select_all = false;
         self.caret = to;
         cx.notify();
@@ -183,9 +218,19 @@ impl TextInput {
             self.replace(&line, cx);
         }
     }
-    // Undo/Redo in a one-line field: swallow so they don't reach the editor.
-    fn undo(&mut self, _: &edit::Undo, _: &mut Window, _: &mut Context<Self>) {}
-    fn redo(&mut self, _: &edit::Redo, _: &mut Window, _: &mut Context<Self>) {}
+    // Handled here (even with nothing to undo) so they don't reach the editor.
+    fn undo(&mut self, _: &edit::Undo, _: &mut Window, cx: &mut Context<Self>) {
+        let now = (self.text.clone(), self.caret);
+        if let Some(s) = self.history.undo(now) {
+            self.restore(s, cx);
+        }
+    }
+    fn redo(&mut self, _: &edit::Redo, _: &mut Window, cx: &mut Context<Self>) {
+        let now = (self.text.clone(), self.caret);
+        if let Some(s) = self.history.redo(now) {
+            self.restore(s, cx);
+        }
+    }
 }
 
 impl Focusable for TextInput {

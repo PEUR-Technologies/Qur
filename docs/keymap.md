@@ -123,7 +123,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `@` / `/` in the prompt | Mention a file / pick an agent slash command | M2 ✅ |
 | `Cmd+Y` / `Cmd+Opt+Y` / `Cmd+Opt+Z` | Permission: Allow Once / Allow for This Task / Deny (Zed's keys), for the selected agent's request, else the first agent waiting; each works only when the agent offers that kind of answer, and its button shows the key. Not while the code modal, a terminal or a picker has focus (Agent menu too) | ✅ |
 | `Up` (empty prompt) | Pull the last queued message back into the prompt to edit it (each queued message also has Send now / Edit / ✕) | ✅ |
-| `Cmd+Z` / `Shift+Cmd+Z` (prompt) | Undo / redo in the prompt (typing groups into one step) | ✅ |
+| `Cmd+Z` / `Shift+Cmd+Z` (prompt, text fields) | Undo / redo in the prompt and the one-line fields (find, replace, go to line, pickers, address bar); typing groups into one step until a pause or a caret move | ✅ |
 | `Shift+Tab` (chat agent) | Next mode (Default / Accept Edits / Plan…), from the agent's session settings; click the Mode or Model chip above the prompt to choose | ✅ |
 | Agent menu | Discard Task…, Reveal Worktree in Finder, Open Task Worktree in Terminal | M2 ✅ |
 | `Cmd+K Cmd+L` | Cycle peek layout | M3 ✅ |
