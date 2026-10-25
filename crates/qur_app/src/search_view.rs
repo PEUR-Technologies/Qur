@@ -261,7 +261,7 @@ impl SearchPanel {
                     .filter(|r| r.start >= indent && r.end > r.start)
                     .map(|r| (r.start - indent..r.end - indent, hl))
                     .collect();
-                let col = l.ranges.first().map(|r| l.text[..r.start].chars().count()).unwrap_or(0);
+                let col = l.col;
                 let (path, line) = (self.root.join(&f.path), l.line);
                 div()
                     .id(("sl", ix))

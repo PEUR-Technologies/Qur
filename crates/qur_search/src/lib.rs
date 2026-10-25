@@ -37,8 +37,10 @@ pub struct LineMatch {
     pub line: usize,
     /// The line's text (cut at `MAX_LINE` chars).
     pub text: String,
-    /// Byte ranges of the matches within `text`.
+    /// Byte ranges of the matches within `text` (empty for a match past the cut).
     pub ranges: Vec<Range<usize>>,
+    /// 0-based column (in chars) of the line's first match, also when it lies past the cut.
+    pub col: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -122,10 +124,14 @@ fn search_file(path: &Path, re: &Regex) -> Option<Vec<LineMatch>> {
         let r = (m.start() - ls).min(cut)..(m.end() - ls).min(le - ls).min(cut);
         match out.last_mut() {
             Some(l) if l.line == line => l.ranges.push(r),
-            _ => out.push(LineMatch { line, text: full[..cut].to_string(), ranges: vec![r] }),
+            _ => {
+                let col = text[ls..m.start()].chars().count();
+                out.push(LineMatch { line, text: full[..cut].to_string(), ranges: vec![r], col })
+            }
         }
     }
-    out.retain(|l| l.ranges.iter().any(|r| r.start < r.end));
+    // A match past the cut (a long minified line) still counts and still opens at its
+    // column; it just has no highlight in the shortened text.
     (!out.is_empty()).then_some(out)
 }
 
@@ -140,25 +146,46 @@ fn floor_char(s: &str, max: usize) -> usize {
 /// Replace every match in `files` (relative to `root`; normally the files of
 /// the last search). `replacement` may use `$1` / `${name}` in regex mode.
 /// Returns (files changed, replacements).
+/// Empty matches (`x*`, `^`) are left alone, as search never shows them. Each file is
+/// rewritten atomically next to itself, keeping its permissions; a symlink keeps
+/// pointing at its (rewritten) target. Files gone or no longer text are skipped.
 pub fn replace_all(root: &Path, query: &Query, replacement: &str, files: &[PathBuf]) -> Result<(usize, usize), String> {
     let re = query.compile()?;
-    let rep = if query.regex { replacement.to_string() } else { replacement.replace('$', "$$") };
     let (mut changed, mut total) = (0, 0);
     for rel in files {
         let path = root.join(rel);
         let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        let n = re.find_iter(&text).filter(|m| m.start() != m.end()).count();
-        if n == 0 {
+        let mut n = 0;
+        let new = re.replace_all(&text, |caps: &regex::Captures| {
+            let m = caps.get(0).expect("group 0");
+            if m.start() == m.end() {
+                return String::new();
+            }
+            n += 1;
+            if query.regex {
+                let mut out = String::new();
+                caps.expand(replacement, &mut out);
+                out
+            } else {
+                replacement.to_string()
+            }
+        });
+        if n == 0 || new == text {
             continue;
         }
-        let new = re.replace_all(&text, rep.as_str());
-        if new != text {
-            let tmp = path.with_extension("qur-replace.tmp");
-            std::fs::write(&tmp, new.as_bytes()).map_err(|e| format!("{}: {e}", rel.display()))?;
-            std::fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", rel.display()))?;
-            changed += 1;
-            total += n;
+        let err = |e: std::io::Error| format!("{}: {e}", rel.display());
+        let target = std::fs::canonicalize(&path).map_err(err)?;
+        let perms = std::fs::metadata(&target).map_err(err)?.permissions();
+        // `.qur-replace.tmp` is a name the file watcher knows to skip.
+        let tmp = target.with_extension("qur-replace.tmp");
+        std::fs::write(&tmp, new.as_bytes()).map_err(err)?;
+        let _ = std::fs::set_permissions(&tmp, perms);
+        if let Err(e) = std::fs::rename(&tmp, &target) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err(e));
         }
+        changed += 1;
+        total += n;
     }
     Ok((changed, total))
 }
@@ -222,6 +249,96 @@ mod tests {
         let rx = Query { regex: true, ..q(r"b\$(z)") };
         replace_all(&d, &rx, "[$1]", &files).unwrap();
         assert_eq!(std::fs::read_to_string(d.join("f0.txt")).unwrap(), "[z] [z]\nbar\n");
+    }
+
+    fn read(d: &Path, f: &str) -> String {
+        std::fs::read_to_string(d.join(f)).unwrap()
+    }
+
+    #[test]
+    fn replace_skips_empty_matches_and_counts_real_ones() {
+        let d = tmp("empty");
+        std::fs::write(d.join("a.txt"), "xaaz\nb\n").unwrap();
+        let files = vec![PathBuf::from("a.txt")];
+        // `a*` also matches the empty string between every character; only "aa" counts.
+        let rx = Query { regex: true, ..q("a*") };
+        assert_eq!(replace_all(&d, &rx, "<$0>", &files).unwrap(), (1, 1));
+        assert_eq!(read(&d, "a.txt"), "x<aa>z\nb\n");
+        // Nothing but empty matches: the file is untouched.
+        assert_eq!(replace_all(&d, &Query { regex: true, ..q("^") }, "#", &files).unwrap(), (0, 0));
+        assert_eq!(read(&d, "a.txt"), "x<aa>z\nb\n");
+        // Replacing a match with itself changes nothing and isn't counted.
+        assert_eq!(replace_all(&d, &q("b"), "b", &files).unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn replace_options_line_endings_and_unicode() {
+        let d = tmp("opts");
+        std::fs::write(d.join("w.txt"), "cat concat Cat\r\nCAT\r\n").unwrap();
+        std::fs::write(d.join("u.txt"), "Straße STRASSE ÉCOLE école\n").unwrap();
+        let files = vec![PathBuf::from("w.txt"), PathBuf::from("u.txt")];
+        // Whole word, case-insensitive (the default): "concat" stays; CRLF stays.
+        let ww = Query { whole_word: true, ..q("cat") };
+        assert_eq!(replace_all(&d, &ww, "dog", &files).unwrap(), (1, 3));
+        assert_eq!(read(&d, "w.txt"), "dog concat dog\r\ndog\r\n");
+        // Case-insensitive matching is Unicode-aware.
+        assert_eq!(replace_all(&d, &q("école"), "school", &files).unwrap(), (1, 2));
+        assert_eq!(read(&d, "u.txt"), "Straße STRASSE school school\n");
+        // Case-sensitive leaves other cases alone.
+        let cs = Query { case_sensitive: true, ..q("dog") };
+        std::fs::write(d.join("w.txt"), "dog Dog\n").unwrap();
+        assert_eq!(replace_all(&d, &cs, "cat", &files).unwrap(), (1, 1));
+        assert_eq!(read(&d, "w.txt"), "cat Dog\n");
+        // Named groups in regex mode.
+        let rx = Query { regex: true, ..q(r"(?P<w>\w+) Dog") };
+        replace_all(&d, &rx, "Dog ${w}", &files).unwrap();
+        assert_eq!(read(&d, "w.txt"), "Dog cat\n");
+        // A bad regex is an error, and nothing is written.
+        assert!(replace_all(&d, &Query { regex: true, ..q("(") }, "x", &files).is_err());
+    }
+
+    #[test]
+    fn replace_keeps_permissions_and_symlinks_and_skips_missing_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmp("perm");
+        std::fs::write(d.join("run.sh"), "echo old\n").unwrap();
+        std::fs::set_permissions(d.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(d.join("real.txt"), "old\n").unwrap();
+        std::os::unix::fs::symlink("real.txt", d.join("link.txt")).unwrap();
+        std::fs::write(d.join("blob.bin"), [0xff, 0xfe, b'o', b'l', b'd']).unwrap();
+        let files: Vec<PathBuf> = ["run.sh", "link.txt", "gone.txt", "blob.bin"].iter().map(PathBuf::from).collect();
+        assert_eq!(replace_all(&d, &q("old"), "new", &files).unwrap(), (2, 2));
+        assert_eq!(read(&d, "run.sh"), "echo new\n");
+        let mode = std::fs::metadata(d.join("run.sh")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "the executable bit survives");
+        assert!(std::fs::symlink_metadata(d.join("link.txt")).unwrap().file_type().is_symlink(), "still a link");
+        assert_eq!(read(&d, "real.txt"), "new\n");
+        assert_eq!(std::fs::read(d.join("blob.bin")).unwrap()[2..], *b"old", "not UTF-8: skipped");
+        let left: Vec<_> = std::fs::read_dir(&d).unwrap().filter_map(Result::ok).map(|e| e.file_name()).collect();
+        assert!(!left.iter().any(|n| n.to_string_lossy().ends_with(".tmp")), "no temp files left: {left:?}");
+    }
+
+    #[test]
+    fn search_edge_cases() {
+        let d = tmp("edges");
+        let long = format!("{}needle{}\n", "é".repeat(300), "x".repeat(10));
+        std::fs::write(d.join("long.txt"), &long).unwrap();
+        std::fs::write(d.join("crlf.txt"), "one needle\r\ntwo\r\n").unwrap();
+        std::fs::write(d.join(".hidden"), "needle\n").unwrap();
+        let r = search(&d, &q("needle"), 100, &AtomicBool::new(false)).unwrap();
+        let paths: Vec<String> = r.files.iter().map(|f| f.path.to_string_lossy().into_owned()).collect();
+        assert_eq!(paths, [".hidden", "crlf.txt", "long.txt"], "dotfiles are searched, results sorted");
+        let crlf = &r.files[1].lines[0];
+        assert_eq!(crlf.text, "one needle", "no trailing \\r");
+        // A match past the 400-byte cut is clamped to the cut, on a char boundary.
+        let l = &r.files[2].lines[0];
+        assert!(l.text.len() <= 400 && l.text.is_char_boundary(l.text.len()));
+        assert!(l.ranges.iter().all(|r| r.end <= l.text.len()));
+        assert_eq!((l.col, r.matches), (300, 3), "past the cut: still found, at its column");
+        assert_eq!(crlf.col, 4);
+        // An empty pattern finds nothing; a set cancel flag stops at once.
+        assert_eq!(search(&d, &q(""), 100, &AtomicBool::new(false)).unwrap(), Results::default());
+        assert!(search(&d, &q("needle"), 100, &AtomicBool::new(true)).unwrap().files.is_empty());
     }
 
     /// M6 acceptance: search over the 5,000-file fixture in under 300 ms.
