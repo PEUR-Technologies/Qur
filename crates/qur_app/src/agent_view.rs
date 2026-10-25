@@ -2613,6 +2613,11 @@ impl Render for AgentTask {
     }
 }
 
+/// The first 12 characters of an object id (logs).
+fn short(id: &str) -> &str {
+    &id[..id.len().min(12)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2668,9 +2673,4 @@ mod tests {
         assert_eq!(tail_lines("1\n2\n3", 5), "1\n2\n3");
         assert_eq!(tail_lines("1\n2\n3\n4", 2), "… 2 earlier lines\n3\n4");
     }
-}
-
-/// The first 12 characters of an object id (logs).
-fn short(id: &str) -> &str {
-    &id[..id.len().min(12)]
 }
