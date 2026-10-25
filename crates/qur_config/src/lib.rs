@@ -4,6 +4,7 @@
 //! - `config.toml`: the user's settings. Hand-editable; Qur only rewrites the
 //!   keys it changes and keeps comments and formatting (toml_edit).
 //! - `projects/<project-id>.toml`: per-project overrides (decision 13).
+//! - `projects/<project-id>.state.toml`: machine-managed (open files).
 //! - `state.toml`: machine-managed state (recent projects). Not for editing.
 //!
 //! Nothing is ever written into the user's repo.
@@ -465,6 +466,66 @@ impl State {
     }
 }
 
+// ---------------------------------------------------------------------------
+// projects/<project-id>.state.toml (machine-managed)
+// ---------------------------------------------------------------------------
+
+/// Files restored with the project: more than this only slows opening.
+pub const MAX_OPEN_FILES: usize = 20;
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ProjectState {
+    /// Open files, most recent first.
+    #[serde(rename = "file")]
+    pub files: Vec<OpenFile>,
+    /// The code view was showing the first file.
+    pub code_open: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct OpenFile {
+    pub path: PathBuf,
+    /// Cursor, 0-based.
+    pub line: usize,
+    pub col: usize,
+}
+
+pub fn project_state_path(id: &str) -> PathBuf {
+    qur_home().join("projects").join(format!("{id}.state.toml"))
+}
+
+impl ProjectState {
+    pub fn load(id: &str) -> ProjectState {
+        std::fs::read_to_string(project_state_path(id))
+            .ok()
+            .and_then(|s| toml_edit::de::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, id: &str) -> std::io::Result<()> {
+        write_atomic(&project_state_path(id), self.to_toml().as_bytes())
+    }
+
+    fn to_toml(&self) -> String {
+        let mut doc = toml_edit::DocumentMut::new();
+        if self.code_open {
+            doc["code_open"] = toml_edit::value(true);
+        }
+        let mut files = toml_edit::ArrayOfTables::new();
+        for f in self.files.iter().take(MAX_OPEN_FILES) {
+            let mut t = toml_edit::Table::new();
+            t["path"] = toml_edit::value(f.path.to_string_lossy().as_ref());
+            t["line"] = toml_edit::value(f.line as i64);
+            t["col"] = toml_edit::value(f.col as i64);
+            files.push(t);
+        }
+        doc["file"] = toml_edit::Item::ArrayOfTables(files);
+        format!("# Managed by Qur.\n{doc}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,5 +634,20 @@ mod tests {
         s.touch_project(&a);
         assert_eq!(s.recent_projects.len(), 2);
         assert_eq!(s.recent_projects[0], std::fs::canonicalize(&a).unwrap());
+    }
+
+    #[test]
+    fn project_state_round_trip() {
+        let s = ProjectState {
+            files: vec![
+                OpenFile { path: "/p/src/main.rs".into(), line: 41, col: 3 },
+                OpenFile { path: "/p/README.md".into(), line: 0, col: 0 },
+            ],
+            code_open: true,
+        };
+        let back: ProjectState = toml_edit::de::from_str(&s.to_toml()).unwrap();
+        assert_eq!(back, s);
+        let empty: ProjectState = toml_edit::de::from_str(&ProjectState::default().to_toml()).unwrap();
+        assert_eq!(empty, ProjectState::default());
     }
 }

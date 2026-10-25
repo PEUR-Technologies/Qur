@@ -330,6 +330,8 @@ impl Workspace {
         ws.restore_tasks(window, cx);
         // Something must hold focus, or shortcuts have nowhere to go.
         window.focus(&ws.focus, cx);
+        ws.restore_open_files(window, cx);
+        crate::mark("files_restored");
         // The first-run picker, once (not in scripted runs, unless asked).
         let scripted = ["QUR_DEBUG_ACTIONS", "QUR_DEBUG_TASKS", "QUR_BENCH"].iter().any(|v| std::env::var_os(v).is_some());
         if (first_run && !scripted) || std::env::var_os("QUR_DEBUG_SETUP").is_some() {
@@ -2312,6 +2314,7 @@ impl Workspace {
             let _ = h.join();
         }
         self.save_tasks(cx);
+        self.save_open_files(cx);
     }
 
     // -- the code modal ------------------------------------------------------------
@@ -2324,25 +2327,13 @@ impl Workspace {
         self.record_nav(cx);
         let buf = match self.buffers.find(path, cx) {
             Some(b) => b,
-            None => {
-                let wrap = self.config.editor.soft_wrap;
-                let tab = self.config.editor.tab_width;
-                let vim = self.config.keys.vim;
-                let view = match EditorView::load(path) {
-                    Ok(loaded) => cx.new(|cx| {
-                        let mut v = EditorView::new(loaded, wrap, tab, cx);
-                        v.set_vim(vim, cx);
-                        v
-                    }),
-                    Err(e) => {
-                        self.flash(format!("Couldn't open {}: {e}", path.display()), cx);
-                        return;
-                    }
-                };
-                let sub = cx.subscribe_in(&view, window, Self::on_editor_event);
-                self._subs.push(sub);
-                view
-            }
+            None => match self.load_buffer(path, window, cx) {
+                Ok(b) => b,
+                Err(e) => {
+                    self.flash(format!("Couldn't open {}: {e}", path.display()), cx);
+                    return;
+                }
+            },
         };
         self.buffers.touch(&buf);
         if self.code.is_none() {
@@ -2363,6 +2354,58 @@ impl Workspace {
         window.focus(&f, cx);
         self.sync_menus(cx);
         cx.notify();
+    }
+
+    fn load_buffer(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) -> std::io::Result<Entity<EditorView>> {
+        let (wrap, tab, vim) = (self.config.editor.soft_wrap, self.config.editor.tab_width, self.config.keys.vim);
+        let loaded = EditorView::load(path)?;
+        let view = cx.new(|cx| {
+            let mut v = EditorView::new(loaded, wrap, tab, cx);
+            v.set_vim(vim, cx);
+            v
+        });
+        let sub = cx.subscribe_in(&view, window, Self::on_editor_event);
+        self._subs.push(sub);
+        Ok(view)
+    }
+
+    /// Reopen the files the project had open last time (quietly: a file that's
+    /// gone is skipped). The code view comes back if it was showing. Clones and
+    /// worktrees share a project id, so files outside this root are skipped too.
+    fn restore_open_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let state = qur_config::ProjectState::load(&self.project_id);
+        // Oldest first, so the list ends up most recent first.
+        for f in state.files.iter().take(qur_config::MAX_OPEN_FILES).rev() {
+            if !f.path.starts_with(&self.root) || !f.path.is_file() || self.buffers.find(&f.path, cx).is_some() {
+                continue;
+            }
+            let Ok(buf) = self.load_buffer(&f.path, window, cx) else { continue };
+            let at = Point { line: f.line, col: f.col };
+            buf.update(cx, |b, cx| b.set_cursor(at, cx));
+            self.buffers.touch(&buf);
+        }
+        if state.code_open
+            && let Some(p) = self.buffers.list.first().and_then(|b| b.read(cx).path().map(Path::to_path_buf))
+        {
+            self.open_path(&p, window, cx);
+        }
+    }
+
+    fn save_open_files(&self, cx: &App) {
+        let files = self
+            .buffers
+            .list
+            .iter()
+            .filter_map(|b| {
+                let b = b.read(cx);
+                let at = b.cursor();
+                b.path().map(|p| qur_config::OpenFile { path: p.to_path_buf(), line: at.line, col: at.col })
+            })
+            .collect();
+        let state = qur_config::ProjectState { files, code_open: self.code.is_some() };
+        if let Err(e) = state.save(&self.project_id) {
+            crate::log(&format!("saving open files: {e}"));
+        }
     }
 
     fn close_code(&mut self, window: &mut Window, cx: &mut Context<Self>) {
