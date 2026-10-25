@@ -118,6 +118,9 @@ pub struct Current {
     /// Window gaps (`[ui] gaps`) and their size (`[ui] gap`).
     pub gaps: bool,
     pub gap: f32,
+    /// `[ui] sidebar` ("show", "auto", "hidden") and `sidebar_side`.
+    pub sidebar: String,
+    pub sidebar_side: String,
     /// "A", "B", "C", or "yours" for a stage arranged by hand.
     pub layout: String,
 }
@@ -148,6 +151,9 @@ pub enum SetupEvent {
     TrafficLights(String),
     /// Window gaps on or off, and the gap (saved at once).
     Gaps { on: bool, gap: f32 },
+    /// The sidebar's mode ("show", "auto", "hidden") and side (right or not).
+    Sidebar(String),
+    SidebarSide(bool),
     /// A stage layout preset ("A", "B", "C").
     Layout(String),
     Close,
@@ -739,6 +745,12 @@ impl SetupView {
                 window.dispatch_action(Box::new(qur::ZenMode), cx);
             }
         });
+        let sidebar = choices(look, "sidebar", &[("show", "Always show"), ("auto", "Auto-hide"), ("hidden", "Hidden")], &c.sidebar, cx, |_, key, _, cx| {
+            cx.emit(SetupEvent::Sidebar(key.to_string()));
+        });
+        let sidebar_side = choices(look, "sidebar-side", &[("left", "Left"), ("right", "Right")], &c.sidebar_side, cx, |_, key, _, cx| {
+            cx.emit(SetupEvent::SidebarSide(key == "right"));
+        });
         let lights = choices(look, "lights", &[("auto", "Match theme"), ("color", "Color"), ("mono", "Monochrome")], &c.traffic_lights, cx, |_, key, _, cx| {
             cx.emit(SetupEvent::TrafficLights(key.to_string()));
         });
@@ -756,6 +768,8 @@ impl SetupView {
             .child(row(look, "Transparency", Some("60–100%, live"), transparency))
             .child(row(look, "Gaps", Some("Space between panes; more in View > Appearance > Gaps…"), gaps))
             .child(row(look, "Top bar", None, top_bar))
+            .child(row(look, "Sidebar", Some("Auto-hide slides it in at the window's edge; drag its section headers to reorder them"), sidebar))
+            .child(row(look, "Sidebar side", None, sidebar_side))
             .child(row(look, "Traffic lights in full screen", None, lights))
     }
 

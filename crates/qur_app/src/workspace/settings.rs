@@ -220,6 +220,8 @@ impl Workspace {
             traffic_lights: self.config.ui.traffic_lights.clone(),
             gaps: self.config.ui.gaps,
             gap: self.config.ui.gap,
+            sidebar: self.config.ui.sidebar.clone(),
+            sidebar_side: self.config.ui.sidebar_side.clone(),
             layout: if custom { "yours".into() } else { preset.into() },
         }
     }
@@ -308,6 +310,8 @@ impl Workspace {
                 this.sync_menus(cx);
                 this.sync_settings(cx);
             }
+            SetupEvent::Sidebar(mode) => this.set_sidebar_mode(mode, cx),
+            SetupEvent::SidebarSide(right) => this.set_sidebar_side(*right, cx),
             SetupEvent::TrafficLights(key) => {
                 this.write_setting(false, "ui.traffic_lights", Some(key.as_str().into()), cx);
                 this.reload_settings(window, cx);
@@ -445,6 +449,9 @@ const CONFIG_TEMPLATE: &str = r#"# Qur settings. Saved changes apply right away.
 # gap = 8                   # 2 to 24
 # rounded = true            # rounded tiles; radius = 8 (0 to 16)
 # tile_border = false
+# sidebar = "show"          # show, auto (slides in at the window's edge), hidden
+# sidebar_side = "left"     # left or right
+# sidebar_sections = ["agents", "terminals", "git", "files"]   # top to bottom
 
 [panels]
 # terminal = true

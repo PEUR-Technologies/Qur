@@ -9,5 +9,5 @@ Do these in order for every version. The version lives in one place, `Cargo.toml
 5. **Merge:** open a PR into `main` and merge it with a merge commit.
 6. **Tag:** `git tag -a vX.Y.Z -m "Qur vX.Y.Z" origin/main && git push origin vX.Y.Z`.
 7. **Publish:** `gh release create vX.Y.Z target/release/Qur.zip --title "Qur vX.Y.Z" --notes-file <notes> --verify-tag`. The asset must be named `Qur.zip`: the website's Download button links to `releases/latest/download/Qur.zip`.
-8. **Website** (`PEUR-Technologies/qursite`): update `VERSION` at the top of `src/App.tsx`, and the size in `weight` / the Light heading if the app grew. Then `npm run build`, commit, push, and deploy with `npx wrangler pages deploy dist --project-name qursite --branch main` (the Pages project isn't connected to git).
+8. **Website** (`PEUR-Technologies/qursite`): nothing to do for a version bump. Its Download button links to `releases/latest/download/Qur.zip` and reads "Download newest release", so a new release shows up by itself. Update the site only if the app's size changed enough to matter (the size in `weight` / the Light heading in `src/App.tsx`): then `npm run build`, commit, push, and deploy with `npx wrangler pages deploy dist --project-name qursite --branch main` (the Pages project isn't connected to git).
 9. **Install locally:** replace `/Applications/Qur.app` with the new build.

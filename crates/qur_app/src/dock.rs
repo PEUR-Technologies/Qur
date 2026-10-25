@@ -1,19 +1,21 @@
 //! Rearrangeable stage (owner: "restructure the terminal, viewing window and
 //! stuff, like photoshop or vscode"). The agent stage is a tree of panes; each
 //! pane holds tabs (Chat/Terminal, Live, Browser, Changes, To-do). Drag a tab
-//! onto a pane's edge to split it there or onto its middle to join it; drag a
-//! divider to resize; close a tab to tuck it away (the pane's + brings it
-//! back). One arrangement for structured agents and one for Agent Terminals,
+//! (or a pane by its tab strip) over a pane: a preview shows where it lands,
+//! beside the pane on the nearest edge or, on its middle or strip, joining it;
+//! the panes glide into their new places (decision 60). Drag a divider to
+//! resize; close a tab to tuck it away (the pane's + menu brings it back). One arrangement for structured agents and one for Agent Terminals,
 //! saved in config.toml (`[layout] acp` / `terminal`). The old peek layouts
 //! A/B/C are presets.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gpui::{App, Bounds, Context, Div, Global, MouseButton, Pixels, Render, SharedString, Window, canvas, div, prelude::*, px};
 
 use crate::look::Look;
+use crate::tiling::{self, Glide, Motion, Rect, Shape};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Panel {
@@ -353,29 +355,32 @@ impl Dock {
 
     /// Move `p` to the pane at `target`: into it (Center) or beside it.
     pub fn move_panel(&mut self, p: Panel, target: &[bool], edge: Edge) {
+        self.move_panels(&[p], p, target, edge);
+    }
+
+    /// Move `moved` (one tab, or a whole pane's tabs) to the pane at
+    /// `target`: into it (Center) or beside it as a pane of their own,
+    /// `active` in front.
+    pub fn move_panels(&mut self, moved: &[Panel], active: Panel, target: &[bool], edge: Edge) {
         let Some(Node::Pane { tabs: target_tabs, .. }) = self.node(target) else { return };
-        // Dropping a pane's only tab on its own edges or middle changes nothing.
-        if target_tabs == &vec![p] {
-            return;
+        // A tab that stays at the target finds it again after the removal
+        // (which can reshape the tree). None staying: a pane onto itself.
+        let Some(&anchor) = target_tabs.iter().find(|t| !moved.contains(t)) else { return };
+        for &p in moved {
+            self.remove(p);
         }
-        // Mark the target before removing (removal can reshape the tree).
-        let marker = Panel::Todo;
-        let _ = marker;
-        let snapshot_target: Vec<Panel> = target_tabs.clone();
-        self.remove(p);
-        // Find the target again by its (unchanged) remaining tabs.
-        let target = self.find_pane_with(&snapshot_target, p).unwrap_or_default();
+        let Some(target) = self.find(anchor) else { return };
         let Some(node) = self.node_mut(&target) else { return };
         match edge {
             Edge::Center => {
-                if let Node::Pane { tabs, active } = node {
-                    tabs.push(p);
-                    *active = tabs.len() - 1;
+                if let Node::Pane { tabs, active: a } = node {
+                    tabs.extend_from_slice(moved);
+                    *a = tabs.iter().position(|t| *t == active).unwrap_or(tabs.len() - 1);
                 }
             }
             _ => {
                 let old = std::mem::replace(node, pane(&[]));
-                let new = pane(&[p]);
+                let new = Node::Pane { tabs: moved.to_vec(), active: moved.iter().position(|t| *t == active).unwrap_or(0) };
                 let vertical = matches!(edge, Edge::Top | Edge::Bottom);
                 *node = if matches!(edge, Edge::Left | Edge::Top) { split(vertical, 0.5, new, old) } else { split(vertical, 0.5, old, new) };
             }
@@ -383,13 +388,12 @@ impl Dock {
         self.normalize();
     }
 
-    fn find_pane_with(&self, tabs: &[Panel], moved: Panel) -> Option<Path> {
-        let want: Vec<Panel> = tabs.iter().copied().filter(|t| *t != moved).collect();
-        if want.is_empty() {
-            // The target only held the moved tab: it's now empty; find the empty pane.
-            return self.first_pane(|t| t.is_empty());
+    /// The tabs of the pane holding `p`.
+    pub fn pane_of(&self, p: Panel) -> Vec<Panel> {
+        match self.find(p).and_then(|path| self.node(&path)) {
+            Some(Node::Pane { tabs, .. }) => tabs.clone(),
+            _ => vec![p],
         }
-        self.find(want[0])
     }
 
     pub fn set_ratio(&mut self, path: &[bool], r: f32) {
@@ -470,11 +474,13 @@ impl Docks {
     }
 }
 
-/// What's being dragged: a tab of the given dock.
+/// What's being dragged: a tab of the given dock, or (`whole`, dragged by
+/// its tab strip) the pane it's the front tab of.
 #[derive(Clone)]
 pub struct DragTab {
     pub kind: Kind,
     pub panel: Panel,
+    pub whole: bool,
     pub label: SharedString,
 }
 
@@ -498,16 +504,127 @@ impl Render for DragTab {
 
 type Bnds = Rc<RefCell<HashMap<Path, Bounds<Pixels>>>>;
 
+/// One drawn dock's own state, per kind and per view drawing it (each window
+/// draws its own): its area, the panes' motion, the drop target under a
+/// dragged tab and its preview, and the pane whose + menu is open.
+#[derive(Default)]
+struct Drawn {
+    area: Bounds<Pixels>,
+    motion: Motion<Panel>,
+    hover: Option<(Path, Edge)>,
+    preview: Glide,
+    adding: Option<Path>,
+}
+
+thread_local! {
+    static DRAWN: RefCell<HashMap<(Kind, gpui::EntityId), Drawn>> = RefCell::new(HashMap::new());
+}
+
+fn drawn<R>(key: (Kind, gpui::EntityId), f: impl FnOnce(&mut Drawn) -> R) -> R {
+    DRAWN.with(|d| f(d.borrow_mut().entry(key).or_default()))
+}
+
+/// The tree for layout, each pane keyed by one of its tabs: one that keyed a
+/// pane last time when it has one, so a pane that loses or gains a tab
+/// glides to its new place instead of appearing anew.
+fn shape(n: &Node, prev: &HashSet<Panel>) -> Shape<Panel> {
+    match n {
+        Node::Pane { tabs, .. } => Shape::Leaf(tabs.iter().copied().find(|t| prev.contains(t)).or(tabs.first().copied()).unwrap_or(Panel::Session)),
+        Node::Split { vertical, ratio, a, b } => Shape::Split { vertical: *vertical, ratio: *ratio, a: Box::new(shape(a, prev)), b: Box::new(shape(b, prev)) },
+    }
+}
+
+/// Where a tab dropped at `p` on a pane lands: on the tab strip or the
+/// middle it joins the pane, else beside it on the nearest edge.
+fn edge_at(b: Bounds<Pixels>, p: gpui::Point<Pixels>, strip: Pixels) -> Edge {
+    if p.y - b.top() <= strip {
+        return Edge::Center;
+    }
+    let fx = (p.x - b.left()) / b.size.width;
+    let fy = (p.y - b.top()) / b.size.height;
+    if (0.3..=0.7).contains(&fx) && (0.3..=0.7).contains(&fy) {
+        return Edge::Center;
+    }
+    [(fx, Edge::Left), (1. - fx, Edge::Right), (fy, Edge::Top), (1. - fy, Edge::Bottom)]
+        .into_iter()
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map_or(Edge::Center, |e| e.1)
+}
+
+/// The drop preview: the part of the pane the dropped tab will take, inset.
+fn drop_rect(r: Rect, edge: Edge) -> Rect {
+    let part = match edge {
+        Edge::Center => r,
+        Edge::Left => Rect { w: r.w / 2., ..r },
+        Edge::Right => Rect { x: r.x + r.w / 2., w: r.w / 2., ..r },
+        Edge::Top => Rect { h: r.h / 2., ..r },
+        Edge::Bottom => Rect { y: r.y + r.h / 2., h: r.h / 2., ..r },
+    };
+    let i = 6f32.min(part.w / 4.).min(part.h / 4.);
+    Rect { x: part.x + i, y: part.y + i, w: part.w - 2. * i, h: part.h - 2. * i }
+}
+
 /// Draw `kind`'s dock, asking `content` for each visible panel. Generic over
 /// the view so the panels' own listeners keep working (AgentTask, Workspace).
+/// While a tab is dragged, a rounded preview shows where it will land (as
+/// macOS window tiling does); after a rearrangement the panes glide to their
+/// new places, drawn at absolute rectangles until they settle.
 pub fn render<V: 'static>(kind: Kind, look: &Look, cx: &mut Context<V>, content: &mut dyn FnMut(Panel, &mut Context<V>) -> gpui::AnyElement) -> gpui::AnyElement {
     let dock = Docks::get(cx, kind);
+    let key = (kind, cx.entity_id());
+    let gap = if look.tiles.is_some() { f32::from(look.gap()) } else { 1. };
+    let dragging = cx.has_active_drag();
+    let (leaves, rects, moving, preview) = drawn(key, |d| {
+        let prev: HashSet<Panel> = d.motion.keys().copied().collect();
+        let shape = shape(&dock.root, &prev);
+        let area = Rect { x: 0., y: 0., w: f32::from(d.area.size.width), h: f32::from(d.area.size.height) };
+        let leaves = tiling::lay(&shape, area, gap);
+        let (rects, moving) = d.motion.step(&shape.signature(), &leaves);
+        if !dragging {
+            d.hover = None;
+        }
+        let preview = d.hover.clone().and_then(|(path, edge)| leaves.iter().find(|l| l.path == path).map(|l| d.preview.set(drop_rect(l.rect, edge))));
+        if preview.is_none() {
+            d.preview.clear();
+        }
+        (leaves, rects, moving, preview)
+    });
+    if moving || preview.is_some_and(|p| p.1) {
+        tiling::next_frame(cx);
+    }
     let bounds: Bnds = Rc::new(RefCell::new(HashMap::new()));
-    let root = node(kind, &dock.root, Vec::new(), look, cx, content, &bounds);
+    let body = if moving {
+        div()
+            .relative()
+            .size_full()
+            .children(leaves.iter().filter_map(|l| {
+                let Some(Node::Pane { tabs, active }) = dock.node(&l.path) else { return None };
+                let r = rects.get(&l.key).copied().unwrap_or(l.rect);
+                Some(div().absolute().left(px(r.x)).top(px(r.y)).w(px(r.w)).h(px(r.h)).overflow_hidden().child(pane_el(kind, tabs, *active, l.path.clone(), look, cx, content)))
+            }))
+            .into_any_element()
+    } else {
+        node(kind, &dock.root, Vec::new(), look, cx, content, &bounds)
+    };
+    let accent = look.c(look.theme.ui.focus_ring);
+    let preview = preview.map(|(r, _)| {
+        let mut fill = accent;
+        fill.a = 0.16;
+        div().absolute().left(px(r.x)).top(px(r.y)).w(px(r.w)).h(px(r.h)).rounded(look.z(10.)).bg(fill).border_2().border_color(accent)
+    });
     div()
         .id(("dock", kind as usize))
+        .relative()
         .size_full()
         .flex()
+        .child(
+            canvas(
+                move |b, _, _| drawn(key, |d| d.area = b),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        )
         .on_mouse_move(move |ev: &gpui::MouseMoveEvent, _, cx| {
             let Some((k, path, b)) = cx.global::<Docks>().resizing.clone() else { return };
             if ev.pressed_button != Some(MouseButton::Left) {
@@ -526,7 +643,8 @@ pub fn render<V: 'static>(kind: Kind, look: &Look, cx: &mut Context<V>, content:
                 qur_config::write_key(&qur_config::config_path(), k.config_key(), Some(text.as_str().into())).ok();
             }
         })
-        .child(root)
+        .child(body)
+        .children(preview)
         .into_any_element()
 }
 
@@ -605,127 +723,178 @@ fn node<V: 'static>(kind: Kind, n: &Node, path: Path, look: &Look, cx: &mut Cont
                 .child(div().flex_1().min_w(px(0.)).min_h(px(0.)).overflow_hidden().child(second))
                 .into_any_element()
         }
-        Node::Pane { tabs, active } => {
-            let current = tabs.get(*active).copied();
-            let hidden: Vec<Panel> = kind.panels().iter().copied().filter(|p| !Docks::get(cx, kind).contains(*p)).collect();
-            let strip = div()
-                .flex_none()
-                .h(look.z(26.))
-                .px(look.z(6.))
-                .flex()
-                .items_center()
-                .gap(look.z(2.))
-                .border_b_1()
-                .border_color(look.c(ui.border))
-                .children(tabs.iter().enumerate().map(|(i, &p)| {
-                    let on = i == *active;
-                    let label: SharedString = kind.label(p).into();
-                    let drag = DragTab { kind, panel: p, label: label.clone() };
-                    div()
-                        .id(SharedString::from(format!("tab-{kind:?}-{p:?}")))
-                        .group("tab")
-                        .flex()
-                        .items_center()
-                        .gap(look.z(4.))
-                        .px(look.z(8.))
-                        .py(look.z(1.))
-                        .rounded(look.z(4.))
-                        .cursor_pointer()
-                        .text_size(look.text(-2.))
-                        .text_color(look.c(if on { ui.text } else { ui.text_muted }))
-                        .when(on, |d| d.bg(look.c(ui.active_bg)))
-                        .hover(|d| d.bg(look.c(ui.hover_bg)))
-                        .child(label)
-                        .children(crate::script::mark(|| format!("tab:{kind:?}:{p:?}")))
-                        .when(p != Panel::Session, |d| {
-                            d.child(
-                                div()
-                                    .id(SharedString::from(format!("tab-close-{kind:?}-{p:?}")))
-                                    .relative()
-                                    .children(crate::script::mark(|| format!("close:{kind:?}:{p:?}")))
-                                    .invisible()
-                                    .group_hover("tab", |d| d.visible())
-                                    .text_color(look.c(ui.text_muted))
-                                    .child("×")
-                                    .on_click(move |_, _, cx| {
-                                        cx.stop_propagation();
-                                        Docks::update(cx, kind, |d| d.close(p));
-                                    }),
-                            )
-                        })
-                        .on_click(move |_, _, cx| Docks::update(cx, kind, |d| d.activate(p)))
-                        .on_drag(drag, |d: &DragTab, _, _, cx| cx.new(|_| d.clone()))
-                }))
-                .child(div().flex_1())
-                .when(!hidden.is_empty(), |d| {
-                    // Tucked-away panels come back here, into this pane.
-                    let target = path.clone();
-                    d.children(hidden.iter().map(|&p| {
-                        let target = target.clone();
-                        div()
-                            .id(SharedString::from(format!("add-{kind:?}-{p:?}-{target:?}")))
-                            .px(look.z(5.))
-                            .rounded(look.z(3.))
-                            .cursor_pointer()
-                            .text_size(look.text(-3.))
-                            .text_color(look.c(ui.text_muted))
-                            .hover(|d| d.bg(look.c(ui.hover_bg)).text_color(look.c(ui.text_secondary)))
-                            .relative()
-                            .child(format!("+ {}", kind.label(p)))
-                            .children(crate::script::mark(|| format!("add:{kind:?}:{p:?}")))
-                            .on_click(move |_, _, cx| {
-                                Docks::update(cx, kind, |d| {
-                                    d.add(p);
-                                    d.move_panel(p, &target, Edge::Center);
-                                });
-                            })
-                    }))
-                });
-            let body = div()
-                .flex_1()
-                .min_h(px(0.))
-                .relative()
-                .children(current.map(|p| content(p, cx)))
-                .children(crate::script::mark(|| format!("pane:{kind:?}:{}", path_name(&path))));
-            let zones = drop_zones(kind, path.clone(), look);
-            // With window gaps each pane is a tile (its own background); without
-            // them the stage region behind the dock paints one.
-            let pane = div().size_full().flex().flex_col().relative();
-            let pane = if look.tiles.is_some() { look.tile(pane, kind.fill(look)) } else { pane };
-            pane.child(strip).child(body.child(zones)).into_any_element()
-        }
+        Node::Pane { tabs, active } => pane_el(kind, tabs, *active, path, look, cx, content),
     }
 }
 
-/// Drop targets over a pane while a tab is dragged: edges split, the middle
-/// joins. Invisible (and click-through) otherwise.
-fn drop_zones(kind: Kind, path: Path, look: &Look) -> Div {
-    let hl = {
-        let mut c = look.c(look.theme.ui.focus_ring);
-        c.a = 0.22;
-        c
-    };
-    let zone = |edge: Edge, path: Path| {
-        let d = div().absolute().drag_over::<DragTab>(move |s, _, _, _| s.bg(hl)).on_drop(move |t: &DragTab, _, cx| {
-            if t.kind == kind {
-                let (panel, path) = (t.panel, path.clone());
-                Docks::update(cx, kind, |d| d.move_panel(panel, &path, edge));
-            }
+/// One pane: its tab strip (drag a tab to move it, or the strip to move the
+/// whole pane; + brings back a tucked-away panel) and the front tab's panel.
+/// A tab dragged over it shows where it would land; dropped, it moves there.
+fn pane_el<V: 'static>(kind: Kind, tabs: &[Panel], active: usize, path: Path, look: &Look, cx: &mut Context<V>, content: &mut dyn FnMut(Panel, &mut Context<V>) -> gpui::AnyElement) -> gpui::AnyElement {
+    let ui = &look.theme.ui;
+    let key = (kind, cx.entity_id());
+    let current = tabs.get(active).copied();
+    let hidden: Vec<Panel> = kind.panels().iter().copied().filter(|p| !Docks::get(cx, kind).contains(*p)).collect();
+    let strip_h = look.z(26.);
+    let front = current.unwrap_or(Panel::Session);
+    let label = if tabs.len() > 1 { format!("{} +{}", kind.label(front), tabs.len() - 1) } else { kind.label(front).to_string() };
+    let whole = DragTab { kind, panel: front, whole: true, label: label.into() };
+    let strip = div()
+        .id(SharedString::from(format!("strip-{kind:?}-{path:?}")))
+        .flex_none()
+        .h(strip_h)
+        .px(look.z(6.))
+        .flex()
+        .items_center()
+        .gap(look.z(2.))
+        .border_b_1()
+        .border_color(look.c(ui.border))
+        .children(crate::script::mark(|| format!("strip:{kind:?}:{}", path_name(&path))))
+        .on_drag(whole, |d: &DragTab, _, _, cx| cx.new(|_| d.clone()))
+        .children(tabs.iter().enumerate().map(|(i, &p)| {
+            let on = i == active;
+            let label: SharedString = kind.label(p).into();
+            let drag = DragTab { kind, panel: p, whole: false, label: label.clone() };
+            div()
+                .id(SharedString::from(format!("tab-{kind:?}-{p:?}")))
+                .group("tab")
+                .flex()
+                .items_center()
+                .gap(look.z(4.))
+                .px(look.z(8.))
+                .py(look.z(1.))
+                .rounded(look.z(4.))
+                .cursor_pointer()
+                .text_size(look.text(-2.))
+                .text_color(look.c(if on { ui.text } else { ui.text_muted }))
+                .when(on, |d| d.bg(look.c(ui.active_bg)))
+                .hover(|d| d.bg(look.c(ui.hover_bg)))
+                .child(label)
+                .children(crate::script::mark(|| format!("tab:{kind:?}:{p:?}")))
+                .when(p != Panel::Session, |d| {
+                    // Shown on the front tab and on hover; clear, not
+                    // hidden, elsewhere, so it always takes the click.
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!("tab-close-{kind:?}-{p:?}")))
+                            .relative()
+                            .children(crate::script::mark(|| format!("close:{kind:?}:{p:?}")))
+                            .when(!on, |d| d.opacity(0.))
+                            .group_hover("tab", |d| d.opacity(1.))
+                            .text_color(look.c(ui.text_muted))
+                            .hover(|d| d.text_color(look.c(ui.text)))
+                            .child("×")
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                Docks::update(cx, kind, |d| d.close(p));
+                            }),
+                    )
+                })
+                .on_click(move |_, _, cx| Docks::update(cx, kind, |d| d.activate(p)))
+                .on_drag(drag, |d: &DragTab, _, _, cx| cx.new(|_| d.clone()))
+        }))
+        .child(div().flex_1())
+        .when(!hidden.is_empty(), |d| {
+            // One + for the tucked-away panels: a menu of them, added here.
+            let target = path.clone();
+            d.child(
+                div()
+                    .id(SharedString::from(format!("plus-{kind:?}-{path:?}")))
+                    .px(look.z(6.))
+                    .rounded(look.z(3.))
+                    .cursor_pointer()
+                    .text_color(look.c(ui.text_muted))
+                    .hover(|d| d.bg(look.c(ui.hover_bg)).text_color(look.c(ui.text_secondary)))
+                    .relative()
+                    .child("+")
+                    .children(crate::script::mark(|| format!("plus:{kind:?}:{}", path_name(&path))))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(move |_, window, _| {
+                        drawn(key, |d| d.adding = Some(target.clone()));
+                        window.refresh();
+                    }),
+            )
         });
-        match edge {
-            Edge::Left => d.left_0().top_0().bottom_0().w(gpui::relative(0.25)),
-            Edge::Right => d.right_0().top_0().bottom_0().w(gpui::relative(0.25)),
-            Edge::Top => d.top_0().left(gpui::relative(0.25)).right(gpui::relative(0.25)).h(gpui::relative(0.3)),
-            Edge::Bottom => d.bottom_0().left(gpui::relative(0.25)).right(gpui::relative(0.25)).h(gpui::relative(0.3)),
-            Edge::Center => d.top(gpui::relative(0.3)).bottom(gpui::relative(0.3)).left(gpui::relative(0.25)).right(gpui::relative(0.25)),
-        }
-    };
-    div()
-        .absolute()
-        .size_full()
-        .top_0()
-        .left_0()
-        .children([Edge::Left, Edge::Right, Edge::Top, Edge::Bottom, Edge::Center].map(|e| zone(e, path.clone())))
+    let menu = (drawn(key, |d| d.adding.as_ref() == Some(&path)) && !hidden.is_empty()).then(|| {
+        let target = path.clone();
+        div()
+            .id(SharedString::from(format!("add-menu-{kind:?}-{path:?}")))
+            .absolute()
+            .top(strip_h)
+            .right(look.z(6.))
+            .mt(look.z(2.))
+            .py(look.z(4.))
+            .min_w(look.z(140.))
+            .rounded(look.z(6.))
+            .bg(look.c(ui.overlay_bg))
+            .border_1()
+            .border_color(look.c(ui.border))
+            .shadow_md()
+            .flex()
+            .flex_col()
+            .on_mouse_down_out(move |_, window, _| {
+                drawn(key, |d| d.adding = None);
+                window.refresh();
+            })
+            .children(hidden.iter().map(|&p| {
+                let target = target.clone();
+                div()
+                    .id(SharedString::from(format!("add-{kind:?}-{p:?}")))
+                    .px(look.z(10.))
+                    .py(look.z(3.))
+                    .cursor_pointer()
+                    .text_size(look.text(-1.))
+                    .text_color(look.c(ui.text))
+                    .hover(|d| d.bg(look.c(ui.hover_bg)))
+                    .relative()
+                    .child(kind.label(p))
+                    .children(crate::script::mark(|| format!("add:{kind:?}:{p:?}")))
+                    .on_click(move |_, window, cx| {
+                        drawn(key, |d| d.adding = None);
+                        Docks::update(cx, kind, |d| {
+                            d.add(p);
+                            d.move_panel(p, &target, Edge::Center);
+                        });
+                        window.refresh();
+                    })
+            }))
+    });
+    let body = div()
+        .flex_1()
+        .min_h(px(0.))
+        .relative()
+        .children(current.map(|p| content(p, cx)))
+        .children(crate::script::mark(|| format!("pane:{kind:?}:{}", path_name(&path))));
+    // With window gaps each pane is a tile (its own background); without
+    // them the stage region behind the dock paints one.
+    let pane = div().size_full().flex().flex_col().relative();
+    let pane = if look.tiles.is_some() { look.tile(pane, kind.fill(look)) } else { pane };
+    let (hover_path, drop_path, own) = (path.clone(), path, tabs.to_vec());
+    pane.child(strip)
+        .child(body)
+        .children(menu)
+        .on_drag_move::<DragTab>(move |ev, window, cx| {
+            let t = ev.drag(cx);
+            if t.kind != kind || !ev.bounds.contains(&ev.event.position) {
+                return;
+            }
+            let moved = if t.whole { Docks::get(cx, kind).pane_of(t.panel) } else { vec![t.panel] };
+            // A pane dropped on itself (or its only tab) changes nothing: no preview.
+            let hover = (!own.iter().all(|x| moved.contains(x))).then(|| (hover_path.clone(), edge_at(ev.bounds, ev.event.position, strip_h)));
+            if drawn(key, |d| std::mem::replace(&mut d.hover, hover.clone()) != hover) {
+                window.refresh();
+            }
+        })
+        .on_drop(move |t: &DragTab, window, cx| {
+            let Some((at, edge)) = drawn(key, |d| d.hover.take()) else { return };
+            if t.kind != kind || at != drop_path {
+                return;
+            }
+            let moved = if t.whole { Docks::get(cx, kind).pane_of(t.panel) } else { vec![t.panel] };
+            Docks::update(cx, kind, |d| d.move_panels(&moved, t.panel, &at, edge));
+            window.refresh();
+        })
+        .into_any_element()
 }
 
 /// A miniature of an arrangement: panes, their tab strips (the active tab
@@ -734,13 +903,22 @@ pub fn diagram(dock: &Dock, kind: Kind, look: &Look, w: f32, h: f32) -> Div {
     fn go(n: &Node, kind: Kind, look: &Look) -> Div {
         let ui = &look.theme.ui;
         match n {
+            // No pane drawn under 30% of its split: a thin drawer still reads
+            // as a pane in something this small.
             Node::Split { vertical, ratio, a, b } => div()
                 .size_full()
                 .flex()
                 .gap(px(2.))
                 .when(*vertical, |d| d.flex_col())
-                .child(div().flex_none().when(*vertical, |d| d.w_full().h(gpui::relative(*ratio))).when(!*vertical, |d| d.h_full().w(gpui::relative(*ratio))).child(go(a, kind, look)))
-                .child(div().flex_1().min_w(px(0.)).min_h(px(0.)).child(go(b, kind, look))),
+                .child(
+                    div()
+                        .flex_none()
+                        .overflow_hidden()
+                        .when(*vertical, |d| d.w_full().h(gpui::relative(ratio.clamp(0.3, 0.7))))
+                        .when(!*vertical, |d| d.h_full().w(gpui::relative(ratio.clamp(0.3, 0.7))))
+                        .child(go(a, kind, look)),
+                )
+                .child(div().flex_1().min_w(px(0.)).min_h(px(0.)).overflow_hidden().child(go(b, kind, look))),
             Node::Pane { tabs, active } => {
                 let current = tabs.get(*active).copied().unwrap_or(Panel::Session);
                 let mut accent = look.c(look.theme.accents[0].base);
@@ -771,6 +949,7 @@ pub fn diagram(dock: &Dock, kind: Kind, look: &Look, w: f32, h: f32) -> Div {
                     .size_full()
                     .flex()
                     .flex_col()
+                    .overflow_hidden()
                     .rounded(px(2.))
                     .border_1()
                     .border_color(look.c(ui.border_strong))
@@ -867,5 +1046,25 @@ mod tests {
         // Moving the last tab out of a pane removes that pane.
         d.move_panel(Changes, &[false], Edge::Center);
         assert_eq!(d.root, Node::Pane { tabs: vec![Session, Changes], active: 1 });
+    }
+
+    #[test]
+    fn whole_pane_moves() {
+        let mut d = Dock::parse(Kind::Acp, "h0.660(live,browser,changes|session,todo)").unwrap();
+        // The Live pane, dragged by its strip, below the agent's pane.
+        let moved = d.pane_of(Browser);
+        assert_eq!(moved, vec![Live, Browser, Changes]);
+        d.move_panels(&moved, Browser, &[true], Edge::Bottom);
+        assert_eq!(d.serialize(), "v0.500(session,todo|live,*browser,changes)");
+        // The agent's own pane moves too: to the left of the rest.
+        let moved = d.pane_of(Session);
+        d.move_panels(&moved, Session, &[true], Edge::Left);
+        assert_eq!(d.serialize(), "h0.500(session,todo|live,*browser,changes)");
+        // A pane onto itself changes nothing; its tabs into another pane join it.
+        let before = d.clone();
+        d.move_panels(&d.pane_of(Todo), Todo, &[false], Edge::Right);
+        assert_eq!(d, before);
+        d.move_panels(&d.pane_of(Todo), Todo, &[true], Edge::Center);
+        assert_eq!(d.serialize(), "live,browser,changes,session,*todo");
     }
 }

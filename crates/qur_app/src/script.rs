@@ -8,6 +8,7 @@
 //! - `key:<keystrokes>` presses keys, space-separated, as in keymaps: `key:cmd-shift-p`, `key:escape d d`, `key:cmd-\,` (Cmd+,).
 //! - `click:<at>`, `dclick:` (double), `rclick:` (right), `cmdclick:` (with Cmd).
 //! - `drag:<at>,<at>` presses, moves there in small steps (a frame apart), and releases.
+//! - `move:<at>` moves the mouse there (no button), as hovering does.
 //! - `scroll:<at>,<dy>` turns the wheel over a point by `dy` points (negative scrolls down).
 //! - `state` prints a `STATE …` line: overlay, code modal, terminal find, git panel, docks.
 //! - `marks` prints a `BOUNDS name x,y wxh` line for every marked element on screen.
@@ -74,6 +75,7 @@ pub enum Step {
     Keys(String),
     Click { at: At, button: MouseButton, count: usize, cmd: bool },
     Drag { from: At, to: At },
+    Move(At),
     Scroll { at: At, dy: f32 },
     State,
     Marks,
@@ -115,6 +117,7 @@ pub fn parse(list: &str) -> Result<Vec<Step>, String> {
                 let next = parts.next().ok_or_else(|| format!("{p}: needs a second point"))?;
                 Step::Drag { from, to: at(&p, &next, &mut parts)? }
             }
+            "move" => Step::Move(at(&p, rest, &mut parts)?),
             "scroll" => {
                 let at = at(&p, rest, &mut parts)?;
                 let dy = parts.next().ok_or_else(|| format!("{p}: needs an amount"))?;
@@ -286,6 +289,11 @@ pub fn run(handle: AnyWindowHandle, list: &str, cx: &mut App) {
                     }
                     pause(30).await;
                     mouse(handle, cx, PlatformInput::MouseUp(MouseUpEvent { button: left, position: b, modifiers: m, click_count: 1 }));
+                }
+                Step::Move(at) => {
+                    let Some(pos) = resolve(handle, cx, &at) else { continue };
+                    println!("INPUT move {at:?} at {:.0},{:.0} t={t}ms", f32::from(pos.x), f32::from(pos.y));
+                    mouse(handle, cx, PlatformInput::MouseMove(MouseMoveEvent { position: pos, pressed_button: None, modifiers: Modifiers::default() }));
                 }
                 Step::Scroll { at, dy } => {
                     let Some(pos) = resolve(handle, cx, &at) else { continue };

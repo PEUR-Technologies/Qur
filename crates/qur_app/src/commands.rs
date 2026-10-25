@@ -26,7 +26,7 @@ pub mod qur {
             KeepWorking, DiscardTask, OpenWorktreeInTerminal, RevealWorktree, KeyboardShortcuts,
             RunDoctor, ShowLogs, ReportProblem, ExpandSelection, ShrinkSelection,
             RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge, Caffeinate, ShowKeepAwake, SwitchSession, ZenMode,
-            Gaps, ToggleGaps,
+            Gaps, ToggleGaps, AutoHideSidebar, SidebarOnRight,
             ShowLastTurn, RewindLastTurn, ReviewWork, ReviewPlan, SendReviewFindings,
         ]
     );
@@ -200,6 +200,8 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::ToggleFullScreen, "View", "Enter Full Screen", "ctrl-cmd-f", W, R),
     cmd!(qur::CommandPalette, "View", "Command Palette…", "cmd-shift-p|f1", W, R),
     cmd!(qur::ToggleSidebar, "View", "Sidebar", "cmd-b", W, R),
+    cmd!(qur::AutoHideSidebar, "View", "Auto-hide Sidebar", "", W, R),
+    cmd!(qur::SidebarOnRight, "View", "Sidebar on Right", "", W, R),
     cmd!(qur::ZoomIn, "View", "Zoom In", "cmd-=|cmd-+", W, R),
     cmd!(qur::ZoomOut, "View", "Zoom Out", "cmd--", W, R),
     cmd!(qur::ZoomReset, "View", "Reset Zoom", "cmd-0", W, R),
@@ -570,6 +572,9 @@ pub struct MenuState {
     pub layout: &'static str,
     pub follow: bool,
     pub sidebar: bool,
+    /// `[ui] sidebar = "auto"` and `sidebar_side = "right"`.
+    pub sidebar_auto: bool,
+    pub sidebar_right: bool,
     pub soft_wrap: bool,
     pub recent: Vec<PathBuf>,
     /// A merge stopped on conflicts: the Merge Conflicts items are enabled.
@@ -693,6 +698,8 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::CommandPalette),
             sep(),
             item(qur::ToggleSidebar).checked(s.sidebar),
+            item(qur::AutoHideSidebar).checked(s.sidebar_auto),
+            item(qur::SidebarOnRight).checked(s.sidebar_right),
             item(qur::RevealInFiles),
             item(qur::ToggleTerminal),
             item(qur::Caffeinate),

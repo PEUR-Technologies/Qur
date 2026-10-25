@@ -670,7 +670,7 @@ impl Workspace {
         };
         div()
             .absolute()
-            .top(look.z(TITLEBAR_H + 4.))
+            .top(self.bar_h(look) + look.z(4.))
             .left(self.title_lead(look))
             .occlude()
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.sliding = false))
@@ -785,7 +785,7 @@ impl Workspace {
         let (min, max) = (qur_config::MIN_GAP, qur_config::MAX_GAP);
         div()
             .absolute()
-            .top(look.z(TITLEBAR_H + 4.) + look.gap())
+            .top(self.bar_h(look) + look.z(4.) + look.gap())
             .left(self.title_lead(look) + look.gap())
             .occlude()
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.gap_sliding = None))

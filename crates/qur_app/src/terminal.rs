@@ -37,6 +37,7 @@ use qur_theme::{Rgba, TerminalColors};
 use crate::commands::{edit, qur, terminal as ta};
 use crate::input::{InputEvent, TextInput};
 use crate::look::Look;
+use crate::tiling::{self, Motion, Rect};
 
 // ---------------------------------------------------------------------------
 // Colors (from the theme's terminal palette)
@@ -513,6 +514,9 @@ pub struct TerminalPanel {
     /// A group's owner closed and another pane took its row: old -> new.
     moved: HashMap<usize, usize>,
     split_bounds: Rc<RefCell<HashMap<Vec<bool>, Bounds<Pixels>>>>,
+    /// The panes' glide between arrangements, and the area they're laid out in.
+    glide: Motion<usize>,
+    glide_area: Rc<std::cell::Cell<Bounds<Pixels>>>,
     /// A divider being dragged: its split's path and bounds.
     resizing: Option<(Vec<bool>, Bounds<Pixels>)>,
     /// Shown as the whole stage (a shell row), not inside an Agent
@@ -541,6 +545,8 @@ impl TerminalPanel {
             groups: Vec::new(),
             moved: HashMap::new(),
             split_bounds: Rc::default(),
+            glide: Motion::default(),
+            glide_area: Rc::default(),
             resizing: None,
         }
     }
@@ -1587,8 +1593,8 @@ impl Render for TerminalPanel {
         let ui = look.theme.ui.clone();
         let split = self.active_group().is_some();
         let tiles = match self.active_group().map(|g| g.tile.clone()) {
-            Some(t) => Some(self.tile(&t, Vec::new(), true, &look, cx)),
-            None => self.active_session().map(|s| s.id).map(|id| self.tile(&Tile::Term(id), Vec::new(), false, &look, cx)),
+            Some(t) => Some(self.gliding(&t, true, &look, cx)),
+            None => self.active_session().map(|s| s.id).map(|id| self.gliding(&Tile::Term(id), false, &look, cx)),
         };
         let tiled = look.tiles.is_some() && self.standalone.get();
         let message = self.message.clone().map(|m| {
@@ -1664,6 +1670,41 @@ impl Render for TerminalPanel {
 }
 
 impl TerminalPanel {
+    /// The panes, gliding to their places when the split changes (Cmd+D's
+    /// dwindle, Cmd+Enter's grid, a pane closed): drawn at absolute
+    /// rectangles until they settle, as the dock does (decision 60).
+    fn gliding(&mut self, t: &Tile, split: bool, look: &Look, cx: &mut Context<Self>) -> gpui::AnyElement {
+        fn shape(t: &Tile) -> tiling::Shape<usize> {
+            match t {
+                Tile::Term(id) => tiling::Shape::Leaf(*id),
+                Tile::Split { vertical, ratio, a, b } => tiling::Shape::Split { vertical: *vertical, ratio: *ratio, a: Box::new(shape(a)), b: Box::new(shape(b)) },
+            }
+        }
+        let s = shape(t);
+        let a = self.glide_area.get();
+        let gap = f32::from(if look.tiles.is_some() && self.standalone.get() { look.gap() } else { look.z(6.) });
+        let leaves = tiling::lay(&s, Rect { x: 0., y: 0., w: f32::from(a.size.width), h: f32::from(a.size.height) }, gap);
+        let (rects, moving) = self.glide.step(&s.signature(), &leaves);
+        let area = self.glide_area.clone();
+        let measure = gpui::canvas(move |b, _, _| area.set(b), |_, _, _, _| {}).absolute().size_full();
+        if moving {
+            tiling::next_frame(cx);
+        }
+        let body = if moving {
+            div()
+                .relative()
+                .size_full()
+                .children(leaves.iter().map(|l| {
+                    let r = rects.get(&l.key).copied().unwrap_or(l.rect);
+                    div().absolute().left(px(r.x)).top(px(r.y)).w(px(r.w)).h(px(r.h)).overflow_hidden().child(self.tile(&Tile::Term(l.key), l.path.clone(), split, look, cx))
+                }))
+                .into_any_element()
+        } else {
+            self.tile(t, Vec::new(), split, look, cx)
+        };
+        div().relative().size_full().child(measure).child(body).into_any_element()
+    }
+
     /// One pane per session in the tree, with draggable dividers between.
     fn tile(&self, t: &Tile, path: Vec<bool>, split: bool, look: &Look, cx: &mut Context<Self>) -> gpui::AnyElement {
         let ui = &look.theme.ui;
