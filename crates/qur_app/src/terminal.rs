@@ -629,6 +629,16 @@ impl TerminalPanel {
         cx.notify();
     }
 
+    /// Close a sidebar row: the session `id` and every pane split beside it.
+    pub fn close_row(&mut self, id: usize, cx: &mut Context<Self>) {
+        let ids = self.groups.iter().find(|g| g.tile.ids().contains(&id)).map(|g| g.tile.ids()).unwrap_or_else(|| vec![id]);
+        for id in ids {
+            if let Some(ix) = self.sessions.iter().position(|s| s.id == id) {
+                self.close(ix, cx);
+            }
+        }
+    }
+
     pub fn close_all_sync(&mut self) {
         self.groups.clear();
         for s in self.sessions.drain(..) {
