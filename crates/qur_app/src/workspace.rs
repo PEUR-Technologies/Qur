@@ -44,11 +44,11 @@ use crate::tree_view::{TreeEvent, TreeView};
 pub const TITLEBAR_H: f32 = 32.0;
 /// Left inset that clears the traffic lights placed at (9, 9).
 const TRAFFIC_LIGHTS_W: f32 = 78.0;
-/// Zen mode: the strip at the top that shows the bar (generous, so you don't
-/// have to hit the edge pixel), and how far below the bar the mouse may
-/// wander before the bar slides away.
-const ZEN_EDGE: f32 = 16.0;
-const ZEN_SLACK: f32 = 8.0;
+/// Zen mode: the strip at the top that shows the bar (as tall as the bar, so
+/// you don't have to hit the edge pixel), and how far below the bar the mouse
+/// may wander before the bar slides away.
+const ZEN_EDGE: f32 = TITLEBAR_H;
+const ZEN_SLACK: f32 = 24.0;
 const ZEN_SLIDE: Duration = Duration::from_millis(160);
 const SIDEBAR_DEFAULT_W: f32 = 280.0;
 const SIDEBAR_MIN_W: f32 = 200.0;
@@ -3755,17 +3755,6 @@ impl Workspace {
 
     // -- render pieces -------------------------------------------------------------------
 
-    fn session_title(&self, cx: &App) -> Option<String> {
-        match &self.selected {
-            Some(Selected::Agent(id)) => self.agent(id).map(|a| a.read(cx).record.title.clone()),
-            Some(Selected::TermTask(id)) => self.term_task(id).map(|t| t.record.title.clone()),
-            Some(Selected::Shell(s)) => self.terms.read(cx).session_by_id(*s).map(|s| s.label.clone()),
-            Some(Selected::Git) => Some("Source control".into()),
-            Some(Selected::Search) => Some("Search".into()),
-            None => None,
-        }
-    }
-
     /// Where title bar content starts: past the traffic lights, or near the edge in full screen.
     fn title_lead(&self, look: &Look) -> Pixels {
         if self.fullscreen { look.z(8.) } else { px(TRAFFIC_LIGHTS_W) }
@@ -3773,7 +3762,6 @@ impl Workspace {
 
     fn title_bar(&self, look: &Look, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = &look.theme.ui;
-        let session = self.session_title(cx);
         let message = self.message.as_ref().map(|(m, _)| m.clone());
         div()
             .id("titlebar")
@@ -3823,7 +3811,6 @@ impl Workspace {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(|this, _, window, cx| this.project_switcher(&qur::ProjectSwitcher, window, cx))),
             )
-            .children(session.map(|s| div().min_w(px(0.)).truncate().text_color(look.c(ui.text_secondary)).child(s)))
             .child(div().flex_1())
             .children(message.map(|m| div().flex_none().max_w(look.z(420.)).truncate().text_size(look.text(-1.)).text_color(look.c(ui.text_secondary)).child(m)))
     }
@@ -3869,8 +3856,9 @@ impl Workspace {
             )
     }
 
-    /// The title bar, or in zen mode the bar sliding in and out from above:
-    /// it grows from nothing, pushing the window's content down.
+    /// The title bar, or in zen mode the bar sliding in and out from above,
+    /// over the window's content rather than pushing it down (which reflowed
+    /// everything, terminals included, on every frame of the slide).
     fn top(&self, look: &Look, cx: &mut Context<Self>) -> AnyElement {
         let bar = self.title_bar(look, cx);
         if !self.config.ui.zen {
@@ -3879,17 +3867,14 @@ impl Workspace {
         let full = f32::from(look.z(TITLEBAR_H));
         let shown = self.zen_shown;
         div()
+            .absolute()
+            .left_0()
             .w_full()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .justify_end()
-            .overflow_hidden()
             .child(bar)
             .with_animation(
                 if shown { "zen-in" } else { "zen-out" },
                 Animation::new(ZEN_SLIDE).with_easing(gpui::ease_out_quint()),
-                move |d, t| d.h(px(full * if shown { t } else { 1. - t })),
+                move |d, t| d.top(px(-full * if shown { 1. - t } else { t })),
             )
             .into_any_element()
     }
@@ -4966,8 +4951,9 @@ impl Render for Workspace {
                     this.save_tune(tune, window, cx);
                 }
             }))
-            .child(self.top(&look, cx))
+            .when(!self.config.ui.zen, |d| d.child(self.top(&look, cx)))
             .child(body)
+            .when(self.config.ui.zen, |d| d.child(self.top(&look, cx)))
             .children(self.code_modal(&look, cx))
             .when(any_overlay, |d| {
                 d.child(div().absolute().size_full().on_mouse_down(
