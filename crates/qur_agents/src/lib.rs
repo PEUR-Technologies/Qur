@@ -220,6 +220,47 @@ pub struct TaskRecord {
     /// quit or a crash doesn't lose them (sent when the task next starts).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued: Vec<QueuedMessage>,
+    /// ACP turns with their checkpoints (oldest first): what each changed,
+    /// and Rewind. Trees are pinned under `refs/qur/turns/<id>/<n>/…`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub turns: Vec<Turn>,
+}
+
+/// One ACP turn's checkpoints: the worktree's tree when the prompt was sent
+/// and when the turn ended.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Turn {
+    /// 1, 2, 3… within the task (never reused, also after a Rewind).
+    pub n: u32,
+    pub start: String,
+    /// None while the turn runs (or if Qur quit mid-turn).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
+    /// Files changed, lines added, lines removed (start → end).
+    #[serde(default)]
+    pub files: u32,
+    #[serde(default)]
+    pub added: u32,
+    #[serde(default)]
+    pub removed: u32,
+    /// Rewound: its changes (and any after it) were undone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rewound: bool,
+}
+
+impl TaskRecord {
+    /// The newest turn that can still be rewound or viewed.
+    pub fn last_turn(&self) -> Option<&Turn> {
+        self.turns.iter().rev().find(|t| !t.rewound)
+    }
+
+    pub fn turn(&self, n: u32) -> Option<&Turn> {
+        self.turns.iter().find(|t| t.n == n)
+    }
+
+    pub fn next_turn_number(&self) -> u32 {
+        self.turns.iter().map(|t| t.n).max().unwrap_or(0) + 1
+    }
 }
 
 /// A queued chat message as saved (browser screenshots aren't kept).
@@ -331,10 +372,20 @@ mod tests {
                 QueuedMessage { text: "then run the tests\nand fix them".into(), ..Default::default() },
                 QueuedMessage { text: "look".into(), mentions: vec![wt.join("a.rs")], context: vec!["<div>".into()], labels: vec!["div.nav".into()] },
             ],
+            turns: vec![
+                Turn { n: 1, start: "aa".into(), end: Some("bb".into()), files: 2, added: 12, removed: 4, rewound: true },
+                Turn { n: 2, start: "bb".into(), ..Default::default() },
+            ],
         });
         let body = toml_edit::ser::to_string_pretty(&s).unwrap();
         let back: TaskStore = toml_edit::de::from_str(&body).unwrap();
-        assert_eq!(back, s, "queued messages survive a save");
+        assert_eq!(back, s, "queued messages and turns survive a save");
+        let t = &back.tasks[0];
+        assert_eq!((t.last_turn().map(|t| t.n), t.next_turn_number()), (Some(2), 3));
+        // Files written before turns existed still load.
+        let old = body.split("[[task.turns]]").next().unwrap();
+        let back: TaskStore = toml_edit::de::from_str(old).unwrap();
+        assert!(back.tasks[0].turns.is_empty());
     }
 
     #[test]
