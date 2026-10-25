@@ -24,6 +24,7 @@ mod search_view;
 mod setup_view;
 mod terminal;
 mod tree_view;
+mod undo;
 mod workspace;
 
 use std::borrow::Cow;

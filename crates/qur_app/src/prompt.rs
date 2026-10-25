@@ -6,7 +6,7 @@
 
 use std::ops::Range;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
@@ -18,6 +18,7 @@ use smallvec::SmallVec;
 use crate::browser_view::Attachment;
 use crate::commands::{edit, input};
 use crate::look::Look;
+use crate::undo::{History, Kind, insert_kind};
 
 const MAX_LINES: usize = 10;
 
@@ -39,67 +40,6 @@ struct Snapshot {
     text: String,
     caret: usize,
     mentions: Vec<PathBuf>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EditKind {
-    /// One character typed at the caret.
-    Type,
-    /// One character or word deleted at the caret.
-    Delete,
-    /// Paste, newline, mention, cut, replace-all: always its own step.
-    Other,
-}
-
-/// Typing (or deleting) within this window of the last keystroke, with the
-/// caret where that left it, is one undo step.
-const GROUP_WINDOW: Duration = Duration::from_secs(1);
-const MAX_UNDO: usize = 200;
-
-/// Undo/redo for the prompt: whole-text snapshots (prompts are short), with
-/// consecutive typing coalesced like the editor's `history.rs`.
-#[derive(Default)]
-struct EditHistory {
-    undo: Vec<Snapshot>,
-    redo: Vec<Snapshot>,
-    /// The last edit's kind, time and caret after it (None: next edit starts a step).
-    last: Option<(EditKind, Instant, usize)>,
-}
-
-impl EditHistory {
-    /// Before an edit: keep `before` as an undo step unless the edit
-    /// continues the previous one. `caret_after` is where the edit leaves the caret.
-    fn record(&mut self, before: Snapshot, kind: EditKind, caret_after: usize, now: Instant) {
-        self.redo.clear();
-        let joins = kind != EditKind::Other
-            && matches!(self.last, Some((k, t, c)) if k == kind && now.saturating_duration_since(t) < GROUP_WINDOW && c == before.caret);
-        if !joins {
-            self.undo.push(before);
-            if self.undo.len() > MAX_UNDO {
-                self.undo.remove(0);
-            }
-        }
-        self.last = (kind != EditKind::Other).then_some((kind, now, caret_after));
-    }
-
-    /// A caret move ends the typing group.
-    fn break_group(&mut self) {
-        self.last = None;
-    }
-
-    fn undo(&mut self, current: Snapshot) -> Option<Snapshot> {
-        let s = self.undo.pop()?;
-        self.redo.push(current);
-        self.last = None;
-        Some(s)
-    }
-
-    fn redo(&mut self, current: Snapshot) -> Option<Snapshot> {
-        let s = self.redo.pop()?;
-        self.undo.push(current);
-        self.last = None;
-        Some(s)
-    }
 }
 
 /// A file dragged from the Files tree.
@@ -149,7 +89,7 @@ pub struct PromptInput {
     /// Caret and text length at the last paint: when they change, the
     /// field scrolls to show the caret; wheel scrolling leaves them alone.
     painted: (usize, usize),
-    history: EditHistory,
+    history: History<Snapshot>,
 }
 
 impl EventEmitter<PromptEvent> for PromptInput {}
@@ -170,7 +110,7 @@ impl PromptInput {
             scroll_y: px(0.),
             max_scroll: px(0.),
             painted: (0, 0),
-            history: EditHistory::default(),
+            history: History::default(),
         }
     }
 
@@ -179,9 +119,9 @@ impl PromptInput {
     }
 
     /// Note the state before an edit, for undo.
-    fn record(&mut self, kind: EditKind, caret_after: usize) {
+    fn record(&mut self, kind: Kind, caret_after: usize) {
         let before = self.snapshot();
-        self.history.record(before, kind, caret_after, Instant::now());
+        self.history.record(before, kind, self.caret, caret_after, Instant::now());
     }
 
     fn restore(&mut self, s: Snapshot, cx: &mut Context<Self>) {
@@ -203,7 +143,7 @@ impl PromptInput {
         self.caret = 0;
         self.select_all = false;
         // A sent message starts a fresh history.
-        self.history = EditHistory::default();
+        self.history = History::default();
         cx.emit(PromptEvent::Changed);
         cx.notify();
         (text, mentions)
@@ -226,7 +166,7 @@ impl PromptInput {
     /// Replace the whole text (slash command chosen), caret at the end.
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
         if self.text != text {
-            self.record(EditKind::Other, text.len());
+            self.record(Kind::Other, text.len());
         }
         self.text = text.to_string();
         self.caret = self.text.len();
@@ -244,7 +184,7 @@ impl PromptInput {
         }
         let needs_space = self.caret > 0 && !self.text[..self.caret].ends_with(char::is_whitespace);
         let ins = format!("{}@{rel} ", if needs_space { " " } else { "" });
-        self.record(EditKind::Other, self.caret + ins.len());
+        self.record(Kind::Other, self.caret + ins.len());
         self.text.insert_str(self.caret, &ins);
         self.caret += ins.len();
         self.mentions.push(abs);
@@ -253,9 +193,8 @@ impl PromptInput {
     }
 
     fn replace(&mut self, new: &str, cx: &mut Context<Self>) {
-        let typed = !self.select_all && new.chars().count() == 1 && new != "\n";
         let after = if self.select_all { new.len() } else { self.caret + new.len() };
-        self.record(if typed { EditKind::Type } else { EditKind::Other }, after);
+        self.record(insert_kind(new, self.select_all), after);
         if self.select_all {
             self.text.clear();
             self.mentions.clear();
@@ -281,7 +220,7 @@ impl PromptInput {
         if r.is_empty() {
             return;
         }
-        self.record(EditKind::Delete, r.start);
+        self.record(Kind::Erase, r.start);
         self.text.replace_range(r.clone(), "");
         self.caret = r.start;
         cx.emit(PromptEvent::Changed);
@@ -312,7 +251,7 @@ impl PromptInput {
         from + skip + (rest.len() - rest.trim_start_matches(|c: char| c.is_alphanumeric() || c == '_').len())
     }
     fn mv(&mut self, to: usize, cx: &mut Context<Self>) {
-        self.history.break_group();
+        self.history.seal();
         self.select_all = false;
         self.caret = to;
         cx.notify();
@@ -687,73 +626,5 @@ impl Render for PromptInput {
                 this.insert_mention(f.abs.clone(), cx);
             }))
             .child(PromptElement { input: cx.entity() })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn snap(text: &str) -> Snapshot {
-        Snapshot { text: text.into(), caret: text.len(), mentions: Vec::new() }
-    }
-
-    /// Apply typing `c` to `cur` the way the field does.
-    fn type_char(h: &mut EditHistory, cur: &mut Snapshot, c: char, at: Instant) {
-        h.record(cur.clone(), EditKind::Type, cur.caret + c.len_utf8(), at);
-        cur.text.push(c);
-        cur.caret += c.len_utf8();
-    }
-
-    #[test]
-    fn typing_coalesces_into_one_step() {
-        let mut h = EditHistory::default();
-        let t0 = Instant::now();
-        let mut cur = snap("");
-        for (i, c) in "hello".chars().enumerate() {
-            type_char(&mut h, &mut cur, c, t0 + Duration::from_millis(100 * i as u64));
-        }
-        assert_eq!(h.undo.len(), 1);
-        let back = h.undo(cur.clone()).unwrap();
-        assert_eq!(back.text, "");
-        // Redo brings the whole word back.
-        assert_eq!(h.redo(back).unwrap().text, "hello");
-    }
-
-    #[test]
-    fn pause_caret_move_or_kind_change_starts_a_step() {
-        let mut h = EditHistory::default();
-        let t0 = Instant::now();
-        let mut cur = snap("");
-        type_char(&mut h, &mut cur, 'a', t0);
-        // Past the window: a new step.
-        type_char(&mut h, &mut cur, 'b', t0 + GROUP_WINDOW * 2);
-        assert_eq!(h.undo.len(), 2);
-        // A caret move ends the group.
-        h.break_group();
-        type_char(&mut h, &mut cur, 'c', t0 + GROUP_WINDOW * 2);
-        assert_eq!(h.undo.len(), 3);
-        // Deleting after typing is its own step; a paste always is.
-        h.record(cur.clone(), EditKind::Delete, cur.caret - 1, t0 + GROUP_WINDOW * 2);
-        cur.text.pop();
-        cur.caret -= 1;
-        assert_eq!(h.undo.len(), 4);
-        h.record(cur.clone(), EditKind::Other, cur.caret + 3, t0 + GROUP_WINDOW * 2);
-        h.record(cur.clone(), EditKind::Other, cur.caret + 3, t0 + GROUP_WINDOW * 2);
-        assert_eq!(h.undo.len(), 6);
-    }
-
-    #[test]
-    fn new_edit_clears_redo() {
-        let mut h = EditHistory::default();
-        let t0 = Instant::now();
-        let mut cur = snap("");
-        type_char(&mut h, &mut cur, 'a', t0);
-        let back = h.undo(cur.clone()).unwrap();
-        assert_eq!(h.redo.len(), 1);
-        let mut cur = back;
-        type_char(&mut h, &mut cur, 'z', t0);
-        assert!(h.redo.is_empty());
-        assert!(h.redo(cur).is_none());
     }
 }
