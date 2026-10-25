@@ -27,6 +27,7 @@ impl Workspace {
                 let p = p.clone();
                 self.open_path_at(&p, at, window, cx);
             }
+            ChangesEvent::Rewind(n) => self.rewind_turn(id, *n, window, cx),
         }
     }
 

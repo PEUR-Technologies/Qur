@@ -15,6 +15,7 @@ mod sessions;
 mod settings;
 mod sidebar;
 mod tasks;
+mod term_turns;
 mod top_bar;
 mod turns;
 mod viewer;
@@ -88,6 +89,21 @@ struct TermTask {
     /// When the current busy stretch began (alerts: only long ones count).
     busy_since: Option<Instant>,
     wrote: bool,
+    /// Turn checkpoints (see term_turns.rs). Setup still running: nothing
+    /// counts until this file appears (the setup wrapper touches it).
+    setup_marker: Option<PathBuf>,
+    /// The running turn's start tree (None until its snapshot is in).
+    turn_start: Option<String>,
+    /// Bumped when a busy stretch starts and ends, so a late start snapshot
+    /// for an earlier stretch is dropped.
+    turn_gen: u64,
+    /// The worktree's tree at the last snapshot while no file has changed
+    /// since (`edits` counts the watcher's batches): the next turn starts
+    /// from it without another snapshot.
+    known: Option<String>,
+    edits: u64,
+    /// A Rewind is restoring files.
+    rewinding: bool,
     /// The agent's to-do list, from Claude's transcript (To-do tab).
     todos: qur_agents::todos::TodoTracker,
 }

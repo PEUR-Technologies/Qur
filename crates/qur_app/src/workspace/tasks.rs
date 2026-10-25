@@ -23,7 +23,7 @@ impl Workspace {
         let accent = Look::of(window, cx).theme.accents[0].base;
         let monitor = cx.new(|cx| {
             let mut m = TaskMonitor::new(record.worktree.clone(), record.base.clone(), accent, record.in_root, cx);
-            // No turns in a terminal: in its own worktree every write counts as the
+            // No agent-reported turns in a terminal: in its own worktree every write counts as the
             // agent's edit. In the project folder, only while it's busy (writing output;
             // see terminal_activity), so your edits there stay yours.
             m.set_turn_active(!record.in_root);
@@ -39,7 +39,11 @@ impl Workspace {
             }
         });
         self._subs.push(sub);
-        let changes = cx.new(|cx| ChangesView::new(self.root.clone(), record.worktree.clone(), record.base.clone(), record.branch.clone(), cx));
+        let changes = cx.new(|cx| {
+            let mut c = ChangesView::new(self.root.clone(), record.worktree.clone(), record.base.clone(), record.branch.clone(), cx);
+            c.set_turns(record.turns.clone(), cx);
+            c
+        });
         let id = record.id.clone();
         let sub = cx.subscribe_in(&changes, window, move |this, _, ev: &ChangesEvent, window, cx| this.on_changes_event(&id, ev, window, cx));
         self._subs.push(sub);
@@ -68,6 +72,12 @@ impl Workspace {
             was_busy: false,
             busy_since: None,
             wrote: false,
+            setup_marker: None,
+            turn_start: None,
+            turn_gen: 0,
+            known: None,
+            edits: 0,
+            rewinding: false,
             todos: Default::default(),
         });
         self.refresh_overlaps(cx);
@@ -128,6 +138,8 @@ impl Workspace {
                 let root = m.read(cx).worktree.clone();
                 if let Some(t) = this.term_tasks.iter_mut().find(|t| t.record.worktree == root) {
                     t.wrote = true;
+                    t.edits += 1;
+                    t.known = None;
                 }
                 let paths = paths.clone();
                 this.files_changed(&root, &paths, window, cx);
@@ -537,11 +549,11 @@ impl Workspace {
                     }
                 }
                 if let Some(setup) = first.setup {
-                    command = format!(
-                        "echo {}; if {setup}; then {command}; else echo; echo {}; fi",
-                        shell_quote(&format!("qur: running setup: {setup}")),
-                        shell_quote("qur: setup failed. Fix it, then start the agent from this shell.")
-                    );
+                    // Turns start counting once setup is over (term_turns.rs).
+                    let marker = std::env::temp_dir().join(format!("qur-setup-{}-{}", std::process::id(), self.term_tasks[ix].record.id));
+                    let _ = std::fs::remove_file(&marker);
+                    command = setup_wrapper(&setup, &command, &marker);
+                    self.term_tasks[ix].setup_marker = Some(marker);
                 }
             }
             let t = &self.term_tasks[ix];
@@ -555,8 +567,9 @@ impl Workspace {
         window.focus(&f, cx);
     }
 
-    /// Agent Terminals have no turns, so "busy, then quiet" stands in for one
-    /// (M5): deliver a typed first prompt once the agent is first quiet, and
+    /// Agent Terminals don't report turns, so "busy, then quiet" stands in
+    /// for one (M5): deliver a typed first prompt once the agent is first
+    /// quiet, take turn checkpoints (term_turns.rs) once setup is over, and
     /// after a busy stretch that changed files, run the project's checks if
     /// `[checks] terminal = true`.
     pub(super) fn terminal_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -565,6 +578,7 @@ impl Workspace {
         let mut finished = Vec::new();
         let mut renamed = false;
         let mut busy_flags = Vec::new();
+        let (mut began, mut ended) = (Vec::new(), Vec::new());
         {
             let panel = self.terms.read(cx);
             for t in &mut self.term_tasks {
@@ -583,6 +597,15 @@ impl Workspace {
                     busy_flags.push((t.monitor.clone(), busy));
                 }
                 let started = s.has_output();
+                // Setup isn't the agent's work: nothing counts until it ends.
+                if t.setup_marker.as_ref().is_some_and(|m| !m.exists()) {
+                    continue;
+                }
+                if let Some(m) = t.setup_marker.take() {
+                    let _ = std::fs::remove_file(m);
+                    t.was_busy = false;
+                    t.wrote = false;
+                }
                 if !busy && started && let Some(p) = t.pending_type.take() {
                     // Startup (and setup) isn't a turn: start counting from here.
                     typed.push((s.id, p));
@@ -594,6 +617,9 @@ impl Workspace {
                     continue;
                 }
                 if busy {
+                    if !t.was_busy {
+                        began.push(t.record.id.clone());
+                    }
                     t.was_busy = true;
                     t.busy_since.get_or_insert_with(Instant::now);
                 } else {
@@ -602,14 +628,24 @@ impl Workspace {
                     if t.busy_since.take().is_some_and(|b| b.elapsed() >= Duration::from_secs(7)) {
                         finished.push((t.record.id.clone(), t.record.title.clone()));
                     }
-                    if std::mem::take(&mut t.was_busy) && std::mem::take(&mut t.wrote) {
-                        turns.push(t.record.id.clone());
+                    if std::mem::take(&mut t.was_busy) {
+                        let wrote = std::mem::take(&mut t.wrote);
+                        ended.push((t.record.id.clone(), wrote));
+                        if wrote {
+                            turns.push(t.record.id.clone());
+                        }
                     }
                 }
             }
         }
         for (m, busy) in busy_flags {
             m.update(cx, |m, _| m.set_turn_active(busy));
+        }
+        for id in began {
+            self.term_turn_began(&id, cx);
+        }
+        for (id, wrote) in ended {
+            self.term_turn_ended(&id, wrote, cx);
         }
         if renamed {
             self.save_tasks(cx);
@@ -689,6 +725,9 @@ impl Workspace {
                 }
             });
         }
+        if let Some(m) = self.term_task(id).and_then(|t| t.setup_marker.clone()) {
+            let _ = std::fs::remove_file(m);
+        }
         self.term_tasks.retain(|t| t.record.id != id);
         self.checks.remove(id);
         self.trees.remove(wt);
@@ -704,11 +743,20 @@ impl Workspace {
         let in_root = self.in_root(id, cx);
         let handle = self.stop_task(id, &wt, cx);
         self.save_tasks(cx);
+        let root = self.root.clone();
         if in_root {
-            // Its work is your folder: close it, delete nothing.
+            // Its work is your folder: close it, delete nothing but its
+            // turn checkpoints' refs.
+            let id = id.to_string();
+            cx.background_executor()
+                .spawn(async move {
+                    if let Err(e) = qur_git::delete_turn_refs(&root, &id) {
+                        eprintln!("TURN {id} refs: {e}");
+                    }
+                })
+                .detach();
             return cx.notify();
         }
-        let root = self.root.clone();
         let bg = cx.background_executor().clone();
         let id = id.to_string();
         cx.spawn_in(window, async move |this, cx| {
@@ -944,6 +992,17 @@ fn shell_command(def: &AgentDef) -> String {
     std::iter::once(def.command.as_str()).chain(def.args.iter().map(String::as_str)).map(shell_quote).collect::<Vec<_>>().join(" ")
 }
 
+/// Setup, then the agent (decision 22). The marker file is touched when setup
+/// ends, worked or not, so turns start counting from there.
+fn setup_wrapper(setup: &str, command: &str, marker: &Path) -> String {
+    let touch = format!(": > {}", shell_quote(&marker.to_string_lossy()));
+    format!(
+        "echo {}; if {setup}; then {touch}; {command}; else {touch}; echo; echo {}; fi",
+        shell_quote(&format!("qur: running setup: {setup}")),
+        shell_quote("qur: setup failed. Fix it, then start the agent from this shell.")
+    )
+}
+
 fn shell_quote(s: &str) -> String {
     if s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:@".contains(c)) {
         s.to_string()
@@ -972,4 +1031,29 @@ fn pasted_image_file(img: &gpui::Image) -> Option<PathBuf> {
     let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
     let path = std::env::temp_dir().join(format!("qur-paste-{ms}.{ext}"));
     std::fs::write(&path, img.bytes()).ok().map(|_| path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_runs_before_the_agent_and_marks_its_end() {
+        let marker = Path::new("/tmp/qur setup-1");
+        let cmd = setup_wrapper("pnpm install", "claude 'fix it'", marker);
+        assert_eq!(
+            cmd,
+            "echo 'qur: running setup: pnpm install'; if pnpm install; then : > '/tmp/qur setup-1'; claude 'fix it'; else : > '/tmp/qur setup-1'; echo; echo 'qur: setup failed. Fix it, then start the agent from this shell.'; fi"
+        );
+        // It runs: setup, the marker, then the agent; a failed setup marks it too.
+        let d = std::env::temp_dir().join(format!("qur-setup-test-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        for (setup, agent_ran) in [("true", true), ("false", false)] {
+            let m = d.join(format!("marker-{setup}"));
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(setup_wrapper(setup, "echo agent", &m)).output().unwrap();
+            assert!(m.exists(), "{setup}: marker");
+            assert_eq!(String::from_utf8_lossy(&out.stdout).contains("\nagent\n"), agent_ran, "{setup}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

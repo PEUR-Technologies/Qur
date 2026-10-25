@@ -24,6 +24,8 @@ pub enum ChangesEvent {
     SendComments(String),
     /// Open a file (absolute path) in the code modal at a line.
     Open(PathBuf, Option<u32>),
+    /// Rewind to before this turn (the turn strip's Rewind…; asks first).
+    Rewind(u32),
 }
 
 #[derive(Clone)]
@@ -178,6 +180,9 @@ pub struct ChangesView {
     pub worktree: PathBuf,
     /// Showing one turn's changes instead of the whole task's.
     pub turn: Option<TurnFilter>,
+    /// The task's turns for the strip under the header (Agent Terminals,
+    /// which have no chat to put turn lines in). Empty: no strip.
+    turns: Vec<qur_agents::Turn>,
     base: String,
     pub files: Vec<FileDiff>,
     pub totals: (u32, u32),
@@ -204,6 +209,7 @@ impl ChangesView {
         let mut v = ChangesView {
             worktree,
             turn: None,
+            turns: Vec::new(),
             base,
             files: Vec::new(),
             totals: (0, 0),
@@ -233,6 +239,12 @@ impl ChangesView {
         }
         self.turn = Some(TurnFilter { n, start, end });
         self.refresh(cx);
+    }
+
+    /// The turns listed in the strip (newest last).
+    pub fn set_turns(&mut self, turns: Vec<qur_agents::Turn>, cx: &mut Context<Self>) {
+        self.turns = turns;
+        cx.notify();
     }
 
     /// Back to everything the task changed (Review Changes, Show All).
@@ -333,6 +345,70 @@ impl ChangesView {
     pub fn abs(&self, rel: &Path) -> PathBuf {
         self.worktree.join(rel)
     }
+
+    /// "Turns  #2 · 3 files  #3 · 1 file  Rewind…": the newest turns as
+    /// chips (click: just that turn), and Rewind for the one shown.
+    fn turn_strip(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = &look.theme.ui;
+        let shown = self.turn.as_ref().map(|t| t.n);
+        let skip = self.turns.len().saturating_sub(MAX_TURN_CHIPS);
+        let chips = self.turns[skip..].iter().map(|t| {
+            let (n, start, end) = (t.n, t.start.clone(), t.end.clone());
+            let on = shown == Some(n);
+            div()
+                .id(("turn-chip", n as usize))
+                .relative()
+                .flex_none()
+                .px(look.z(6.))
+                .py(look.z(1.))
+                .rounded(look.z(4.))
+                .cursor_pointer()
+                .children(crate::script::mark(|| format!("turn:{n}")))
+                .when(on, |d| d.bg(look.c(ui.active_bg)).text_color(look.c(ui.text)))
+                .when(!on, |d| d.hover(|d| d.bg(look.c(ui.hover_bg))))
+                .when(t.rewound, |d| d.text_color(look.c(ui.text_muted)))
+                .child(turn_chip_label(t))
+                .on_click(cx.listener(move |v, _, _, cx| v.show_turn(n, start.clone(), end.clone(), cx)))
+        });
+        let rewind = shown.filter(|n| self.turns.iter().any(|t| t.n == *n && !t.rewound));
+        div()
+            .flex_none()
+            .px(look.z(12.))
+            .py(look.z(4.))
+            .flex()
+            .items_center()
+            .gap(look.z(4.))
+            .border_b_1()
+            .border_color(look.c(ui.border))
+            .text_size(look.text(-2.))
+            .text_color(look.c(ui.text_secondary))
+            .child(div().flex_none().mr(look.z(4.)).text_color(look.c(ui.text_muted)).child("Turns"))
+            .when(skip > 0, |d| d.child(div().flex_none().text_color(look.c(ui.text_muted)).child(format!("{skip} earlier ·"))))
+            .children(chips)
+            .child(div().flex_1())
+            .children(rewind.map(|n| {
+                div()
+                    .id("turn-rewind")
+                    .relative()
+                    .flex_none()
+                    .cursor_pointer()
+                    .children(crate::script::mark(|| "turn:rewind".to_string()))
+                    .hover(|d| d.text_color(look.c(ui.text)))
+                    .child("Rewind…")
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(ChangesEvent::Rewind(n))))
+            }))
+    }
+}
+
+/// How many turns the strip lists (the newest).
+const MAX_TURN_CHIPS: usize = 8;
+
+/// A turn chip: "#3 · 2 files +12 −4", or "#3 rewound".
+fn turn_chip_label(t: &qur_agents::Turn) -> String {
+    if t.rewound {
+        return format!("#{} rewound", t.n);
+    }
+    format!("#{} · {} file{} +{} −{}", t.n, t.files, if t.files == 1 { "" } else { "s" }, t.added, t.removed)
 }
 
 impl Render for ChangesView {
@@ -394,6 +470,7 @@ impl Render for ChangesView {
             .child(button("Discard…".into(), "changes-discard", false).on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesEvent::Discard))))
             .child(button("Keep working".into(), "changes-keep", false).on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesEvent::KeepWorking))))
             .child(button("Merge".into(), "changes-merge", true).on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesEvent::Merge))));
+        let strip = (!self.turns.is_empty()).then(|| self.turn_strip(&look, cx));
         let rows = self.rows();
         let count = rows.len();
         let body = if n == 0 && !self.loading {
@@ -508,6 +585,20 @@ impl Render for ChangesView {
             .text_size(look.text(-2.))
             .text_color(look.c(ui.text_muted))
             .child("Click a line to comment · ⌘-click to open the file · comments go to the agent in one message");
-        div().size_full().flex().flex_col().bg(look.surface(ui.editor_bg)).child(header).child(body).child(hint)
+        div().size_full().flex().flex_col().bg(look.surface(ui.editor_bg)).child(header).children(strip).child(body).child(hint)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::turn_chip_label;
+
+    #[test]
+    fn turn_chips() {
+        let t = qur_agents::Turn { n: 3, start: "a".into(), end: Some("b".into()), files: 1, added: 12, removed: 4, rewound: false };
+        assert_eq!(turn_chip_label(&t), "#3 · 1 file +12 −4");
+        let t = qur_agents::Turn { files: 2, ..t };
+        assert_eq!(turn_chip_label(&t), "#3 · 2 files +12 −4");
+        assert_eq!(turn_chip_label(&qur_agents::Turn { rewound: true, ..t }), "#3 rewound");
     }
 }

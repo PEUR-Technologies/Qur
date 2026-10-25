@@ -22,27 +22,30 @@ impl Workspace {
         }
     }
 
-    /// The selected ACP agent and its newest turn that can be shown or
-    /// rewound. Agent Terminals have no turn boundaries (none).
-    pub(super) fn selected_last_turn(&self, cx: &App) -> Option<(Entity<AgentTask>, u32)> {
-        let a = self.selected_agent()?;
-        let n = a.read(cx).record.last_turn()?.n;
-        Some((a, n))
+    /// The selected agent (ACP or Agent Terminal) and its newest turn that
+    /// can be shown or rewound.
+    pub(super) fn selected_last_turn(&self, cx: &App) -> Option<(String, u32)> {
+        let record = match &self.selected {
+            Some(Selected::Agent(id)) => &self.agent(id)?.read(cx).record,
+            Some(Selected::TermTask(id)) => &self.term_task(id)?.record,
+            _ => return None,
+        };
+        Some((record.id.clone(), record.last_turn()?.n))
     }
 
     pub(super) fn show_last_turn(&mut self, _: &qur::ShowLastTurn, _: &mut Window, cx: &mut Context<Self>) {
         match self.selected_last_turn(cx) {
-            Some((a, n)) => a.update(cx, |a, cx| a.show_turn(n, cx)),
+            Some((id, n)) => match self.agent(&id).cloned() {
+                Some(a) => a.update(cx, |a, cx| a.show_turn(n, cx)),
+                None => self.show_term_turn(&id, n, cx),
+            },
             None => self.no_turn_message(cx),
         }
     }
 
     pub(super) fn rewind_last_turn(&mut self, _: &qur::RewindLastTurn, window: &mut Window, cx: &mut Context<Self>) {
         match self.selected_last_turn(cx) {
-            Some((a, n)) => {
-                let id = a.read(cx).record.id.clone();
-                self.rewind_turn(&id, n, window, cx);
-            }
+            Some((id, n)) => self.rewind_turn(&id, n, window, cx),
             None => self.no_turn_message(cx),
         }
     }
@@ -183,8 +186,7 @@ impl Workspace {
 
     fn no_turn_message(&mut self, cx: &mut Context<Self>) {
         let msg = match &self.selected {
-            Some(Selected::TermTask(_)) => "Agent Terminals have no turns to show or rewind yet",
-            Some(Selected::Agent(_)) => "No turn has changed files yet",
+            Some(Selected::TermTask(_) | Selected::Agent(_)) => "No turn has changed files yet",
             _ => "Select an agent first",
         };
         self.flash(msg, cx);
@@ -193,7 +195,7 @@ impl Workspace {
     /// Rewind: ask (warning when files changed since the turn ended), then
     /// the agent stops if needed and its worktree goes back to before turn N.
     pub(super) fn rewind_turn(&mut self, id: &str, n: u32, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(a) = self.agent(id).cloned() else { return };
+        let Some(a) = self.agent(id).cloned() else { return self.rewind_term_turn(id, n, window, cx) };
         let (wt, label, running, turn, later, last_end) = {
             let t = a.read(cx);
             let r = &t.record;
