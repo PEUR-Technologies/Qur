@@ -4,3 +4,4 @@ target/
 /spikes/**/out/
 .DS_Store
 /spikes/fixtures/web-repo/
+/.claude/
