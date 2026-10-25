@@ -130,7 +130,17 @@ pub struct UiConfig {
     pub radius: f32,
     /// A hairline border around each tile.
     pub tile_border: bool,
+    /// The sidebar: "show" (always), "auto" (hidden until the mouse reaches
+    /// its edge of the window) or "hidden" (until `Cmd+B`).
+    pub sidebar: String,
+    /// Which side of the window the sidebar is on: "left" or "right".
+    pub sidebar_side: String,
+    /// The sidebar's sections, top to bottom (`SIDEBAR_SECTIONS`, any order).
+    pub sidebar_sections: Vec<String>,
 }
+
+/// The sidebar's sections in their default order (`[ui] sidebar_sections`).
+pub const SIDEBAR_SECTIONS: [&str; 4] = ["agents", "terminals", "git", "files"];
 
 /// Window gaps' slider range (`[ui] gap`).
 pub const MIN_GAP: f32 = 2.0;
@@ -198,6 +208,9 @@ impl Default for UiConfig {
             rounded: true,
             radius: DEFAULT_RADIUS,
             tile_border: false,
+            sidebar: "show".into(),
+            sidebar_side: "left".into(),
+            sidebar_sections: SIDEBAR_SECTIONS.map(String::from).to_vec(),
         }
     }
 }
@@ -235,6 +248,20 @@ impl Config {
         self.editor.line_height = self.editor.line_height.clamp(1.0, 3.0);
         self.editor.tab_width = self.editor.tab_width.clamp(1, 16);
         self.window.opacity = self.window.opacity.clamp(0.0, 1.0);
+        if !matches!(self.ui.sidebar.as_str(), "show" | "auto" | "hidden") {
+            self.ui.sidebar = "show".into();
+        }
+        if self.ui.sidebar_side != "right" {
+            self.ui.sidebar_side = "left".into();
+        }
+        // Known sections once each, in the order given; any left out go last.
+        let mut sections: Vec<String> = Vec::new();
+        for s in self.ui.sidebar_sections.iter().chain(SIDEBAR_SECTIONS.map(String::from).iter()) {
+            if SIDEBAR_SECTIONS.contains(&s.as_str()) && !sections.contains(s) {
+                sections.push(s.clone());
+            }
+        }
+        self.ui.sidebar_sections = sections;
         if self.theme.trim().is_empty() {
             self.theme = THEME_AUTO.into();
         }
@@ -252,6 +279,7 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     Int(i64),
+    List(Vec<String>),
 }
 
 impl From<&str> for Value {
@@ -303,6 +331,7 @@ pub fn write_key(path: &Path, key: &str, value: Option<Value>) -> std::io::Resul
                 Value::Float(f) => toml_edit::value(f),
                 Value::Bool(b) => toml_edit::value(b),
                 Value::Int(i) => toml_edit::value(i),
+                Value::List(l) => toml_edit::value(l.into_iter().collect::<toml_edit::Array>()),
             };
             // Keep any comment/decor attached to an existing value.
             match table.get_mut(last).and_then(|i| i.as_value_mut()) {
@@ -690,6 +719,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn sidebar_settings_sanitize_and_round_trip() {
+        let d = tmp("sidebar");
+        let p = d.join("config.toml");
+        std::fs::write(&p, "[ui]\nsidebar = \"bogus\"\nsidebar_side = \"up\"\nsidebar_sections = [\"files\", \"nope\", \"files\", \"git\"]\n").unwrap();
+        let (c, err) = Config::load_from(&p);
+        assert!(err.is_none(), "{err:?}");
+        assert_eq!((c.ui.sidebar.as_str(), c.ui.sidebar_side.as_str()), ("show", "left"));
+        assert_eq!(c.ui.sidebar_sections, ["files", "git", "agents", "terminals"], "unknown and repeated dropped, missing appended");
+        write_key(&p, "ui.sidebar_sections", Some(Value::List(vec!["git".into(), "agents".into()]))).unwrap();
+        write_key(&p, "ui.sidebar", Some("auto".into())).unwrap();
+        write_key(&p, "ui.sidebar_side", Some("right".into())).unwrap();
+        let (c, _) = Config::load_from(&p);
+        assert_eq!((c.ui.sidebar.as_str(), c.ui.sidebar_side.as_str()), ("auto", "right"));
+        assert_eq!(c.ui.sidebar_sections, ["git", "agents", "terminals", "files"]);
     }
 
     #[test]

@@ -61,7 +61,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 ## View
 - Command Palette… `Cmd+Shift+P`
 - ---
-- Sidebar `Cmd+B` (checkmark) · Files Dropdown `Cmd+Shift+E`
+- Sidebar `Cmd+B` (checkmark) · Auto-hide Sidebar (checkmark) · Sidebar on Right (checkmark) · Files Dropdown `Cmd+Shift+E`
 - Go to Terminal ``Ctrl+` `` · Git `Ctrl+Shift+G` · Search `Cmd+Shift+F` (a view in the stage, decision 31)
 - Git ▸ Stage All Changes · Unstage All Changes · Commit Staged…
 - ---

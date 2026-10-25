@@ -54,17 +54,15 @@ use crate::search_view::{SearchEvent, SearchPanel};
 use crate::setup_view::{self, SetupEvent, SetupView};
 use crate::terminal::{Kind, PanelEvent, TerminalPanel};
 use crate::tree_view::{TreeEvent, TreeView};
-use top_bar::{set_titlebar_hidden, set_traffic_lights_hidden};
+use top_bar::{set_shadow, set_titlebar_hidden, set_traffic_lights_hidden};
 
 /// Height of our own top bar (the system titlebar is transparent underneath).
 pub const TITLEBAR_H: f32 = 32.0;
-/// Left inset that clears the traffic lights placed at (9, 9).
-const TRAFFIC_LIGHTS_W: f32 = 78.0;
-/// Zen mode: the strip at the top that shows the bar (as tall as the bar, so
-/// you don't have to hit the edge pixel), and how far below the bar the mouse
-/// may wander before the bar slides away.
-const ZEN_EDGE: f32 = TITLEBAR_H;
-const ZEN_SLACK: f32 = 24.0;
+/// Zen mode: the strip at the top that shows the bar (thin, so reaching for
+/// a tab or the sidebar's top row doesn't pop it, yet not the edge pixel
+/// alone), and how far below the bar the mouse may wander before it slides away.
+const ZEN_EDGE: f32 = 5.0;
+const ZEN_SLACK: f32 = 8.0;
 const ZEN_SLIDE: Duration = Duration::from_millis(160);
 const SIDEBAR_DEFAULT_W: f32 = 280.0;
 const SIDEBAR_MIN_W: f32 = 200.0;
@@ -210,6 +208,9 @@ pub struct Workspace {
     code_prev_focus: Option<FocusHandle>,
     sidebar: bool,
     sidebar_w: f32,
+    /// `[ui] sidebar = "auto"`: the sidebar is slid in because the mouse
+    /// reached its edge of the window.
+    sidebar_shown: bool,
     /// `caffeinate` while Keep Awake is on (agents keep working with the lid
     /// open and the screen idle). It watches Qur's pid, so it ends with Qur.
     caffeinate: Option<std::process::Child>,
@@ -241,18 +242,21 @@ pub struct Workspace {
     /// The Gaps popover's sliders (gap, corner radius) and which one is dragged.
     gap_sliders: Rc<[Cell<Bounds<Pixels>>; 2]>,
     gap_sliding: Option<usize>,
-    /// Where the traffic lights were last moved to (in from the corner, for window gaps).
-    lights_inset: f32,
+    /// The window is the key window (the traffic lights are grey otherwise).
+    window_active: bool,
     title_drag: bool,
     /// Full screen hides the traffic lights, so the title bar starts at the edge.
     fullscreen: bool,
     /// Zen mode: the top bar is slid down because the mouse reached the top edge.
     zen_shown: bool,
-    /// Whether the native traffic lights are hidden now: in zen mode with the
-    /// bar away, and in full screen, where Qur draws its own in the bar.
+    /// When the bar last started sliding (in or out), for its animation.
+    zen_since: Instant,
+    /// Whether the system's traffic lights have been hidden (Qur draws its own in the bar).
     lights_hidden: bool,
     /// Whether the system title bar strip is hidden (full screen only).
     titlebar_hidden: bool,
+    /// Whether the window's shadow is off (window gaps).
+    shadow_off: bool,
     first_frame: bool,
     _subs: Vec<Subscription>,
 }
@@ -293,6 +297,8 @@ impl Workspace {
                 this.apply_look(window, cx);
             }),
             cx.observe_window_activation(window, |this, window, cx| {
+                // The traffic lights turn grey or back to color.
+                cx.notify();
                 if window.is_window_active() {
                     this.sync_menus(cx);
                     // Coming back to the agent you were on counts as seeing it.
@@ -315,6 +321,7 @@ impl Workspace {
         state.setup_done = true;
         state.save().ok();
         crate::mark("state_saved");
+        let sidebar = config.ui.sidebar != "hidden";
         let mut ws = Workspace {
             focus: cx.focus_handle(),
             root: root.clone(),
@@ -342,8 +349,9 @@ impl Workspace {
             buffers: Buffers { list: Vec::new() },
             code: None,
             code_prev_focus: None,
-            sidebar: true,
+            sidebar,
             sidebar_w: SIDEBAR_DEFAULT_W,
+            sidebar_shown: false,
             caffeinate: None,
             files_open: true,
             resizing: false,
@@ -366,11 +374,13 @@ impl Workspace {
             sliding: false,
             gap_sliders: Rc::new([Cell::new(Bounds::default()), Cell::new(Bounds::default())]),
             gap_sliding: None,
-            lights_inset: 0.0,
+            window_active: true,
             title_drag: false,
             fullscreen: false,
             zen_shown: false,
+            zen_since: Instant::now().checked_sub(ZEN_SLIDE).unwrap_or_else(Instant::now),
             titlebar_hidden: false,
+            shadow_off: false,
             lights_hidden: false,
             first_frame: false,
             _subs: subs,
@@ -428,6 +438,8 @@ impl Workspace {
             layout: self.layout.as_str(),
             follow: self.selected_live(cx).map(|l| l.read(cx).follow).unwrap_or(true),
             sidebar: self.sidebar,
+            sidebar_auto: self.config.ui.sidebar == "auto",
+            sidebar_right: self.sidebar_right(),
             soft_wrap: self.code.as_ref().map(|e| e.read(cx).soft_wrap()).unwrap_or(self.config.editor.soft_wrap),
             recent: qur_config::State::load().recent_projects,
             merging: self.merge.is_some(),
@@ -568,14 +580,18 @@ fn is_dark(a: WindowAppearance) -> bool {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.fullscreen = window.is_fullscreen();
-        let lights_hidden = self.fullscreen || (self.config.ui.zen && !self.zen_shown);
-        if lights_hidden != self.lights_hidden {
-            self.lights_hidden = lights_hidden;
-            set_traffic_lights_hidden(window, lights_hidden);
+        let zen_p = self.zen_progress(cx);
+        self.window_active = window.is_window_active();
+        // Qur draws the traffic lights in its bar; the system's stay hidden.
+        if !self.lights_hidden {
+            self.lights_hidden = true;
+            set_traffic_lights_hidden(window, true);
         }
         if self.fullscreen != self.titlebar_hidden {
             self.titlebar_hidden = self.fullscreen;
             set_titlebar_hidden(window, self.fullscreen);
+            // AppKit lays its buttons out again going in or out of full screen.
+            set_traffic_lights_hidden(window, true);
         }
         let look = Look::of(window, cx);
         let ui = look.theme.ui.clone();
@@ -607,7 +623,9 @@ impl Render for Workspace {
         }
         // Native web views draw above GPUI: only the selected task's browser
         // shows, and never under a modal, picker or popover (decision 26).
-        let covered = self.overlay.is_some() || self.code.is_some();
+        // Nor while a tab or pane is dragged: a web view drawn over the dock
+        // hid the drop preview and took the drag's mouse moves.
+        let covered = self.overlay.is_some() || self.code.is_some() || cx.has_active_drag();
         for a in self.agents.clone() {
             let (id, wants, browser) = {
                 let t = a.read(cx);
@@ -621,19 +639,22 @@ impl Render for Workspace {
             let show = term_wants && !covered && self.selected == Some(Selected::TermTask(id));
             browser.update(cx, |b, cx| b.set_shown(show, window, cx));
         }
-        // Window gaps: the traffic lights move in with the top bar's tile.
-        let lights = f32::from(look.gap()).round();
-        if lights != self.lights_inset {
-            self.lights_inset = lights;
-            window.set_traffic_light_position(gpui::point(px(9. + lights), px(9. + lights)));
-        }
         let tiled = look.tiles.is_some();
+        // With gaps the whole window is (all but) clear, so its shadow fell
+        // under the gaps too: a dark rim around the tiles. Tiles go shadowless.
+        if tiled != self.shadow_off {
+            self.shadow_off = tiled;
+            set_shadow(window, !tiled);
+        }
+        let sidebar = self.sidebar_visible();
         let body = div()
             .flex_1()
             .min_h(px(0.))
             .flex()
-            .when(self.sidebar, |d| d.child(self.sidebar(&look, cx)))
-            .when(self.sidebar && tiled, |d| d.child(self.sidebar_gap(&look, cx)))
+            // `[ui] sidebar_side = "right"`: the same row, mirrored.
+            .when(self.sidebar_right(), |d| d.flex_row_reverse())
+            .when(sidebar, |d| d.child(self.sidebar(&look, cx)))
+            .when(sidebar && tiled, |d| d.child(self.sidebar_gap(&look, cx)))
             .child(div().flex_1().min_w(px(0.)).h_full().child(self.stage(&look, cx)));
         let zen = self.config.ui.zen;
         // With window gaps the regions sit a gap apart and in from the edges.
@@ -642,8 +663,9 @@ impl Render for Workspace {
             .min_h(px(0.))
             .flex()
             .flex_col()
-            .when(tiled, |d| d.p(look.gap()).gap(look.gap()))
-            .when(!zen, |d| d.child(self.top(&look, cx)))
+            // In zen the bar's space (with its gap below) grows as it slides in.
+            .when(tiled, |d| d.p(look.gap()).when(!zen, |d| d.gap(look.gap())))
+            .when(!zen || zen_p > 0., |d| d.child(self.top(&look, zen_p, cx)))
             .child(body);
         let any_overlay = self.overlay.is_some();
         div()
@@ -672,6 +694,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::zoom_window))
             .on_action(cx.listener(Self::fullscreen))
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::auto_hide_sidebar))
+            .on_action(cx.listener(Self::sidebar_on_right))
             .on_action(cx.listener(Self::reveal_files))
             .on_action(cx.listener(Self::toggle_terminal))
             .on_action(cx.listener(Self::zoom_in))
@@ -811,7 +835,12 @@ impl Render for Workspace {
             }))
             // Sidebar resizing and the accent sliders follow the mouse anywhere in the window.
             .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, window, cx| {
-                this.zen_track(ev.position.y, window, cx);
+                // Neither slides while a button is held: pressing a tab at the
+                // top edge to drag it brought the bar down under the pointer.
+                if ev.pressed_button.is_none() {
+                    this.zen_track(ev.position.y, window, cx);
+                    this.sidebar_track(ev.position.x, window, cx);
+                }
                 if let Some(which) = this.tuning {
                     if ev.pressed_button == Some(MouseButton::Left) {
                         this.tune_to(which, ev.position.x, window, cx);
@@ -822,7 +851,9 @@ impl Render for Workspace {
                 if this.resizing {
                     if ev.pressed_button == Some(MouseButton::Left) {
                         let look = Look::of(window, cx);
-                        this.sidebar_w = (f32::from(ev.position.x - look.gap()) / look.zoom).clamp(SIDEBAR_MIN_W, SIDEBAR_MAX_W);
+                        // How far the mouse is in from the sidebar's edge of the window.
+                        let x = if this.sidebar_right() { window.viewport_size().width - ev.position.x } else { ev.position.x };
+                        this.sidebar_w = (f32::from(x - look.gap()) / look.zoom).clamp(SIDEBAR_MIN_W, SIDEBAR_MAX_W);
                         cx.notify();
                     } else {
                         this.resizing = false;
@@ -838,7 +869,7 @@ impl Render for Workspace {
                 }
             }))
             .child(frame)
-            .when(zen, |d| d.child(self.top(&look, cx)))
+            .children(crate::script::mark(|| "window".to_string()))
             .children(self.code_modal(&look, cx))
             .when(any_overlay, |d| {
                 d.child(div().absolute().size_full().on_mouse_down(

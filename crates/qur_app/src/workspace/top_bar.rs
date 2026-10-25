@@ -12,33 +12,58 @@ impl Workspace {
         self.broadcast_reload(cx);
         self.sync_menus(cx);
         self.zen_shown = false;
+        self.zen_since = Instant::now().checked_sub(ZEN_SLIDE).unwrap_or_else(Instant::now);
         self.flash(if on { "Zen mode on (move the mouse to the top edge for the bar)" } else { "Zen mode off" }, cx);
     }
 
     /// Zen mode: slide the bar down at the top edge, and away once the mouse
     /// leaves it (not while dragging the window by it).
     pub(super) fn zen_track(&mut self, y: Pixels, window: &Window, cx: &mut Context<Self>) {
-        if !self.config.ui.zen {
+        // Not while a tab or pane is dragged: the bar sliding in moved the
+        // panes under the pointer as it neared their top edges.
+        if !self.config.ui.zen || cx.has_active_drag() {
             return;
         }
         let look = Look::of(window, cx);
         let (zoom, gap) = (look.zoom, look.gap());
         let show = if self.zen_shown {
-            self.title_drag || y <= px((TITLEBAR_H + ZEN_SLACK) * zoom) + gap
+            self.title_drag || y <= self.bar_h(&look) + px(ZEN_SLACK * zoom) + gap
         } else {
             y <= px(ZEN_EDGE * zoom) + gap
         };
         if show != self.zen_shown {
+            // Turning around mid-slide carries on from where the bar is.
+            let t = (self.zen_since.elapsed().as_secs_f32() / ZEN_SLIDE.as_secs_f32()).min(1.);
+            self.zen_since = Instant::now().checked_sub(ZEN_SLIDE.mul_f32(1. - t)).unwrap_or_else(Instant::now);
             self.zen_shown = show;
             cx.notify();
         }
     }
 
+    /// Zen mode: how far down the bar is, 0 (away) to 1 (down), eased over
+    /// `ZEN_SLIDE`; asks for the next frame while it moves. The easing is
+    /// symmetric, so turning around mid-slide doesn't jump.
+    pub(super) fn zen_progress(&self, cx: &mut Context<Self>) -> f32 {
+        let t = (self.zen_since.elapsed().as_secs_f32() / ZEN_SLIDE.as_secs_f32()).min(1.);
+        if t < 1. {
+            crate::tiling::next_frame(cx);
+        }
+        let e = gpui::ease_in_out(t);
+        if self.zen_shown { e } else { 1. - e }
+    }
+
     // -- render pieces -------------------------------------------------------------------
 
-    /// Where title bar content starts: past the traffic lights, or near the edge in full screen.
+    /// Where title bar content starts: in from the edge, the traffic lights first.
     pub(super) fn title_lead(&self, look: &Look) -> Pixels {
-        if self.fullscreen { look.z(8.) } else { px(TRAFFIC_LIGHTS_W) }
+        look.z(12.)
+    }
+
+    /// The bar's height: it zooms with the rest, but never below what the
+    /// system's traffic lights need (they don't zoom; zoomed out they hung
+    /// below it). Full screen's lights are Qur's own and zoom with it.
+    pub(super) fn bar_h(&self, look: &Look) -> Pixels {
+        if self.fullscreen { look.z(TITLEBAR_H) } else { look.z(TITLEBAR_H).max(px(TITLEBAR_H)) }
     }
 
     fn title_bar(&self, look: &Look, cx: &mut Context<Self>) -> impl IntoElement {
@@ -50,7 +75,7 @@ impl Workspace {
         let bar = if look.tiles.is_some() { look.tile(bar, ui.top_bar_bg) } else { bar.bg(look.bg(ui.top_bar_bg)).border_b_1().border_color(look.c(ui.border)) };
         bar.id("titlebar")
             .window_control_area(gpui::WindowControlArea::Drag)
-            .h(look.z(TITLEBAR_H))
+            .h(self.bar_h(look))
             .w_full()
             .flex_none()
             .flex()
@@ -73,7 +98,7 @@ impl Workspace {
                     window.titlebar_double_click();
                 }
             })
-            .when(self.fullscreen, |d| d.child(self.traffic_lights(look, cx)))
+            .child(self.traffic_lights(look, cx))
             .child(
                 div()
                     .id("project")
@@ -96,69 +121,67 @@ impl Workspace {
             .children(message.map(|m| div().flex_none().max_w(look.z(420.)).truncate().text_size(look.text(-1.)).text_color(look.c(ui.text_secondary)).child(m)))
     }
 
-    /// Full screen: close, minimize and zoom in the bar itself, in line with the
-    /// project name, instead of the system's strip that slides down above it.
-    /// Minimize is off in full screen, as in AppKit; zoom leaves full screen.
-    /// `[ui] traffic_lights` may draw them in the theme's grey instead of red,
-    /// yellow and green: "auto" does in dark themes, "mono" always.
+    /// Close, minimize and zoom, drawn by Qur in the bar itself (decision 61):
+    /// the system's stay pinned near the window's corner, so with window
+    /// gaps, a zoomed bar or zen's sliding one they fell out of line with it.
+    /// Plain circles (no symbols on hover), grey while the window isn't
+    /// active; minimize is off in full screen (zoom leaves it).
+    /// In full screen `[ui] traffic_lights` may draw them in the theme's grey:
+    /// "auto" does in dark themes; "mono" always does.
     fn traffic_lights(&self, look: &Look, cx: &mut Context<Self>) -> impl IntoElement {
         let mono = match self.config.ui.traffic_lights.as_str() {
             "mono" => true,
             "color" => false,
-            _ => look.theme.appearance == Appearance::Dark,
+            _ => self.fullscreen && look.theme.appearance == Appearance::Dark,
         };
-        let grey = look.c(look.theme.ui.text_muted);
+        let grey = !self.window_active || mono;
+        let size = look.z(12.).max(px(12.));
         let light = |id: &'static str, color: u32| {
             div()
                 .id(id)
-                .size(look.z(12.))
+                .size(size)
                 .rounded_full()
-                .map(|d| if mono { d.bg(grey) } else { d.bg(gpui::rgb(color)) })
+                .map(|d| if grey { d.bg(look.c(look.theme.ui.border_strong)) } else { d.bg(gpui::rgb(color)) })
                 .border_1()
                 .border_color(gpui::rgba(0x0000001f))
+                .hover(|d| d.opacity(0.8))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         };
+        let fullscreen = self.fullscreen;
         div()
             .flex()
             .flex_none()
             .items_center()
-            .gap(look.z(8.))
-            .pr(look.z(6.))
+            .gap(look.z(8.).max(px(8.)))
+            .pr(look.z(10.))
+            .child(light("light-close", 0xff5f57).on_click(cx.listener(|this, _, window, cx| this.close_window(&qur::CloseWindow, window, cx))))
             .child(
-                light("light-close", 0xff5f57)
-                    .hover(|d| d.opacity(0.8))
-                    .on_click(cx.listener(|this, _, window, cx| this.close_window(&qur::CloseWindow, window, cx))),
+                light("light-minimize", 0xfebc2e)
+                    .when(fullscreen, |d| d.opacity(0.35))
+                    .when(!fullscreen, |d| d.on_click(|_, window, _| window.minimize_window())),
             )
-            .child(light("light-minimize", 0xfebc2e).opacity(0.35))
-            .child(
-                light("light-zoom", 0x28c840)
-                    .hover(|d| d.opacity(0.8))
-                    .on_click(|_, window, _| window.toggle_fullscreen()),
-            )
+            .child(light("light-zoom", 0x28c840).on_click(|_, window, _| window.toggle_fullscreen()))
     }
 
-    /// The title bar, or in zen mode the bar sliding in and out from above,
-    /// over the window's content rather than pushing it down (which reflowed
-    /// everything, terminals included, on every frame of the slide).
-    pub(super) fn top(&self, look: &Look, cx: &mut Context<Self>) -> AnyElement {
+    /// The title bar, or in zen mode the bar sliding in from above (or away)
+    /// and pushing the content down as it goes, `progress` of the way down.
+    pub(super) fn top(&self, look: &Look, progress: f32, cx: &mut Context<Self>) -> AnyElement {
         let bar = self.title_bar(look, cx);
         if !self.config.ui.zen {
             return bar.into_any_element();
         }
-        let full = f32::from(look.z(TITLEBAR_H));
-        let shown = self.zen_shown;
-        // With window gaps it slides in to a gap below the window's edge.
-        let gap = f32::from(look.gap());
+        // The space for the bar (and with gaps, the gap below it) grows with
+        // the slide, so the content eases down with the bar riding its
+        // bottom edge; the bar itself keeps its height throughout.
+        let space = f32::from(self.bar_h(look) + look.gap());
+        let h = space * progress;
         div()
-            .absolute()
-            .left(px(gap))
-            .right(px(gap))
-            .child(bar)
-            .with_animation(
-                if shown { "zen-in" } else { "zen-out" },
-                Animation::new(ZEN_SLIDE).with_easing(gpui::ease_out_quint()),
-                move |d, t| d.top(px(gap - (full + gap) * if shown { 1. - t } else { t })),
-            )
+            .flex_none()
+            .w_full()
+            .h(px(h))
+            .relative()
+            .overflow_hidden()
+            .child(div().absolute().left_0().right_0().top(px(h - space)).child(bar))
             .into_any_element()
     }
 }
@@ -228,3 +251,26 @@ pub(super) fn set_titlebar_hidden(window: &Window, hidden: bool) {
 
 #[cfg(not(target_os = "macos"))]
 pub(super) fn set_titlebar_hidden(_: &Window, _: bool) {}
+
+/// The window's shadow, off with window gaps: macOS casts it under the whole
+/// window, gaps included (they paint alpha 1/255), darkening them.
+#[cfg(target_os = "macos")]
+pub(super) fn set_shadow(window: &Window, on: bool) {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyObject, Bool};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+    // SAFETY: on the main thread, with GPUI's live content view; `window`
+    // may return nil, which is checked.
+    unsafe {
+        let view = h.ns_view.as_ptr().cast::<AnyObject>();
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        if !ns_window.is_null() {
+            let _: () = msg_send![ns_window, setHasShadow: Bool::new(on)];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn set_shadow(_: &Window, _: bool) {}

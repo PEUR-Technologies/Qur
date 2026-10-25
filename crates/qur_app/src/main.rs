@@ -25,6 +25,7 @@ mod review;
 mod search_view;
 mod setup_view;
 mod terminal;
+mod tiling;
 mod tree_view;
 mod undo;
 mod workspace;

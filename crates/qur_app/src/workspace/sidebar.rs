@@ -1,4 +1,5 @@
-//! The left column: AGENTS, TERMINALS and FILES.
+//! The sidebar: AGENTS, TERMINALS, SOURCE CONTROL and FILES, in the order
+//! `[ui] sidebar_sections` gives, on either side, always shown or auto-hidden.
 
 use super::*;
 
@@ -130,7 +131,7 @@ impl Workspace {
             })
     }
 
-    pub(super) fn sidebar(&self, look: &Look, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn sidebar(&self, look: &Look, cx: &mut Context<Self>) -> AnyElement {
         let ui = look.theme.ui.clone();
         let mut agents: Vec<gpui::AnyElement> = Vec::new();
         for a in &self.agents {
@@ -336,9 +337,15 @@ impl Workspace {
         // Source Control and the file tree stay on screen below it.
         let agents = div().id("sidebar-agents").pt(look.z(2.)).flex().flex_col().flex_shrink_0().max_h(gpui::relative(0.6)).overflow_y_scroll().children(agents);
         let tiled = look.tiles.is_some();
+        let right = self.sidebar_right();
         let side = div();
-        let side = if tiled { look.tile(side, ui.sidebar_bg) } else { side.bg(look.bg(ui.sidebar_bg)).border_r_1().border_color(look.c(ui.border)) };
-        side.relative()
+        let side = if tiled {
+            look.tile(side, ui.sidebar_bg)
+        } else {
+            side.bg(look.bg(ui.sidebar_bg)).when(right, |d| d.border_l_1()).when(!right, |d| d.border_r_1()).border_color(look.c(ui.border))
+        };
+        let mut side = side
+            .relative()
             .w(look.z(self.sidebar_w))
             .flex_none()
             .h_full()
@@ -377,28 +384,35 @@ impl Workspace {
                     )
                     .child(if on { "Keep awake · on" } else { "Keep awake" })
                     .on_click(cx.listener(|this, _, window, cx| this.caffeinate(&qur::Caffeinate, window, cx)))
-            }))
-            // Like TERMINALS: the section only appears once there's something in it
-            // (Cmd+Shift+N or File > New Agent Task starts one).
-            .when(!empty_agents, |d| {
-                d.child(
-                    self.section_header("AGENTS".into(), look).child(
-                        div()
-                            .id("new-task")
-                            .flex_none()
-                            .p(look.z(2.))
-                            .rounded(look.z(3.))
-                            .cursor_pointer()
-                            .hover(|d| d.bg(look.c(ui.hover_bg)))
-                            .child(svg().path(icon::PLUS).size(look.z(12.)).text_color(look.c(ui.text_secondary)))
-                            .on_click(cx.listener(|this, _, window, cx| this.new_agent_task(&qur::NewAgentTask, window, cx))),
-                    ),
-                )
-                .child(agents)
-            })
-            .when(!shells.is_empty(), |d| d.child(self.section_header("TERMINALS".into(), look)).children(shells))
-            .child(self.section_header("SOURCE CONTROL".into(), look))
-            .child({
+            }));
+        // The sections in `[ui] sidebar_sections` order; each header drags
+        // onto another to reorder them.
+        let mut agents_part = Vec::new();
+        // Like TERMINALS: the section only appears once there's something in it
+        // (Cmd+Shift+N or File > New Agent Task starts one).
+        if !empty_agents {
+            let header = self.section_header("AGENTS".into(), look).child(
+                div()
+                    .id("new-task")
+                    .flex_none()
+                    .p(look.z(2.))
+                    .rounded(look.z(3.))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(look.c(ui.hover_bg)))
+                    .child(svg().path(icon::PLUS).size(look.z(12.)).text_color(look.c(ui.text_secondary)))
+                    .on_click(cx.listener(|this, _, window, cx| this.new_agent_task(&qur::NewAgentTask, window, cx))),
+            );
+            agents_part.push(self.section_drag("agents", "AGENTS", header, look, cx).into_any_element());
+            agents_part.push(agents.into_any_element());
+        }
+        let mut terminals_part = Vec::new();
+        if !shells.is_empty() {
+            terminals_part.push(self.section_drag("terminals", "TERMINALS", self.section_header("TERMINALS".into(), look), look, cx).into_any_element());
+            terminals_part.extend(shells);
+        }
+        let git_part = vec![
+            self.section_drag("git", "SOURCE CONTROL", self.section_header("SOURCE CONTROL".into(), look), look, cx).into_any_element(),
+            {
                 let (branch, n) = self
                     .git
                     .as_ref()
@@ -414,36 +428,47 @@ impl Workspace {
                 };
                 self.session_row("git".into(), None, branch, detail, if self.merge.is_some() { "!" } else { "" }, self.selected == Some(Selected::Git), look)
                     .on_click(cx.listener(|this, _, window, cx| this.show_git(&qur::GitPanel, window, cx)))
-            })
+                    .into_any_element()
+            },
+        ];
+        let files_header = div()
+            .id("files-toggle")
+            .cursor_pointer()
             .child(
-                div()
-                    .id("files-toggle")
-                    .cursor_pointer()
+                self.section_header(files_label.clone(), look)
+                    .pt(look.z(14.))
+                    .gap(look.z(4.))
                     .child(
-                        self.section_header(files_label, look)
-                            .pt(look.z(14.))
-                            .gap(look.z(4.))
-                            .child(
-                                svg()
-                                    .path(if self.files_open { icon::CHEVRON_DOWN } else { icon::CHEVRON_RIGHT })
-                                    .size(look.z(12.))
-                                    .flex_none()
-                                    .text_color(look.c(ui.text_muted)),
-                            ),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.files_open = !this.files_open;
-                        cx.notify();
-                    })),
+                        svg()
+                            .path(if self.files_open { icon::CHEVRON_DOWN } else { icon::CHEVRON_RIGHT })
+                            .size(look.z(12.))
+                            .flex_none()
+                            .text_color(look.c(ui.text_muted)),
+                    ),
             )
-            .when(self.files_open, |d| d.children(tree.map(|t| div().flex_1().min_h(px(0.)).flex().flex_col().child(t))))
-            // Drag handle on the right edge (with window gaps, the gap is the handle).
-            .when(!tiled, |d| d.child(
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.files_open = !this.files_open;
+                cx.notify();
+            }));
+        let mut files_part = vec![self.section_drag("files", files_label, files_header, look, cx).into_any_element()];
+        if self.files_open {
+            files_part.extend(tree.map(|t| div().flex_1().min_h(px(0.)).flex().flex_col().child(t).into_any_element()));
+        }
+        let mut parts = [("agents", agents_part), ("terminals", terminals_part), ("git", git_part), ("files", files_part)];
+        for key in &self.config.ui.sidebar_sections {
+            if let Some((_, part)) = parts.iter_mut().find(|(k, _)| k == key) {
+                side = side.children(std::mem::take(part));
+            }
+        }
+        // Drag handle on the stage's edge (with window gaps, the gap is the handle).
+        let side = side.when(!tiled, |d| {
+            d.child(
                 div()
                     .id("sidebar-resize")
                     .absolute()
                     .top_0()
-                    .right(px(-3.))
+                    .when(right, |d| d.left(px(-3.)))
+                    .when(!right, |d| d.right(px(-3.)))
                     .w(px(6.))
                     .h_full()
                     .cursor_col_resize()
@@ -451,7 +476,126 @@ impl Workspace {
                         this.resizing = true;
                         cx.stop_propagation();
                     })),
-            ))
+            )
+        });
+        if self.config.ui.sidebar != "auto" {
+            return side.into_any_element();
+        }
+        // Auto-hide: the stage moves over once and the sidebar slides into
+        // the space from its edge (as the zen top bar does).
+        let w = f32::from(look.z(self.sidebar_w));
+        div()
+            .flex_none()
+            .w(px(w))
+            .h_full()
+            .relative()
+            .overflow_hidden()
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(w))
+                    .flex()
+                    .child(side)
+                    .with_animation("sidebar-in", Animation::new(ZEN_SLIDE).with_easing(gpui::ease_out_quint()), move |d, t| {
+                        let off = px(w * (1. - t));
+                        if right { d.left(off) } else { d.left(-off) }
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// A section's header, dragged onto another's to move the section there.
+    fn section_drag(&self, key: &'static str, label: impl Into<SharedString>, header: impl IntoElement, look: &Look, cx: &mut Context<Self>) -> impl IntoElement {
+        let accent = look.c(look.theme.ui.focus_ring);
+        let drag = DragSection { key, label: label.into() };
+        div()
+            .id(SharedString::from(format!("section-{key}")))
+            .border_t_2()
+            .border_color(gpui::transparent_black())
+            .child(header)
+            .children(crate::script::mark(|| format!("section:{key}")))
+            .on_drag(drag, |d: &DragSection, _, _, cx| cx.new(|_| d.clone()))
+            .drag_over::<DragSection>(move |s, _, _, _| s.border_color(accent))
+            .on_drop(cx.listener(move |this, d: &DragSection, _, cx| this.move_section(d.key, key, cx)))
+    }
+
+    /// Move a sidebar section to where `to` is, saved as `[ui] sidebar_sections`.
+    fn move_section(&mut self, key: &str, to: &str, cx: &mut Context<Self>) {
+        let list = &mut self.config.ui.sidebar_sections;
+        let (Some(from), Some(at)) = (list.iter().position(|k| k == key), list.iter().position(|k| k == to)) else { return };
+        if from == at {
+            return;
+        }
+        let k = list.remove(from);
+        list.insert(at, k);
+        let list = list.clone();
+        self.write_setting(false, "ui.sidebar_sections", Some(Value::List(list)), cx);
+        self.broadcast_reload(cx);
+        cx.notify();
+    }
+
+    /// Whether the sidebar takes its column now: on (`Cmd+B`), and with
+    /// auto-hide only while slid in.
+    pub(super) fn sidebar_visible(&self) -> bool {
+        self.sidebar && (self.config.ui.sidebar != "auto" || self.sidebar_shown)
+    }
+
+    pub(super) fn sidebar_right(&self) -> bool {
+        self.config.ui.sidebar_side == "right"
+    }
+
+    /// Auto-hide: slide the sidebar in at its edge of the window, and away
+    /// once the mouse leaves it (not while resizing it or with a menu open).
+    pub(super) fn sidebar_track(&mut self, x: Pixels, window: &Window, cx: &mut Context<Self>) {
+        // Held as it is while something is dragged (a tab, a pane, a section).
+        if self.config.ui.sidebar != "auto" || !self.sidebar || cx.has_active_drag() {
+            return;
+        }
+        let look = Look::of(window, cx);
+        let x = if self.sidebar_right() { window.viewport_size().width - x } else { x };
+        let show = if self.sidebar_shown {
+            self.resizing || self.overlay.is_some() || x <= look.z(self.sidebar_w) + look.gap() * 2. + px(ZEN_SLACK)
+        } else {
+            x <= px(ZEN_EDGE) + look.gap()
+        };
+        if show != self.sidebar_shown {
+            self.sidebar_shown = show;
+            cx.notify();
+        }
+    }
+
+    /// View > Sidebar > Always Show / Auto-hide / Hidden, and Settings.
+    pub(super) fn set_sidebar_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
+        self.config.ui.sidebar = mode.to_string();
+        self.write_setting(false, "ui.sidebar", Some(mode.into()), cx);
+        self.sidebar = mode != "hidden";
+        self.sidebar_shown = false;
+        self.broadcast_reload(cx);
+        self.sync_menus(cx);
+        self.sync_settings(cx);
+        cx.notify();
+    }
+
+    pub(super) fn auto_hide_sidebar(&mut self, _: &qur::AutoHideSidebar, _: &mut Window, cx: &mut Context<Self>) {
+        let mode = if self.config.ui.sidebar == "auto" { "show" } else { "auto" };
+        self.set_sidebar_mode(mode, cx);
+        self.flash(if mode == "auto" { "Sidebar auto-hides (move the mouse to the window's edge)" } else { "Sidebar always shown" }, cx);
+    }
+
+    pub(super) fn set_sidebar_side(&mut self, right: bool, cx: &mut Context<Self>) {
+        let side = if right { "right" } else { "left" };
+        self.config.ui.sidebar_side = side.to_string();
+        self.write_setting(false, "ui.sidebar_side", Some(side.into()), cx);
+        self.broadcast_reload(cx);
+        self.sync_menus(cx);
+        self.sync_settings(cx);
+        cx.notify();
+    }
+
+    pub(super) fn sidebar_on_right(&mut self, _: &qur::SidebarOnRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_sidebar_side(!self.sidebar_right(), cx);
     }
 
     /// With window gaps: the gap between the sidebar and the stage, which
@@ -480,4 +624,30 @@ fn with_check(badge: String, check: Option<&Check>) -> String {
         Some(Check::Passed) | None => return badge,
     };
     if badge.is_empty() { mark.to_string() } else { format!("{badge} · {mark}") }
+}
+
+/// What's being dragged: a sidebar section, by its header.
+#[derive(Clone)]
+pub(super) struct DragSection {
+    key: &'static str,
+    label: SharedString,
+}
+
+impl Render for DragSection {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let look = Look::of(window, cx);
+        let ui = &look.theme.ui;
+        div()
+            .px(look.z(10.))
+            .py(look.z(3.))
+            .rounded(look.z(4.))
+            .bg(look.c(ui.overlay_bg))
+            .border_1()
+            .border_color(look.c(ui.focus_ring))
+            .text_size(look.text(-2.))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(look.c(ui.text_muted))
+            .font_family(look.ui_font.clone())
+            .child(self.label.clone())
+    }
 }

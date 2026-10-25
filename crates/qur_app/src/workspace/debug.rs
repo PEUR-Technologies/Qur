@@ -45,8 +45,9 @@ impl Workspace {
         let docks = format!("acp={} terminal={}", Docks::get(cx, dock::Kind::Acp).serialize(), Docks::get(cx, dock::Kind::Terminal).serialize());
         let u = &self.config.ui;
         let gaps = format!("on={} gap={} rounded={} radius={} border={} sidebar_w={}", u.gaps, u.gap, u.rounded, u.radius, u.tile_border, self.sidebar_w);
+        let sidebar = format!("on={} mode={} side={} shown={} visible={} sections={}", self.sidebar, u.sidebar, u.sidebar_side, self.sidebar_shown, self.sidebar_visible(), u.sidebar_sections.join(","));
         format!(
-            "overlay={overlay} selected={selected} code={code} term={{{}}} git={{{vc}}} docks={{{docks}}} gaps={{{gaps}}}",
+            "overlay={overlay} selected={selected} code={code} term={{{}}} git={{{vc}}} docks={{{docks}}} gaps={{{gaps}}} sidebar={{{sidebar}}}",
             self.terms.read(cx).debug_state(cx)
         )
     }

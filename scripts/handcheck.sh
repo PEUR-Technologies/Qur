@@ -103,7 +103,7 @@ check_rename_click() {  # right-click menu > Rename…, and double-click the but
 
 check_dock() {  # dock: + to add a tab, drag a tab to split, ×, drag a divider; saved.
   setup dock
-  drive "wait:1500,qur::NewAgentTerminal,wait:1500,click:@add:Terminal:Live,wait:300,state,drag:@tab:Terminal:Live,@pane:Terminal:root~0.92~0.5,wait:300,state,click:@close:Terminal:Live,wait:300,state,click:@add:Terminal:Changes,wait:300,drag:@tab:Terminal:Changes,@pane:Terminal:root~0.5~0.9,wait:300,state,drag:@split:Terminal:root,700,300,wait:500,state,qur::Quit"
+  drive "wait:1500,qur::NewAgentTerminal,wait:1500,click:@plus:Terminal:root,wait:200,click:@add:Terminal:Live,wait:300,state,drag:@tab:Terminal:Live,@pane:Terminal:root~0.92~0.5,wait:300,state,click:@close:Terminal:Live,wait:300,state,click:@plus:Terminal:root,wait:200,click:@add:Terminal:Changes,wait:300,drag:@tab:Terminal:Changes,@pane:Terminal:root~0.5~0.9,wait:300,state,drag:@split:Terminal:root,700,300,wait:500,state,qur::Quit"
   ok "+ Live added a tab" grep -qF 'terminal=session,*live}' "$LOG"
   ok "dragging it to the right edge split the pane" grep -qF 'terminal=h0.500(session|live)}' "$LOG"
   ok "× closed it" grep -qF 'terminal=session}' "$LOG"
@@ -142,7 +142,7 @@ check_panels() {  # About and Accent Color open (and a click outside closes them
 
 check_gaps() {  # window gaps: toggle, a dock divider and the sidebar gap still drag, the popover saves.
   setup gaps
-  drive "wait:1500,qur::ToggleGaps,wait:300,state,qur::NewAgentTerminal,wait:1500,click:@add:Terminal:Live,wait:300,drag:@tab:Terminal:Live,@pane:Terminal:root~0.92~0.5,wait:300,state,drag:@split:Terminal:root,700,300,wait:500,state,drag:@sidebar-gap,320,300,wait:300,state,qur::Gaps,wait:300,state,click:@gaps:slider0~0.999~0.5,wait:200,click:@gaps:rounded,wait:200,key:escape,wait:300,state,qur::ToggleGaps,wait:300,state,qur::Quit"
+  drive "wait:1500,qur::ToggleGaps,wait:300,state,qur::NewAgentTerminal,wait:1500,click:@plus:Terminal:root,wait:200,click:@add:Terminal:Live,wait:300,drag:@tab:Terminal:Live,@pane:Terminal:root~0.92~0.5,wait:300,state,drag:@split:Terminal:root,700,300,wait:500,state,drag:@sidebar-gap,320,300,wait:300,state,qur::Gaps,wait:300,state,click:@gaps:slider0~0.999~0.5,wait:200,click:@gaps:rounded,wait:200,key:escape,wait:300,state,qur::ToggleGaps,wait:300,state,qur::Quit"
   ok "View > Toggle Gaps turned them on" grep -qF 'FLASH Gaps on' "$LOG"
   ok "gaps on in the state" grep -qF 'gaps={on=true gap=8' "$LOG"
   ok "a tab dragged to the edge split the dock with gaps on" grep -qF 'terminal=h0.500(session|live)}' "$LOG"
@@ -166,9 +166,21 @@ check_gaps_terminal() {  # with gaps on, split shells are tiles and their divide
 }
 
 cfg_has() { grep -qE -- "$1" "$QUR_HOME/config.toml"; }
+check_sidebar() {  # sidebar: drag a section header to reorder; auto-hide slides in at the edge; right side.
+  setup sidebar
+  drive "wait:1500,state,drag:@section:files,@section:git,wait:300,state,qur::AutoHideSidebar,wait:300,state,move:600,300,move:3,300,wait:300,state,move:700,300,wait:300,state,qur::SidebarOnRight,wait:300,move:600,300,move:@window~0.998~0.5,wait:300,state,qur::Quit"
+  ok "dragging FILES onto SOURCE CONTROL moved it above" grep -qF 'sections=agents,terminals,files,git}' "$LOG"
+  ok "and saved the order" cfg_has '^sidebar_sections = \["agents", "terminals", "files", "git"\]'
+  ok "View > Auto-hide Sidebar hid it" grep -qF 'mode=auto side=left shown=false visible=false' "$LOG"
+  ok "the mouse at the left edge slid it in" grep -qF 'mode=auto side=left shown=true visible=true' "$LOG"
+  ok "and moving away hid it again" test "$(grep -c 'mode=auto side=left shown=false' "$LOG")" -ge 2
+  ok "Sidebar on Right saved" cfg_has '^sidebar_side = "right"'
+  ok "on the right, the right edge slides it in" grep -qF 'mode=auto side=right shown=true visible=true' "$LOG"
+}
+
 check_settings() {  # Cmd+, opens Settings; Vim, a theme and the opacity slider save live; Esc closes.
   setup settings
-  drive "wait:1500,key:cmd-\\,,wait:300,state,click:@settings:nav:Editor,wait:200,click:@settings:vim:on,wait:300,state,click:@settings:nav:Appearance,wait:200,click:@settings:theme:1,wait:300,scroll:@settings:nav:Files~3~0.5,-500,wait:200,drag:@settings:slider:Opacity~0.95~0.5,@settings:slider:Opacity~0.1~0.5,wait:300,click:@settings:blur,wait:300,click:@settings:gaps:16,wait:300,key:escape,wait:200,state,qur::Quit"
+  drive "wait:1500,key:cmd-\\,,wait:300,state,click:@settings:nav:Editor,wait:200,click:@settings:vim:on,wait:300,state,click:@settings:nav:Appearance,wait:200,click:@settings:theme:1,wait:300,scroll:@settings:nav:Files~3~0.5,-500,wait:200,drag:@settings:slider:Opacity~0.95~0.5,@settings:slider:Opacity~0.1~0.5,wait:300,click:@settings:blur,wait:300,click:@settings:gaps:16,wait:300,click:@settings:sidebar-side:right,wait:300,state,click:@settings:sidebar:auto,wait:300,key:escape,wait:200,state,qur::Quit"
   ok "Cmd+, opened Settings (not config.toml)" grep -qF 'overlay=settings:Agents ' "$LOG"
   ok "the section list jumped to Editor" grep -qF 'overlay=settings:Editor ' "$LOG"
   ok "Vim on, saved at once" cfg_has '^vim = true'
@@ -178,6 +190,9 @@ check_settings() {  # Cmd+, opens Settings; Vim, a theme and the opacity slider 
   ok "the opacity slider saved its value" cfg_has '^opacity = 0\.6[0-9]*$'
   ok "Blur clicked off, saved" cfg_has '^blur = false'
   ok "Esc closed Settings" state_has 'overlay=none'
+  ok "Sidebar side: Right saved at once" cfg_has '^sidebar_side = "right"'
+  ok "and moved the sidebar there" grep -qF 'side=right shown=false visible=true' "$LOG"
+  ok "Sidebar: Auto-hide saved" cfg_has '^sidebar = "auto"'
 }
 
 check_first_run() {  # QUR_DEBUG_SETUP=1: the first-run welcome; Done (or Skip for now) closes it.
@@ -187,7 +202,7 @@ check_first_run() {  # QUR_DEBUG_SETUP=1: the first-run welcome; Done (or Skip f
   ok "Done closed it" state_has 'overlay=none'
 }
 
-ALL=(vim find_terminal rename rename_click dock cmd_click git_commit git_stage panels gaps gaps_terminal settings first_run)
+ALL=(vim find_terminal rename rename_click dock cmd_click git_commit git_stage panels gaps gaps_terminal sidebar settings first_run)
 [ "${1:-}" = "-l" ] && { printf '%s\n' "${ALL[@]}"; exit 0; }
 for c in "${@:-${ALL[@]}}"; do
   echo "$c"
