@@ -114,8 +114,9 @@ enum PickKind {
     Projects(Vec<PathBuf>),
     /// Agents, Agent Terminals and shells (not subagents), for Ctrl+T.
     Sessions(Vec<Selected>),
-    /// The agent's slash commands, inserted into its prompt.
-    Slash { names: Vec<String>, target: Entity<PromptInput> },
+    /// The agent's session settings (`settings`, their ids: each opens its
+    /// values), then its slash commands (`names`, inserted into its prompt).
+    Slash { agent: Entity<AgentTask>, settings: Vec<String>, names: Vec<String>, target: Entity<PromptInput> },
     /// A session setting's values (mode, model…) for one agent.
     Setting { agent: Entity<AgentTask>, id: String, values: Vec<String> },
 }
@@ -856,29 +857,22 @@ impl Workspace {
             }
             AgentEvent::Subagents => cx.notify(),
             AgentEvent::SlashRequested => {
-                let (cmds, target) = {
+                let (cmds, opts, target) = {
                     let a = a.read(cx);
-                    (a.commands.clone(), a.prompt.clone())
+                    (a.commands.clone(), a.settings.clone(), a.prompt.clone())
                 };
-                if !cmds.is_empty() {
+                if !cmds.is_empty() || !opts.is_empty() {
+                    // Settings first ("/model  Opus 5.5"): the prompt bar no
+                    // longer shows them, and ACP agents don't offer them as commands.
+                    let settings = opts.iter().map(|o| o.id.clone()).collect();
                     let names = cmds.iter().map(|c| c.name.clone()).collect();
-                    let items = cmds.iter().map(|c| PickItem::new(format!("/{}", c.name)).detail(c.description.clone())).collect();
-                    this.open_picker("Agent command…", items, PickKind::Slash { names, target }, false, window, cx);
+                    let items = opts
+                        .iter()
+                        .map(|o| PickItem::new(format!("/{}", o.name.to_lowercase().replace(' ', "-"))).right(o.current_name().to_string()))
+                        .chain(cmds.iter().map(|c| PickItem::new(format!("/{}", c.name)).detail(c.description.clone())))
+                        .collect();
+                    this.open_picker("Agent command…", items, PickKind::Slash { agent: a.clone(), settings, names, target }, false, window, cx);
                 }
-            }
-            AgentEvent::PickSetting(id) => {
-                let Some(o) = a.read(cx).settings.iter().find(|o| &o.id == id).cloned() else { return };
-                let values = o.values.iter().map(|v| v.value.clone()).collect();
-                let items = o
-                    .values
-                    .iter()
-                    .map(|v| {
-                        let item = PickItem::new(v.name.clone()).detail(v.description.clone().unwrap_or_default());
-                        if v.value == o.current { item.right("current") } else { item }
-                    })
-                    .collect();
-                let title = if o.is_mode() { format!("{}…  (⇧⇥ next)", o.name) } else { format!("{}…", o.name) };
-                this.open_picker(&title, items, PickKind::Setting { agent: a.clone(), id: id.clone(), values }, false, window, cx);
             }
             AgentEvent::OpenFile(p, line) => {
                 let p = p.clone();
@@ -2668,6 +2662,22 @@ impl Workspace {
 
     // -- overlays ----------------------------------------------------------------------
 
+    /// A session setting's values (mode, model…), above the agent's prompt.
+    fn pick_setting(&mut self, a: Entity<AgentTask>, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(o) = a.read(cx).settings.iter().find(|o| o.id == id).cloned() else { return };
+        let values = o.values.iter().map(|v| v.value.clone()).collect();
+        let items = o
+            .values
+            .iter()
+            .map(|v| {
+                let item = PickItem::new(v.name.clone()).detail(v.description.clone().unwrap_or_default());
+                if v.value == o.current { item.right("current") } else { item }
+            })
+            .collect();
+        let title = if o.is_mode() { format!("{}…  (⇧⇥ next)", o.name) } else { format!("{}…", o.name) };
+        self.open_picker(&title, items, PickKind::Setting { agent: a, id: id.to_string(), values }, false, window, cx);
+    }
+
     fn open_picker(&mut self, placeholder: &str, items: Vec<PickItem>, kind: PickKind, paths: bool, window: &mut Window, cx: &mut Context<Self>) -> Entity<Picker> {
         self.close_overlays(window, cx);
         self.prev_focus = window.focused(cx);
@@ -2707,8 +2717,13 @@ impl Workspace {
                 window.focus(&f, cx);
                 cx.notify();
             }
-            (PickerEvent::Confirm(i), PickKind::Slash { names, target }) => {
-                let text = format!("/{} ", names[*i]);
+            (PickerEvent::Confirm(i), PickKind::Slash { agent, settings, target, .. }) if *i < settings.len() => {
+                let (agent, id, target) = (agent.clone(), settings[*i].clone(), target.clone());
+                target.update(cx, |t, cx| t.set_text("", cx));
+                self.pick_setting(agent, &id, window, cx);
+            }
+            (PickerEvent::Confirm(i), PickKind::Slash { settings, names, target, .. }) => {
+                let text = format!("/{} ", names[*i - settings.len()]);
                 let target = target.clone();
                 self.overlay = None;
                 self.prev_focus = None;
