@@ -104,6 +104,21 @@ impl GitPanel {
                     Err(e) => p.error = Some(e),
                 }
                 p.diff = diff.into_iter().collect();
+                // Staging or unstaging moves the selected file between lists:
+                // follow it there, or drop it once it has no changes left.
+                if let Some(pick) = p.selected.as_mut() {
+                    let st = &p.status;
+                    let in_staged = st.staged.iter().any(|e| e.path == pick.path);
+                    let in_unstaged = st.unstaged.iter().any(|e| e.path == pick.path) || st.untracked.contains(&pick.path);
+                    match (pick.staged, in_staged, in_unstaged) {
+                        (true, false, true) | (false, true, false) => {
+                            pick.staged = !pick.staged;
+                            p.refresh(cx);
+                        }
+                        (_, false, false) => p.selected = None,
+                        _ => {}
+                    }
+                }
                 cx.notify();
             });
         }));

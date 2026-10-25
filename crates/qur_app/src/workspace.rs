@@ -5248,6 +5248,13 @@ impl Render for Workspace {
                     this.close_overlays(window, cx);
                 }
             }))
+            // Before the focused view sees it (a terminal would take Esc for itself).
+            .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
+                if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::AgentMenu { .. } | Overlay::About)) {
+                    this.close_overlays(window, cx);
+                    cx.stop_propagation();
+                }
+            }))
             // Sidebar resizing and the accent sliders follow the mouse anywhere in the window.
             .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, window, cx| {
                 this.zen_track(ev.position.y, window, cx);

@@ -91,10 +91,12 @@ check_git_commit() {  # Git panel: Commit Staged… focuses the message; type; C
   ok "field cleared, nothing left staged" state_has 'message="" '
 }
 
+esc_closed_menu() { grep '^STATE' "$LOG" | grep -A1 -F 'overlay=agent_menu:root-1' | sed -n 2p | grep -qF 'overlay=none'; }
 check_rename_click() {  # right-click menu > Rename…, and double-click the button.
   setup rename_click
-  drive "wait:1500,qur::NewAgentTerminal,wait:1500,rclick:@agent:tt-root-1,state,click:@menu:Rename…,state,key:escape,click:@pane:Terminal:root,dclick:@agent:tt-root-1,state,key:cmd-a,type:by double click,key:enter,wait:300,state,qur::Quit"
+  drive "wait:1500,qur::NewAgentTerminal,wait:1500,rclick:@agent:tt-root-1,state,key:escape,wait:200,state,rclick:@agent:tt-root-1,click:@menu:Rename…,state,key:escape,click:@pane:Terminal:root,dclick:@agent:tt-root-1,state,key:cmd-a,type:by double click,key:enter,wait:300,state,qur::Quit"
   ok "right-click opened the agent menu" grep -qF 'overlay=agent_menu:root-1' "$LOG"
+  ok "Esc closed the agent menu" esc_closed_menu
   ok "its Rename… opened the Rename box" grep -qF 'overlay=rename:"agent terminal 1"' "$LOG"
   ok "double-click opened it too, typed name kept" state_has 'overlay=none selected=task:root-1:"by double click"'
 }
@@ -125,6 +127,7 @@ check_git_stage() {  # Git panel: per-file + and −, and selecting a file shows
   ok "+ staged it" grep -qF 'staged=1 unstaged=0' "$LOG"
   ok "clicking it showed its diff" grep -qF 'selected=staged:a.txt diff=[a.txt+1-0]' "$LOG"
   ok "− unstaged it again" state_has 'staged=0 unstaged=1'
+  ok "the selection followed it to unstaged, with its diff" state_has 'selected=unstaged:a.txt diff=[a.txt+1-0]'
   ok "git agrees: nothing staged, a.txt modified" test "$(git_ status --porcelain)" = " M a.txt"
 }
 
