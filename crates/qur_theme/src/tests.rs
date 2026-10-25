@@ -242,3 +242,21 @@ fn heat_tints_are_visible_and_ordered() {
         }
     }
 }
+
+#[test]
+fn accent_tuning() {
+    let red = Rgba::rgb(0xff0000);
+    assert_eq!(red.tuned(0., 0.), red);
+    assert_eq!(red.tuned(120., 0.), Rgba::rgb(0x00ff00));
+    assert_eq!(red.tuned(-120., 0.), Rgba::rgb(0x0000ff));
+    // Lighter and darker, but never white or black.
+    let (light, dark) = (red.tuned(0., 1.), red.tuned(0., -1.));
+    assert!(light.luminance() > red.luminance() && light != Rgba::rgb(0xffffff));
+    assert!(dark.luminance() < red.luminance() && dark != Rgba::rgb(0x000000));
+    // Focus follows the chosen accent, tuned or not.
+    let t = Registry::global().get("Qur Dark").unwrap();
+    let mine = t.with_accent(2, 0., 0.);
+    assert_eq!((mine.accents[0].base, mine.ui.focus_ring), (t.accents[2].base, t.accents[2].base));
+    let tuned = t.with_accent(0, 40., -0.3);
+    assert_eq!(tuned.ui.focus_ring, t.accents[0].base.tuned(40., -0.3));
+}

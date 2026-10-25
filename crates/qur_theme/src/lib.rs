@@ -160,6 +160,20 @@ pub struct Credit {
 }
 
 impl Theme {
+    /// The user's accent ([ui] accent, accent_hue, accent_brightness): the
+    /// palette starts at slot `lead`, every accent is turned `hue` degrees and
+    /// made lighter or darker, and focus outlines and links use the first one
+    /// instead of the theme's own focus color.
+    pub fn with_accent(&self, lead: usize, hue: f32, brightness: f32) -> Theme {
+        let mut t = self.clone();
+        t.accents.rotate_left(lead % 6);
+        if hue != 0. || brightness != 0. {
+            t.accents = t.accents.map(|a| schema::derive_accent(a.base.tuned(hue, brightness), t.ui.sidebar_bg, t.ui.text));
+        }
+        t.ui.focus_ring = t.accents[0].base;
+        t
+    }
+
     /// Style for a highlight capture name with dotted fallback:
     /// "function.method.call" -> "function.method" -> "function" -> default text.
     /// The theme's own entries win; then the fallback Qur theme's; then the

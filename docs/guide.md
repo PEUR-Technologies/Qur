@@ -100,7 +100,7 @@ One window is one project. There's no permanent editor area: the window is for a
 |---|---|
 | `Cmd+Shift+T` / `Cmd+T` | New Agent Terminal / new shell |
 | `Cmd+Shift+N` | New structured agent task |
-| `Ctrl+1..9`, `Ctrl+Opt+↑/↓` | Switch sessions |
+| `Ctrl+T`, `Ctrl+1..9`, `Ctrl+Opt+↑/↓` | Switch sessions (`Ctrl+T` picks one by name) |
 | `Cmd+I`, `Esc` / `Cmd+.` | Focus the prompt, stop the agent |
 | `Cmd+P`, `Cmd+Shift+P` | Go to file, command palette |
 | `Cmd+K Cmd+L`, `Cmd+1..5` | Structured agents: cycle layouts; Live / To-do / Chat / Changes / Browser (`Cmd+5` works for Agent Terminals too) |

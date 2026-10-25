@@ -24,7 +24,7 @@ pub mod qur {
             FocusPrompt, FocusInput, StopAgent, TakeOver, NextAgent, PrevAgent, ReviewChanges, Merge,
             KeepWorking, DiscardTask, OpenWorktreeInTerminal, RevealWorktree, KeyboardShortcuts,
             RunDoctor, ShowLogs, ReportProblem, ExpandSelection, ShrinkSelection,
-            RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge, Caffeinate, ShowKeepAwake,
+            RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge, Caffeinate, ShowKeepAwake, SwitchSession,
         ]
     );
 
@@ -258,7 +258,8 @@ pub static COMMANDS: &[Cmd] = &[
     // Terminal
     cmd!(qur::NewTerminal, "Terminal", "New Terminal", "cmd-t", W, R),
     cmd!(qur::NewAgentTerminal, "Terminal", "New Agent Terminal", "cmd-shift-t", W, R),
-    cmd!(qur::CloseTerminal, "Terminal", "Close Terminal", "cmd-w", T, R),
+    // In an agent it closes (or discards) the agent, asking first.
+    cmd!(qur::CloseTerminal, "Terminal", "Close Terminal or Agent", "cmd-w", Some("Terminal || AgentView"), R),
     cmd!(qur::ToggleTerminal, "View", "Go to Terminal", "ctrl-`", W, R),
     cmd!(qur::Caffeinate, "View", "Keep Mac Awake (caffeinate)", "", W, R),
     cmd!(qur::ShowKeepAwake, "View", "Show Keep Awake in Sidebar", "", W, R),
@@ -291,6 +292,8 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::TakeOver, "Agent", "Take Over", "", W, R),
     cmd!(qur::NextAgent, "Agent", "Next Session", "ctrl-alt-down", W, R),
     cmd!(qur::PrevAgent, "Agent", "Previous Session", "ctrl-alt-up", W, R),
+    // Everywhere, terminals too (it takes the shell's own Ctrl+T).
+    cmd!(qur::SwitchSession, "Agent", "Switch Agent or Terminal…", "ctrl-t", W, R),
     // Zed's keys. Not in the editor or a terminal (they'd answer an agent you
     // can't see) or a picker; the workspace answers the selected agent first.
     cmd!(agent::AllowOnce, "Agent", "Permission: Allow Once", "cmd-y", PERM, R),
@@ -600,6 +603,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             sep(),
             item(qur::NextAgent),
             item(qur::PrevAgent),
+            item(qur::SwitchSession),
             sep(),
             item(qur::ReviewChanges),
             item(qur::Merge),

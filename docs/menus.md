@@ -34,7 +34,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Save `Cmd+S` · Save All `Cmd+Opt+S`
 - Revert File
 - ---
-- Close Terminal `Cmd+W` (when a terminal is focused)
+- Close Terminal or Agent `Cmd+W` (in a terminal or an agent; an agent asks first)
 - Close Window `Cmd+Shift+W`
 
 ## Edit
@@ -90,7 +90,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Rename Agent… (also double-click the agent's button)
 - Permission: Allow Once `Cmd+Y` · Allow for This Task `Cmd+Opt+Y` · Deny `Cmd+Opt+Z`
 - ---
-- Next Agent · Previous Agent · Agent 1–9 `Ctrl+1..9`
+- Next Agent · Previous Agent · Switch Agent or Terminal… `Ctrl+T` · Agent 1–9 `Ctrl+1..9`
 - ---
 - Review Changes `Cmd+4` · Merge into My Branch · Keep Working · Discard Task…
 - Run Checks Now (the project's `[checks] command`, decision 29)
@@ -106,7 +106,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - New Tiled Terminal (Grid) `Cmd+Enter` · Split (Dwindle) `Cmd+D` · Split Down `Cmd+Shift+D`
 - Focus Pane Left / Right / Above / Below `Cmd+Opt+Arrows`
 - Clear `Cmd+K` · Find in Terminal `Cmd+F`
-- Close Terminal `Cmd+W`
+- Close Terminal or Agent `Cmd+W`
 
 ## Window
 - Minimize `Cmd+M` · Zoom · (macOS window list, tiling items)
