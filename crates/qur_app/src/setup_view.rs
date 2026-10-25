@@ -1,23 +1,41 @@
-//! The first-run picker (handoff section 13, M6): AI accounts to connect
-//! (install, sign in, agents found on PATH with a Check; decision 45), the
-//! stage layout, keys (VS Code or + Vim), and the theme with live previews.
-//! Saves config.toml and agents.toml. Shown once on a new install; Qur >
-//! Setup… reopens it.
+//! Settings (Qur > Settings…, Cmd+,): one screen with a section list on the
+//! left. **Agents**: AI accounts to connect (install, sign in, agents found on
+//! PATH with a Check; decision 45). **Appearance**: theme (this project or all),
+//! accent, transparency, top bar, traffic lights. **Editor**: Vim mode, keys.
+//! **Layout**: the agent stage presets as diagrams. **Files**: the settings
+//! files themselves.
+//!
+//! Every change applies at once and is saved by the workspace through the same
+//! code paths as the menu commands and popovers (events here, or the menu's own
+//! actions dispatched), so nothing writes a setting twice. The workspace pushes
+//! the values in effect back (`set_current`) after each change.
+//!
+//! On a brand-new home it opens by itself as the first-run welcome, with the
+//! logo, Skip for now / Done, and the agents ticked for you saved on close.
+//!
+//! Row helpers (`section`, `row`, `pill`, `link`, `check_box`, `slider`) are
+//! shared so new rows stay one-liners.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{Context, EventEmitter, FocusHandle, Task, Window, div, prelude::*, px, svg};
+use gpui::{
+    Bounds, Context, DispatchPhase, ElementId, EventEmitter, FocusHandle, Hsla, MouseButton, Pixels, ScrollHandle, SharedString, Stateful, Task, Window, canvas, div, prelude::*, px, svg,
+};
 use qur_agents::{AgentDef, Mode};
-use qur_theme::{Registry, Theme};
+use qur_theme::{Registry, Rgba, Theme};
 
 use crate::assets;
+use crate::commands::qur;
 use crate::doctor::Login;
 use crate::look::Look;
 
 /// Agents Qur knows how to run (Codex since decision 44). Others can be
 /// added to agents.toml by hand.
-const KNOWN: &[(&str, &str, Mode, &str, Option<&str>)] = &[
+pub const KNOWN: &[(&str, &str, Mode, &str, Option<&str>)] = &[
     ("claude", "Claude Code", Mode::Acp, "claude-agent-acp", None),
     ("claude-cli", "Claude Code (terminal)", Mode::Terminal, "claude", Some("arg")),
     // Zed's ACP adapter for OpenAI's Codex CLI; signs in with ChatGPT.
@@ -55,6 +73,9 @@ const SERVICES: [Service; 2] = [
     },
 ];
 
+/// The section list, top to bottom (each is one child of the scrolled column).
+pub const SECTIONS: [&str; 5] = ["Agents", "Appearance", "Editor", "Layout", "Files"];
+
 /// What Setup waits for while an install or sign-in runs in a terminal.
 #[derive(Clone, Copy, PartialEq)]
 enum Wait {
@@ -77,17 +98,37 @@ struct Found {
     check: Check,
 }
 
-pub struct Choices {
-    pub agents: Vec<AgentDef>,
-    pub layout: String,
+/// The settings in effect, as the workspace sees them (previews included).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Current {
+    pub project: String,
+    pub theme: String,
+    pub theme_is_project: bool,
+    pub opacity: f32,
+    pub blur: bool,
+    pub window_is_project: bool,
+    /// Which of the theme's accents leads, and that accent before tuning.
+    pub accent: usize,
+    pub accent_base: Rgba,
+    pub hue: f32,
+    pub brightness: f32,
     pub vim: bool,
     pub zen: bool,
     pub traffic_lights: String,
-    pub theme: String,
-    pub accent: usize,
     /// Window gaps (`[ui] gaps`) and their size (`[ui] gap`).
     pub gaps: bool,
     pub gap: f32,
+    /// "A", "B", "C", or "yours" for a stage arranged by hand.
+    pub layout: String,
+}
+
+/// A slider on this screen. Add a variant for a new one and handle it in
+/// `SetupView::slide`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Slider {
+    Opacity,
+    Hue,
+    Brightness,
 }
 
 pub enum SetupEvent {
@@ -95,47 +136,61 @@ pub enum SetupEvent {
     RunInTerminal { label: String, command: String },
     /// That step finished: show Setup again.
     Ready(String),
-    /// Live preview while choosing.
-    PreviewTheme(String),
-    PreviewAccent(usize),
-    /// Window gaps on or off, and the gap.
-    PreviewGaps(bool, f32),
-    Done(Choices),
-    Cancel,
+    /// The agents ticked (never empty): saved to agents.toml.
+    Agents(Vec<AgentDef>),
+    /// Theme picked, for this project or all (decision 13).
+    Theme { name: String, project_scope: bool },
+    /// Opacity and blur; `save` once the slider is let go (or blur clicked).
+    Opacity { project_scope: bool, opacity: f32, blur: bool, save: bool },
+    Accent(usize),
+    /// Accent color and brightness sliders; `save` on release.
+    Tune { hue: f32, brightness: f32, save: bool },
+    TrafficLights(String),
+    /// Window gaps on or off, and the gap (saved at once).
+    Gaps { on: bool, gap: f32 },
+    /// A stage layout preset ("A", "B", "C").
+    Layout(String),
+    Close,
 }
 
 pub struct SetupView {
     pub focus: FocusHandle,
+    /// Opened by itself on a new home: the welcome, with Skip for now / Done.
+    first_run: bool,
     agents: Vec<Found>,
-    layout: String,
-    vim: bool,
-    zen: bool,
-    traffic_lights: String,
-    theme: String,
-    accent: usize,
-    gaps: bool,
-    gap: f32,
+    current: Current,
+    /// Where Theme and Transparency changes go: this project or all projects.
+    theme_project: bool,
+    window_project: bool,
     /// Each service's sign-in; `None` while checking.
     logins: [Option<Login>; 2],
     npm: bool,
     waiting: Option<(usize, Wait)>,
+    scroll: ScrollHandle,
+    /// The section shown in the list (clicked, or scrolled to).
+    section: usize,
+    sliders: Rc<RefCell<HashMap<Slider, Bounds<Pixels>>>>,
+    drag: Option<Slider>,
+    /// Scrolled by hand: the list shows the section at the top.
+    follow_scroll: bool,
     _watch: Option<Task<()>>,
 }
 
 impl EventEmitter<SetupEvent> for SetupView {}
 
 impl SetupView {
-    pub fn new(config: &qur_config::Config, roster: &qur_agents::Roster, cx: &mut Context<Self>) -> Self {
+    pub fn new(current: Current, roster: &qur_agents::Roster, first_run: bool, cx: &mut Context<Self>) -> Self {
         let agents = KNOWN
             .iter()
             .map(|(id, label, mode, command, prompt)| {
                 let existing = roster.get(id).cloned();
                 let path = qur_agents::which(existing.as_ref().map_or(*command, |d| d.command.as_str()));
                 Found {
-                    // Only what's installed: agents.toml starts out listing
-                    // Claude Code whether or not it is. Signing in or
+                    // First run: only what's installed (agents.toml starts out
+                    // listing Claude Code whether or not it is); signing in or
                     // installing later ticks the account's agent (`set_login`).
-                    enabled: path.is_some() && (existing.is_some() || *id == "claude"),
+                    // Afterwards: what agents.toml lists.
+                    enabled: if first_run { path.is_some() && (existing.is_some() || *id == "claude") } else { existing.is_some() },
                     def: existing.unwrap_or(AgentDef {
                         id: id.to_string(),
                         label: label.to_string(),
@@ -150,33 +205,37 @@ impl SetupView {
                 }
             })
             .collect();
-        // A stage arranged by hand shows as "Yours".
-        let preset = config.peek_layout.as_str();
-        let custom = crate::dock::Docks::get(cx, crate::dock::Kind::Acp) != crate::dock::Dock::preset(crate::dock::Kind::Acp, preset)
-            || crate::dock::Docks::get(cx, crate::dock::Kind::Terminal) != crate::dock::Dock::preset(crate::dock::Kind::Terminal, preset);
-        let layout = if custom { "yours".to_string() } else { config.peek_layout.clone() };
         let mut this = SetupView {
             focus: cx.focus_handle(),
+            first_run,
             agents,
-            layout,
-            vim: config.keys.vim,
-            zen: config.ui.zen,
-            traffic_lights: config.ui.traffic_lights.clone(),
-            theme: config.theme.clone(),
-            accent: config.ui.accent % 6,
-            gaps: config.ui.gaps,
-            gap: config.ui.gap,
+            theme_project: current.theme_is_project && !first_run,
+            window_project: current.window_is_project && !first_run,
+            current,
             logins: [None, None],
             npm: false,
             waiting: None,
+            scroll: ScrollHandle::new(),
+            section: 0,
+            sliders: Rc::default(),
+            drag: None,
+            follow_scroll: false,
             _watch: None,
         };
         this.refresh(cx);
         this
     }
 
-    pub fn theme(&self) -> &str {
-        &self.theme
+    /// The workspace's settings after a change (or a preview).
+    pub fn set_current(&mut self, current: Current, cx: &mut Context<Self>) {
+        if self.current != current {
+            self.current = current;
+            cx.notify();
+        }
+    }
+
+    pub fn section_name(&self) -> &'static str {
+        SECTIONS[self.section.min(SECTIONS.len() - 1)]
     }
 
     /// Look again: what's installed, and each sign-in.
@@ -226,6 +285,7 @@ impl SetupView {
             && let Some(f) = self.agents.iter_mut().find(|f| f.def.id == SERVICES[ix].agents[0] && f.path.is_some())
         {
             f.enabled = true;
+            self.save_agents(cx);
         }
         self.logins[ix] = Some(login);
         cx.notify();
@@ -233,6 +293,14 @@ impl SetupView {
 
     fn connected(&self, ix: usize) -> bool {
         self.missing(ix).is_empty() && matches!(self.logins[ix], Some(Login::In(_)))
+    }
+
+    /// The ticked agents go to agents.toml (never an empty list).
+    fn save_agents(&mut self, cx: &mut Context<Self>) {
+        let agents: Vec<AgentDef> = self.agents.iter().filter(|f| f.enabled).map(|f| f.def.clone()).collect();
+        if !agents.is_empty() {
+            cx.emit(SetupEvent::Agents(agents));
+        }
     }
 
     fn install(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -328,55 +396,538 @@ impl SetupView {
         cx.notify();
     }
 
-    pub fn done(&mut self, cx: &mut Context<Self>) {
-        let agents = self.agents.iter().filter(|f| f.enabled).map(|f| f.def.clone()).collect();
-        cx.emit(SetupEvent::Done(Choices { agents, layout: self.layout.clone(), vim: self.vim, zen: self.zen, traffic_lights: self.traffic_lights.clone(), theme: self.theme.clone(), accent: self.accent, gaps: self.gaps, gap: self.gap }));
+    /// Done, Skip for now, Enter, Esc, Close: everything is saved already;
+    /// the first run also keeps the agents ticked for you.
+    pub fn close(&mut self, cx: &mut Context<Self>) {
+        if self.first_run {
+            self.save_agents(cx);
+        }
+        cx.emit(SetupEvent::Close);
     }
+
+    /// Show a section (the list on the left).
+    fn go_to(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.section = ix;
+        self.follow_scroll = false;
+        self.scroll.scroll_to_top_of_item(ix);
+        cx.notify();
+    }
+
+    // -- sliders --------------------------------------------------------------
+
+    /// A slider moved to `t` (0..=1): preview it, or save on release.
+    fn slide(&mut self, which: Slider, t: f32, save: bool, cx: &mut Context<Self>) {
+        let c = &self.current;
+        match which {
+            Slider::Opacity => {
+                let min = qur_theme::MIN_OPACITY;
+                let opacity = ((min + (1. - min) * t) * 100.).round() / 100.;
+                cx.emit(SetupEvent::Opacity { project_scope: self.window_project, opacity, blur: c.blur, save });
+            }
+            Slider::Hue => cx.emit(SetupEvent::Tune { hue: (-180. + 360. * t).round(), brightness: c.brightness, save }),
+            Slider::Brightness => cx.emit(SetupEvent::Tune { hue: c.hue, brightness: ((-1. + 2. * t) * 100.).round() / 100., save }),
+        }
+    }
+
+    fn drag_to(&mut self, which: Slider, x: Pixels, save: bool, cx: &mut Context<Self>) {
+        let Some(b) = self.sliders.borrow().get(&which).copied() else { return };
+        if b.size.width <= px(0.) {
+            return;
+        }
+        let t = ((x - b.left()) / b.size.width).clamp(0., 1.);
+        self.slide(which, t, save, cx);
+    }
+
+    fn end_drag(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        if let Some(which) = self.drag.take() {
+            self.drag_to(which, x, true, cx);
+        }
+    }
+
+    /// A track (plain, or painted with the colors it gives) and a thumb at
+    /// `t`. Press, drag anywhere in the window, release to save.
+    pub fn slider(&self, look: &Look, which: Slider, t: f32, colors: Option<Vec<Hsla>>, cx: &Context<Self>) -> Stateful<gpui::Div> {
+        let ui = &look.theme.ui;
+        let bounds = self.sliders.clone();
+        let w = look.z(220.);
+        let t = t.clamp(0., 1.);
+        let track = match colors {
+            Some(colors) => div()
+                .absolute()
+                .top(look.z(4.))
+                .left_0()
+                .w(w)
+                .h(look.z(8.))
+                .rounded(look.z(4.))
+                .overflow_hidden()
+                .flex()
+                .children(colors.into_iter().map(|c| div().flex_1().h_full().bg(c))),
+            None => div()
+                .absolute()
+                .top(look.z(7.))
+                .left_0()
+                .w(w)
+                .h(look.z(2.))
+                .bg(look.c(ui.border_strong))
+                .child(div().w(w * t).h_full().bg(look.c(ui.text))),
+        };
+        div()
+            .id(SharedString::from(format!("settings-slider-{which:?}")))
+            .relative()
+            .flex_none()
+            .w(w)
+            .h(look.z(16.))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                    this.drag = Some(which);
+                    this.drag_to(which, ev.position.x, false, cx);
+                }),
+            )
+            .child(canvas(move |b, _, _| _ = bounds.borrow_mut().insert(which, b), |_, _, _, _| {}).absolute().size_full())
+            .child(track)
+            .child(div().absolute().top(look.z(1.)).left(w * t - look.z(7.)).size(look.z(14.)).rounded_full().border_2().border_color(look.c(ui.text)).bg(look.c(ui.overlay_bg)))
+            .children(crate::script::mark(move || format!("settings:slider:{which:?}")))
+    }
+
+    // -- sections -------------------------------------------------------------
+
+    fn agents_section(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = look.theme.ui.clone();
+        let primary = |id: (&'static str, usize), label: String| {
+            div()
+                .id(id)
+                .flex_none()
+                .px(look.z(12.))
+                .py(look.z(4.))
+                .rounded(look.z(5.))
+                .cursor_pointer()
+                .text_size(look.text(-1.))
+                .bg(look.c(ui.button_primary_bg))
+                .text_color(look.c(ui.button_primary_text))
+                .child(label)
+        };
+        let note = |text: String, color| div().flex_1().min_w(px(0.)).truncate().text_size(look.text(-2.)).text_color(look.c(color)).child(text);
+        let step = |n: &'static str, title: &'static str, done: bool| {
+            div()
+                .flex()
+                .items_center()
+                .gap(look.z(8.))
+                .py(look.z(3.))
+                .child(
+                    div()
+                        .flex_none()
+                        .size(look.z(16.))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(look.text(-3.))
+                        .border_1()
+                        .border_color(look.c(if done { ui.text_secondary } else { ui.border_strong }))
+                        .text_color(look.c(if done { ui.text } else { ui.text_secondary }))
+                        .child(if done { "✓" } else { n }),
+                )
+                .child(div().w(look.z(120.)).flex_none().text_size(look.text(-1.)).text_color(look.c(ui.text)).child(title))
+        };
+        let agent_row = |i: usize, f: &Found| {
+            let status = match (&f.path, &f.check) {
+                (None, _) => format!("needs {}", f.def.command),
+                (Some(_), Check::NotRun) => f.def.command.clone(),
+                (Some(_), Check::Running) => "checking…".into(),
+                (Some(_), Check::Ok(s)) => format!("✓ {s}"),
+                (Some(_), Check::Failed(e)) => format!("✕ {e}"),
+            };
+            div()
+                .flex()
+                .items_center()
+                .gap(look.z(8.))
+                .py(look.z(3.))
+                .child(check_box(look, ("agent-on", i), f.enabled).on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(f) = this.agents.get_mut(i) {
+                        f.enabled = !f.enabled;
+                    }
+                    this.save_agents(cx);
+                    cx.notify();
+                })))
+                .child(div().w(look.z(180.)).flex_none().text_size(look.text(-1.)).text_color(look.c(if f.path.is_some() { ui.text } else { ui.text_muted })).child(f.def.label.clone()))
+                .child(div().flex_1().min_w(px(0.)).truncate().text_size(look.text(-2.)).text_color(look.c(match f.check {
+                    Check::Failed(_) => ui.error,
+                    Check::Ok(_) => ui.text_secondary,
+                    _ => ui.text_muted,
+                })).child(status))
+                .when(f.path.is_some(), |d| d.child(pill(look, ("agent-check", i), "Check", false).on_click(cx.listener(move |this, _, _, cx| this.check(i, cx)))))
+        };
+        let cards = SERVICES
+            .iter()
+            .enumerate()
+            .map(|(ix, svc)| {
+                let missing = self.missing(ix);
+                let installed = missing.is_empty();
+                let waiting = self.waiting.filter(|(w, _)| *w == ix).map(|(_, wait)| wait);
+                // ① Install
+                let mut install = step("1", "Install", installed);
+                install = if installed {
+                    install.child(note("Installed".into(), ui.text_secondary))
+                } else if waiting == Some(Wait::Install) {
+                    install.child(note("Installing in a terminal… Settings come back when it's done".into(), ui.text_muted))
+                } else if !self.npm {
+                    install
+                        .child(note("Needs Node.js first (it comes with npm)".into(), ui.text_muted))
+                        .child(pill(look, ("svc-recheck", ix), "Check again", false).on_click(cx.listener(|this, _, _, cx| this.refresh(cx))))
+                        .child(primary(("svc-node", ix), "Get Node.js".into()).on_click(cx.listener(|_, _, _, cx| cx.open_url("https://nodejs.org/en/download"))))
+                } else {
+                    let packages = missing.iter().map(|(_, p)| *p).collect::<Vec<_>>().join(" ");
+                    install
+                        .child(note(format!("Runs npm install -g {packages}"), ui.text_muted))
+                        .child(primary(("svc-install", ix), "Install".into()).on_click(cx.listener(move |this, _, _, cx| this.install(ix, cx))))
+                };
+                // ② Sign in
+                let mut sign = step("2", "Sign in", self.connected(ix));
+                let cli_found = self.found(svc.cli);
+                sign = match (&self.logins[ix], waiting) {
+                    _ if !cli_found => sign.child(note("Install first".into(), ui.text_muted)),
+                    (_, Some(Wait::SignIn)) => sign.child(note("Finish signing in in your browser… Settings come back when it's done".into(), ui.text_muted)),
+                    (None, _) => sign.child(note("Checking…".into(), ui.text_muted)),
+                    (Some(Login::In(who)), _) => sign.child(note(who.clone(), ui.text_secondary)),
+                    (Some(Login::Out), _) => sign
+                        .child(note("Not signed in. Opens your browser, where you may already be signed in.".into(), ui.text_muted))
+                        .child(primary(("svc-sign-in", ix), "Sign in".into()).on_click(cx.listener(move |this, _, _, cx| this.sign_in(ix, cx)))),
+                    (Some(Login::Unknown(e)), _) => sign
+                        .child(note(e.clone(), ui.error))
+                        .child(pill(look, ("svc-login-again", ix), "Check again", false).on_click(cx.listener(move |this, _, _, cx| this.check_login(ix, cx))))
+                        .child(pill(look, ("svc-sign-in-anyway", ix), "Sign in", false).on_click(cx.listener(move |this, _, _, cx| this.sign_in(ix, cx)))),
+                };
+                let rows = self.agents.iter().enumerate().filter(|(_, f)| svc.agents.contains(&f.def.id.as_str())).map(|(i, f)| agent_row(i, f)).collect::<Vec<_>>();
+                div()
+                    .mb(look.z(8.))
+                    .p(look.z(10.))
+                    .rounded(look.z(6.))
+                    .border_1()
+                    .border_color(look.c(ui.border))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap(look.z(8.))
+                            .mb(look.z(4.))
+                            .child(div().text_size(look.text(0.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(look.c(ui.text)).child(svc.name))
+                            .child(div().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(svc.plan)),
+                    )
+                    .child(install)
+                    .child(sign)
+                    .child(div().mt(look.z(4.)).text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child("Use in Qur"))
+                    .children(rows)
+            })
+            .collect::<Vec<_>>();
+        // Agents outside the two accounts (Aider): only when installed or chosen.
+        let others = self
+            .agents
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| !SERVICES.iter().any(|s| s.agents.contains(&f.def.id.as_str())) && (f.path.is_some() || f.enabled))
+            .map(|(i, f)| agent_row(i, f))
+            .collect::<Vec<_>>();
+        section(look, "Agents")
+            .child(div().mb(look.z(8.)).text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child("Connect an AI account. Qur's agents run on a subscription you already have: no API keys, nothing extra to pay. Connect at least one."))
+            .children(cards)
+            .when(!others.is_empty(), |d| d.child(sub_heading(look, "Other agents")).children(others))
+    }
+
+    fn appearance_section(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = look.theme.ui.clone();
+        let c = &self.current;
+        // Theme: scope, Use Default, then the themes as live previews.
+        let theme_scope = self.scope_pills(look, "theme-scope", self.theme_project, |t, p| t.theme_project = p, cx).when(c.theme_is_project, |d| {
+            d.child(link(look, "theme-default", "Use Default Theme for This Project").relative().children(crate::script::mark(|| "settings:theme-default".to_string())).on_click(cx.listener(|_, _, window, cx| window.dispatch_action(Box::new(qur::UseDefaultTheme), cx))))
+        });
+        let small = Look { zoom: look.zoom * 0.75, ..look.clone() };
+        let themes: Vec<Arc<Theme>> = Registry::global().all().to_vec();
+        let card = |id: ElementId, mark: String, name: String, on: bool, body: gpui::Div| {
+            div()
+                .id(id)
+                .relative()
+                .flex()
+                .flex_col()
+                .gap(look.z(3.))
+                .cursor_pointer()
+                .child(body.when(on, |d| d.border_2().border_color(look.c(ui.focus_ring))))
+                .child(div().text_size(look.text(-3.)).text_color(look.c(if on { ui.text } else { ui.text_muted })).child(name.clone()))
+                .children(crate::script::mark(move || format!("settings:theme:{mark}")))
+                .on_click(cx.listener(move |this, _, _, cx| cx.emit(SetupEvent::Theme { name: name.clone(), project_scope: this.theme_project })))
+        };
+        let auto = div()
+            .w(small.z(168.))
+            .h(small.z(86.))
+            .rounded(small.z(5.))
+            .border_1()
+            .border_color(look.c(ui.border))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(look.text(-2.))
+            .text_color(look.c(ui.text_secondary))
+            .child("Follows macOS");
+        let mut grid = vec![card("theme-auto".into(), "Auto".into(), qur_config::THEME_AUTO.into(), c.theme == qur_config::THEME_AUTO, auto)];
+        for (i, t) in themes.iter().enumerate() {
+            grid.push(card(("theme", i).into(), i.to_string(), t.name.clone(), c.theme == t.name, preview(t, &small)));
+        }
+        // Accent: the theme's palette in its own order (the look is rotated
+        // by the accent in use), then its color and brightness.
+        let mut palette = look.theme.accents;
+        palette.rotate_right(c.accent);
+        let swatches = div().flex().gap(look.z(10.)).children(palette.iter().enumerate().map(|(i, a)| {
+            let on = i == c.accent;
+            div()
+                .id(("setup-accent", i))
+                .size(look.z(22.))
+                .rounded_full()
+                .cursor_pointer()
+                .bg(look.c(a.base))
+                .border_2()
+                .border_color(look.c(if on { ui.text } else { ui.overlay_bg }))
+                .on_click(cx.listener(move |_, _, _, cx| cx.emit(SetupEvent::Accent(i))))
+        }));
+        let (hue, brightness, base) = (c.hue, c.brightness, c.accent_base);
+        let steps = |f: &dyn Fn(f32) -> Rgba| (0..24).map(|i| look.c(f(i as f32 / 23.))).collect::<Vec<_>>();
+        let value = |s: String| div().w(look.z(48.)).text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(s);
+        let labeled = |name: &'static str, el: Stateful<gpui::Div>, v: String| {
+            div().flex().items_center().gap(look.z(10.)).child(div().w(look.z(70.)).text_size(look.text(-2.)).text_color(look.c(ui.text_secondary)).child(name)).child(el).child(value(v))
+        };
+        let accent = div()
+            .flex()
+            .flex_col()
+            .gap(look.z(8.))
+            .child(swatches)
+            .child(labeled("Color", self.slider(look, Slider::Hue, (hue + 180.) / 360., Some(steps(&|t| base.tuned(-180. + 360. * t, brightness))), cx), format!("{hue:+.0}°")))
+            .child(labeled("Brightness", self.slider(look, Slider::Brightness, (brightness + 1.) / 2., Some(steps(&|t| base.tuned(hue, -1. + 2. * t))), cx), format!("{:+.0}%", brightness * 100.)))
+            .when(hue != 0. || brightness != 0., |d| {
+                d.child(link(look, "accent-reset", "Reset color and brightness").on_click(cx.listener(|_, _, _, cx| cx.emit(SetupEvent::Tune { hue: 0., brightness: 0., save: true }))))
+            });
+        // Transparency: the same 60–100% range as the popover (decision 38).
+        let min = qur_theme::MIN_OPACITY;
+        let t = if min < 1. { (c.opacity - min) / (1. - min) } else { 1. };
+        let transparency = div()
+            .flex()
+            .flex_col()
+            .gap(look.z(8.))
+            .child(self.scope_pills(look, "window-scope", self.window_project, |t, p| t.window_project = p, cx))
+            .child(labeled("Opacity", self.slider(look, Slider::Opacity, t, None, cx), format!("{}%", (c.opacity * 100.).round() as i32)))
+            .child(
+                div()
+                    .id("settings-blur")
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .gap(look.z(8.))
+                    .cursor_pointer()
+                    .text_size(look.text(-1.))
+                    .text_color(look.c(ui.text))
+                    .child(check_box(look, "settings-blur-box", c.blur))
+                    .child("Blur the desktop behind")
+                    .children(crate::script::mark(|| "settings:blur".to_string()))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let c = &this.current;
+                        cx.emit(SetupEvent::Opacity { project_scope: this.window_project, opacity: c.opacity, blur: !c.blur, save: true });
+                    })),
+            );
+        let top_bar = choices(look, "top", &[("zen", "Zen: show at the top edge"), ("show", "Always show")], if c.zen { "zen" } else { "show" }, cx, |this, key, window, cx| {
+            if (key == "zen") != this.current.zen {
+                window.dispatch_action(Box::new(qur::ZenMode), cx);
+            }
+        });
+        let lights = choices(look, "lights", &[("auto", "Match theme"), ("color", "Color"), ("mono", "Monochrome")], &c.traffic_lights, cx, |_, key, _, cx| {
+            cx.emit(SetupEvent::TrafficLights(key.to_string()));
+        });
+        // Off / Small / Medium / Large; a custom gap (from the popover) selects none.
+        const SIZES: [(&str, &str, f32); 3] = [("4", "Small", 4.0), ("8", "Medium", 8.0), ("16", "Large", 16.0)];
+        let gaps_key = if !c.gaps { "off".to_string() } else { SIZES.iter().find(|s| s.2 == c.gap).map_or(String::new(), |s| s.0.to_string()) };
+        let gaps = choices(look, "gaps", &[("off", "Off"), ("4", "Small"), ("8", "Medium"), ("16", "Large")], &gaps_key, cx, |this, key, _, cx| {
+            let gap = SIZES.iter().find(|s| s.0 == key).map_or(this.current.gap, |s| s.2);
+            cx.emit(SetupEvent::Gaps { on: key != "off", gap });
+        });
+        section(look, "Appearance")
+            .child(row(look, "Theme", Some("For this project or all of them"), theme_scope))
+            .child(div().mt(look.z(4.)).mb(look.z(6.)).flex().flex_wrap().gap(look.z(10.)).children(grid))
+            .child(row(look, "Accent color", Some("Agents take the colors in order from here"), accent))
+            .child(row(look, "Transparency", Some("60–100%, live"), transparency))
+            .child(row(look, "Gaps", Some("Space between panes; more in View > Appearance > Gaps…"), gaps))
+            .child(row(look, "Top bar", None, top_bar))
+            .child(row(look, "Traffic lights in full screen", None, lights))
+    }
+
+    /// This project / All projects, for Theme and Transparency (decision 13).
+    fn scope_pills(&self, look: &Look, id: &'static str, project: bool, set: fn(&mut SetupView, bool), cx: &Context<Self>) -> gpui::Div {
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(look.z(6.))
+            .child(pill(look, (id, 0usize), format!("This project ({})", self.current.project), project).children(crate::script::mark(move || format!("settings:{id}:project"))).on_click(cx.listener(move |this, _, _, cx| {
+                set(this, true);
+                cx.notify();
+            })))
+            .child(pill(look, (id, 1usize), "All projects", !project).children(crate::script::mark(move || format!("settings:{id}:all"))).on_click(cx.listener(move |this, _, _, cx| {
+                set(this, false);
+                cx.notify();
+            })))
+    }
+
+    fn editor_section(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = look.theme.ui.clone();
+        let vim = choices(look, "vim", &[("off", "Off"), ("on", "On")], if self.current.vim { "on" } else { "off" }, cx, |this, key, window, cx| {
+            if (key == "on") != this.current.vim {
+                window.dispatch_action(Box::new(qur::VimMode), cx);
+            }
+        });
+        let keys = div()
+            .flex()
+            .items_center()
+            .gap(look.z(10.))
+            .child(div().text_size(look.text(-1.)).text_color(look.c(ui.text)).child("VS Code"))
+            .child(link(look, "keys-keymap", "Rebind in keymap.toml…").on_click(cx.listener(|this, _, window, cx| this.open_file(Box::new(qur::OpenKeymap), window, cx))));
+        section(look, "Editor").child(row(look, "Vim mode", Some("In the code modal: Esc for normal mode"), vim)).child(row(look, "Keys", None, keys))
+    }
+
+    fn layout_section(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let cards = crate::dock::layout_cards(&self.current.layout, look, cx, |_: &mut SetupView, key, cx| {
+            if matches!(key, "A" | "B" | "C") {
+                cx.emit(SetupEvent::Layout(key.to_string()));
+            }
+        });
+        section(look, "Layout")
+            .child(div().mb(look.z(8.)).text_size(look.text(-2.)).text_color(look.c(look.theme.ui.text_muted)).child("The agent stage. Then drag tabs and dividers to make it yours; it's saved as you go."))
+            .child(cards)
+    }
+
+    fn files_section(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = look.theme.ui.clone();
+        let files: [(&'static str, Box<dyn gpui::Action>); 3] =
+            [("config.toml", Box::new(qur::OpenConfig)), ("keymap.toml", Box::new(qur::OpenKeymap)), ("agents.toml", Box::new(qur::OpenAgents))];
+        section(look, "Files")
+            .child(div().mb(look.z(6.)).text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child("Everything here is saved in these files, in ~/Library/Application Support/Qur."))
+            .child(div().flex().gap(look.z(16.)).children(files.into_iter().map(|(name, action)| {
+                link(look, SharedString::from(format!("file-{name}")), format!("Open {name}"))
+                    .relative()
+                    .children(crate::script::mark(move || format!("settings:file:{name}")))
+                    .on_click(cx.listener(move |this, _, window, cx| this.open_file(action.boxed_clone(), window, cx)))
+            })))
+    }
+
+    /// Close, then open a settings file in the code modal (the menu's command).
+    fn open_file(&mut self, action: Box<dyn gpui::Action>, window: &mut Window, cx: &mut Context<Self>) {
+        self.close(cx);
+        window.dispatch_action(action, cx);
+    }
+}
+
+// -- row helpers (shared by every section) -----------------------------------
+
+/// A section: its title, then its rows.
+pub fn section(look: &Look, title: &'static str) -> gpui::Div {
+    let ui = &look.theme.ui;
+    div()
+        .flex()
+        .flex_col()
+        .pb(look.z(18.))
+        .child(div().pb(look.z(8.)).text_size(look.text(1.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(look.c(ui.text)).child(title))
+}
+
+fn sub_heading(look: &Look, title: &'static str) -> gpui::Div {
+    div().mt(look.z(8.)).mb(look.z(4.)).text_size(look.text(-1.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(look.c(look.theme.ui.text)).child(title)
+}
+
+/// One setting: its name (and a hint) on the left, the control on the right.
+pub fn row(look: &Look, label: &'static str, hint: Option<&'static str>, control: impl IntoElement) -> gpui::Div {
+    let ui = &look.theme.ui;
+    div()
+        .flex()
+        .items_start()
+        .gap(look.z(12.))
+        .py(look.z(7.))
+        .border_t_1()
+        .border_color(look.c(ui.border))
+        .child(
+            div()
+                .w(look.z(150.))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(look.z(2.))
+                .child(div().text_size(look.text(-1.)).text_color(look.c(ui.text)).child(label))
+                .children(hint.map(|h| div().text_size(look.text(-3.)).text_color(look.c(ui.text_muted)).child(h))),
+        )
+        .child(div().flex_1().min_w(px(0.)).child(control))
+}
+
+/// A choice button (several make a segmented row).
+pub fn pill(look: &Look, id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool) -> Stateful<gpui::Div> {
+    let ui = &look.theme.ui;
+    div()
+        .id(id)
+        .relative()
+        .flex_none()
+        .px(look.z(10.))
+        .py(look.z(3.))
+        .rounded(look.z(5.))
+        .border_1()
+        .cursor_pointer()
+        .text_size(look.text(-1.))
+        .border_color(look.c(if on { ui.focus_ring } else { ui.border }))
+        .when(on, |d| d.bg(look.c(ui.active_bg)))
+        .hover(|d| d.bg(look.c(ui.hover_bg)))
+        .text_color(look.c(if on { ui.text } else { ui.text_secondary }))
+        .child(label.into())
+}
+
+/// One of `options` (key, label), as pills; `on_pick` gets the key.
+pub fn choices<V: 'static>(
+    look: &Look,
+    id: &'static str,
+    options: &[(&'static str, &'static str)],
+    selected: &str,
+    cx: &Context<V>,
+    on_pick: impl Fn(&mut V, &'static str, &mut Window, &mut Context<V>) + Clone + 'static,
+) -> gpui::Div {
+    div().flex().flex_wrap().gap(look.z(6.)).children(options.iter().enumerate().map(|(i, &(key, label))| {
+        let pick = on_pick.clone();
+        pill(look, (id, i), label, selected == key)
+            .children(crate::script::mark(move || format!("settings:{id}:{key}")))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                pick(this, key, window, cx);
+                cx.notify();
+            }))
+    }))
+}
+
+/// A text link (opens something, or a one-off action).
+pub fn link(look: &Look, id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<gpui::Div> {
+    let ui = &look.theme.ui;
+    div().id(id).flex_none().cursor_pointer().text_size(look.text(-2.)).text_color(look.c(ui.text_secondary)).hover(|d| d.text_color(look.c(ui.text))).child(label.into())
+}
+
+/// A tick box.
+pub fn check_box(look: &Look, id: impl Into<ElementId>, on: bool) -> Stateful<gpui::Div> {
+    let ui = &look.theme.ui;
+    div()
+        .id(id)
+        .flex_none()
+        .size(look.z(14.))
+        .rounded(look.z(3.))
+        .border_1()
+        .border_color(look.c(ui.border_strong))
+        .cursor_pointer()
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(on, |d| d.bg(look.c(ui.button_primary_bg)).child(svg().path(assets::icon::CHECK).size(look.z(10.)).text_color(look.c(ui.button_primary_text))))
 }
 
 /// A small live sample of a theme: a sidebar with two agents, highlighted
 /// code, and one glowing file row (handoff section 12a).
-impl SetupView {
-    /// The Appearance section's **Gaps** row: off, or a gap size (fine-tuned,
-    /// with corners and borders, in Qur > Appearance > Gaps…). Previewed live.
-    fn gaps_row(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
-        let ui = &look.theme.ui;
-        const SIZES: [(&str, f32); 3] = [("Small", 4.0), ("Medium", 8.0), ("Large", 16.0)];
-        let custom = self.gaps && !SIZES.iter().any(|(_, v)| *v == self.gap);
-        let pill = |i: usize, label: String, on: bool, gaps: bool, gap: f32| {
-            div()
-                .id(("gaps", i))
-                .relative()
-                .px(look.z(10.))
-                .py(look.z(4.))
-                .rounded(look.z(5.))
-                .border_1()
-                .cursor_pointer()
-                .text_size(look.text(-1.))
-                .border_color(look.c(if on { ui.focus_ring } else { ui.border }))
-                .when(on, |d| d.bg(look.c(ui.active_bg)))
-                .hover(|d| d.bg(look.c(ui.hover_bg)))
-                .text_color(look.c(if on { ui.text } else { ui.text_secondary }))
-                .child(label)
-                .children(crate::script::mark(move || format!("setup-gaps:{i}")))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.gaps = gaps;
-                    this.gap = gap;
-                    cx.emit(SetupEvent::PreviewGaps(gaps, gap));
-                    cx.notify();
-                }))
-        };
-        div()
-            .flex()
-            .items_center()
-            .gap(look.z(8.))
-            .child(pill(0, "Off".into(), !self.gaps, false, self.gap))
-            .children(SIZES.iter().enumerate().map(|(i, (label, v))| pill(i + 1, (*label).into(), self.gaps && self.gap == *v, true, *v)))
-            .when(custom, |d| d.child(pill(4, format!("{} px", self.gap.round() as i32), true, true, self.gap)))
-            .child(div().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child("More in Qur > Appearance > Gaps…"))
-    }
-}
-
 fn preview(t: &Theme, look: &Look) -> gpui::Div {
     let c = |rgba| look.c(rgba);
     let syn = |name: &str| c(t.syntax_style(name).color.unwrap_or(t.editor.text));
@@ -422,358 +973,230 @@ fn preview(t: &Theme, look: &Look) -> gpui::Div {
         )
 }
 
+/// The panel's size: up to 820 × 640 (zoomed), inside the window.
+pub fn panel_size(look: &Look, viewport: gpui::Size<Pixels>) -> (Pixels, Pixels) {
+    let fit = |want: Pixels, room: Pixels, floor: Pixels| if want < room { want } else if room > floor { room } else { floor };
+    (fit(look.z(820.), viewport.width - look.z(32.), look.z(360.)), fit(look.z(640.), viewport.height - look.z(110.), look.z(240.)))
+}
+
 impl Render for SetupView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
         let ui = look.theme.ui.clone();
-        let heading = |s: &'static str| div().mt(look.z(14.)).mb(look.z(6.)).text_size(look.text(-1.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(look.c(ui.text)).child(s);
-        let pill = |id: (&'static str, usize), label: String, on: bool| {
+        let (w, h) = panel_size(&look, window.viewport_size());
+        if self.follow_scroll {
+            // At the bottom, the last section (it may never reach the top).
+            let at_end = self.scroll.max_offset().y > px(0.) && -self.scroll.offset().y >= self.scroll.max_offset().y - px(2.);
+            self.section = if at_end { SECTIONS.len() - 1 } else { self.scroll.top_item().min(SECTIONS.len() - 1) };
+        }
+        // While a slider is held, follow the mouse anywhere in the window.
+        let drag_listener = self.drag.is_some().then(|| {
+            let view = cx.entity().downgrade();
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    let v = view.clone();
+                    window.on_mouse_event(move |ev: &gpui::MouseMoveEvent, phase, _, cx| {
+                        if phase != DispatchPhase::Bubble {
+                            return;
+                        }
+                        v.update(cx, |t, cx| match (t.drag, ev.pressed_button) {
+                            (Some(which), Some(MouseButton::Left)) => t.drag_to(which, ev.position.x, false, cx),
+                            (Some(_), _) => t.end_drag(ev.position.x, cx),
+                            _ => {}
+                        })
+                        .ok();
+                    });
+                    let v = view.clone();
+                    window.on_mouse_event(move |ev: &gpui::MouseUpEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Bubble && ev.button == MouseButton::Left {
+                            v.update(cx, |t, cx| t.end_drag(ev.position.x, cx)).ok();
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .size_0()
+        });
+        let sections = [
+            self.agents_section(&look, cx),
+            self.appearance_section(&look, cx),
+            self.editor_section(&look, cx),
+            self.layout_section(&look, cx),
+            self.files_section(&look, cx),
+        ];
+        let nav = div().w(look.z(132.)).flex_none().flex().flex_col().gap(look.z(2.)).p(look.z(10.)).children(SECTIONS.iter().enumerate().map(|(i, name)| {
+            let on = i == self.section;
             div()
-                .id(id)
-                .px(look.z(10.))
+                .id(("settings-nav", i))
+                .relative()
+                .px(look.z(8.))
                 .py(look.z(4.))
                 .rounded(look.z(5.))
-                .border_1()
                 .cursor_pointer()
                 .text_size(look.text(-1.))
-                .border_color(look.c(if on { ui.focus_ring } else { ui.border }))
+                .text_color(look.c(if on { ui.text } else { ui.text_secondary }))
                 .when(on, |d| d.bg(look.c(ui.active_bg)))
                 .hover(|d| d.bg(look.c(ui.hover_bg)))
-                .text_color(look.c(if on { ui.text } else { ui.text_secondary }))
-                .child(label)
-        };
-        // 1. AI accounts (decision 45): install, sign in, then which agents.
-        let primary = |id: (&'static str, usize), label: String| {
-            div()
-                .id(id)
-                .flex_none()
-                .px(look.z(12.))
-                .py(look.z(4.))
-                .rounded(look.z(5.))
-                .cursor_pointer()
-                .text_size(look.text(-1.))
-                .bg(look.c(ui.button_primary_bg))
-                .text_color(look.c(ui.button_primary_text))
-                .child(label)
-        };
-        let note = |text: String, color| div().flex_1().min_w(px(0.)).truncate().text_size(look.text(-2.)).text_color(look.c(color)).child(text);
-        let step = |n: &'static str, title: &'static str, done: bool| {
-            div()
-                .flex()
-                .items_center()
-                .gap(look.z(8.))
-                .py(look.z(3.))
-                .child(
-                    div()
-                        .flex_none()
-                        .size(look.z(16.))
-                        .rounded_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(look.text(-3.))
-                        .border_1()
-                        .border_color(look.c(if done { ui.text_secondary } else { ui.border_strong }))
-                        .text_color(look.c(if done { ui.text } else { ui.text_secondary }))
-                        .child(if done { "✓" } else { n }),
-                )
-                .child(div().w(look.z(140.)).flex_none().text_size(look.text(-1.)).text_color(look.c(ui.text)).child(title))
-        };
-        let agent_row = |i: usize, f: &Found| {
-            let status = match (&f.path, &f.check) {
-                (None, _) => format!("needs {}", f.def.command),
-                (Some(_), Check::NotRun) => f.def.command.clone(),
-                (Some(_), Check::Running) => "checking…".into(),
-                (Some(_), Check::Ok(s)) => format!("✓ {s}"),
-                (Some(_), Check::Failed(e)) => format!("✕ {e}"),
-            };
-            div()
-                .flex()
-                .items_center()
-                .gap(look.z(8.))
-                .py(look.z(3.))
-                .child(
-                    div()
-                        .id(("agent-on", i))
-                        .flex_none()
-                        .size(look.z(14.))
-                        .rounded(look.z(3.))
-                        .border_1()
-                        .border_color(look.c(ui.border_strong))
-                        .cursor_pointer()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .when(f.enabled, |d| d.bg(look.c(ui.button_primary_bg)).child(svg().path(assets::icon::CHECK).size(look.z(10.)).text_color(look.c(ui.button_primary_text))))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(f) = this.agents.get_mut(i) {
-                                f.enabled = !f.enabled;
-                            }
-                            cx.notify();
-                        })),
-                )
-                .child(div().w(look.z(190.)).flex_none().text_size(look.text(-1.)).text_color(look.c(if f.path.is_some() { ui.text } else { ui.text_muted })).child(f.def.label.clone()))
-                .child(div().flex_1().min_w(px(0.)).truncate().text_size(look.text(-2.)).text_color(look.c(match f.check {
-                    Check::Failed(_) => ui.error,
-                    Check::Ok(_) => ui.text_secondary,
-                    _ => ui.text_muted,
-                })).child(status))
-                .when(f.path.is_some(), |d| {
-                    d.child(pill(("agent-check", i), "Check".into(), false).on_click(cx.listener(move |this, _, _, cx| this.check(i, cx))))
-                })
-        };
-        let cards = SERVICES.iter().enumerate().map(|(ix, svc)| {
-            let missing = self.missing(ix);
-            let installed = missing.is_empty();
-            let waiting = self.waiting.filter(|(w, _)| *w == ix).map(|(_, wait)| wait);
-            // ① Install
-            let mut install = step("1", "Install", installed);
-            install = if installed {
-                install.child(note("Installed".into(), ui.text_secondary))
-            } else if waiting == Some(Wait::Install) {
-                install.child(note("Installing in a terminal… Setup comes back when it's done".into(), ui.text_muted))
-            } else if !self.npm {
-                install
-                    .child(note("Needs Node.js first (it comes with npm)".into(), ui.text_muted))
-                    .child(pill(("svc-recheck", ix), "Check again".into(), false).on_click(cx.listener(|this, _, _, cx| this.refresh(cx))))
-                    .child(primary(("svc-node", ix), "Get Node.js".into()).on_click(cx.listener(|_, _, _, cx| cx.open_url("https://nodejs.org/en/download"))))
-            } else {
-                let packages = missing.iter().map(|(_, p)| *p).collect::<Vec<_>>().join(" ");
-                install
-                    .child(note(format!("Runs npm install -g {packages}"), ui.text_muted))
-                    .child(primary(("svc-install", ix), "Install".into()).on_click(cx.listener(move |this, _, _, cx| this.install(ix, cx))))
-            };
-            // ② Sign in
-            let mut sign = step("2", "Sign in", self.connected(ix));
-            let cli_found = self.found(svc.cli);
-            sign = match (&self.logins[ix], waiting) {
-                _ if !cli_found => sign.child(note("Install first".into(), ui.text_muted)),
-                (_, Some(Wait::SignIn)) => sign.child(note("Finish signing in in your browser… Setup comes back when it's done".into(), ui.text_muted)),
-                (None, _) => sign.child(note("Checking…".into(), ui.text_muted)),
-                (Some(Login::In(who)), _) => sign.child(note(who.clone(), ui.text_secondary)),
-                (Some(Login::Out), _) => sign
-                    .child(note("Not signed in. Opens your browser, where you may already be signed in.".into(), ui.text_muted))
-                    .child(primary(("svc-sign-in", ix), "Sign in".into()).on_click(cx.listener(move |this, _, _, cx| this.sign_in(ix, cx)))),
-                (Some(Login::Unknown(e)), _) => sign
-                    .child(note(e.clone(), ui.error))
-                    .child(pill(("svc-login-again", ix), "Check again".into(), false).on_click(cx.listener(move |this, _, _, cx| this.check_login(ix, cx))))
-                    .child(pill(("svc-sign-in-anyway", ix), "Sign in".into(), false).on_click(cx.listener(move |this, _, _, cx| this.sign_in(ix, cx)))),
-            };
-            let rows = self.agents.iter().enumerate().filter(|(_, f)| svc.agents.contains(&f.def.id.as_str())).map(|(i, f)| agent_row(i, f)).collect::<Vec<_>>();
-            div()
-                .mb(look.z(8.))
-                .p(look.z(10.))
-                .rounded(look.z(6.))
-                .border_1()
-                .border_color(look.c(ui.border))
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .flex()
-                        .items_baseline()
-                        .gap(look.z(8.))
-                        .mb(look.z(4.))
-                        .child(div().text_size(look.text(0.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(look.c(ui.text)).child(svc.name))
-                        .child(div().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(svc.plan)),
-                )
-                .child(install)
-                .child(sign)
-                .child(div().mt(look.z(4.)).text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child("Use in Qur"))
-                .children(rows)
-        }).collect::<Vec<_>>();
-        // Agents outside the two accounts (Aider): only when installed or chosen.
-        let others = self
-            .agents
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| !SERVICES.iter().any(|s| s.agents.contains(&f.def.id.as_str())) && (f.path.is_some() || f.enabled))
-            .map(|(i, f)| agent_row(i, f))
-            .collect::<Vec<_>>();
-        let any_connected = (0..SERVICES.len()).any(|ix| self.connected(ix));
-        // 3. Layout: drawn as the panes they give you.
-        let layout_row = crate::dock::layout_cards(&self.layout, &look, cx, |this: &mut SetupView, key, cx| {
-            this.layout = key.to_string();
-            cx.notify();
-        });
-        // 4. Keys
-        let keys_row = div()
-            .flex()
-            .gap(look.z(8.))
-            .child(pill(("keys", 0), "VS Code".into(), !self.vim).on_click(cx.listener(|this, _, _, cx| {
-                this.vim = false;
-                cx.notify();
-            })))
-            .child(pill(("keys", 1), "VS Code + Vim mode".into(), self.vim).on_click(cx.listener(|this, _, _, cx| {
-                this.vim = true;
-                cx.notify();
-            })));
-        // 4a. Top bar: always there, or zen mode (slides down at the top edge).
-        let top_row = div()
-            .flex()
-            .gap(look.z(8.))
-            .child(pill(("top", 0), "Zen: show at the top edge".into(), self.zen).on_click(cx.listener(|this, _, _, cx| {
-                this.zen = true;
-                cx.notify();
-            })))
-            .child(pill(("top", 1), "Always show".into(), !self.zen).on_click(cx.listener(|this, _, _, cx| {
-                this.zen = false;
-                cx.notify();
-            })));
-        // 4b. Traffic lights in full screen: by theme, always colored, or grey.
-        let lights_row = div().flex().gap(look.z(8.)).children(
-            [("auto", "Match theme"), ("color", "Color"), ("mono", "Monochrome")].into_iter().enumerate().map(|(i, (key, label))| {
-                pill(("lights", i), label.into(), self.traffic_lights == key).on_click(cx.listener(move |this, _, _, cx| {
-                    this.traffic_lights = key.to_string();
-                    cx.notify();
-                }))
-            }),
-        );
-        // 4c. Accent: the theme's palette in its own order (the look shown is
-        // rotated by the accent being previewed).
-        let mut palette = look.theme.accents;
-        palette.rotate_right(self.accent);
-        let accent_row = div().flex().gap(look.z(10.)).children(palette.iter().enumerate().map(|(i, a)| {
-            let on = i == self.accent;
-            div()
-                .id(("setup-accent", i))
-                .size(look.z(24.))
-                .rounded_full()
-                .cursor_pointer()
-                .bg(look.c(a.base))
-                .border_2()
-                .border_color(look.c(if on { ui.text } else { ui.overlay_bg }))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.accent = i;
-                    cx.emit(SetupEvent::PreviewAccent(i));
-                    cx.notify();
-                }))
+                .child(*name)
+                .children(crate::script::mark(move || format!("settings:nav:{name}")))
+                .on_click(cx.listener(move |this, _, _, cx| this.go_to(i, cx)))
         }));
-        // 5. Theme
-        let themes: Vec<Arc<Theme>> = Registry::global().all().to_vec();
-        let auto_on = self.theme == qur_config::THEME_AUTO;
-        let mut grid: Vec<gpui::AnyElement> = vec![div()
-            .id("theme-auto")
-            .flex()
-            .flex_col()
-            .gap(look.z(4.))
-            .cursor_pointer()
-            .child(
-                div()
-                    .w(look.z(168.))
-                    .h(look.z(86.))
-                    .rounded(look.z(5.))
-                    .border_1()
-                    .border_color(look.c(if auto_on { ui.focus_ring } else { ui.border }))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(look.text(-1.))
-                    .text_color(look.c(ui.text_secondary))
-                    .child("Follows macOS"),
-            )
-            .child(div().text_size(look.text(-2.)).text_color(look.c(if auto_on { ui.text } else { ui.text_muted })).child("Auto"))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.theme = qur_config::THEME_AUTO.into();
-                cx.emit(SetupEvent::PreviewTheme(this.theme.clone()));
-                cx.notify();
-            }))
-            .into_any_element()];
-        for (i, t) in themes.iter().enumerate() {
-            let on = self.theme == t.name;
-            let name = t.name.clone();
-            grid.push(
-                div()
-                    .id(("theme", i))
-                    .flex()
-                    .flex_col()
-                    .gap(look.z(4.))
-                    .cursor_pointer()
-                    .child(preview(t, &look).when(on, |d| d.border_2().border_color(look.c(ui.focus_ring))))
-                    .child(div().text_size(look.text(-2.)).text_color(look.c(if on { ui.text } else { ui.text_muted })).child(t.name.clone()))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.theme = name.clone();
-                        cx.emit(SetupEvent::PreviewTheme(name.clone()));
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            );
-        }
+        let any_connected = (0..SERVICES.len()).any(|ix| self.connected(ix));
+        let header = if self.first_run {
+            div()
+                .flex()
+                .items_end()
+                .gap(look.z(12.))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(look.z(2.))
+                        .child(
+                            svg()
+                                .path(if look.logo_white() { "brand/svg/qur-horizontal-white.svg" } else { "brand/svg/qur-horizontal-black.svg" })
+                                .w(look.z(96.))
+                                .h(look.z(32.))
+                                // Pure black or white only: the logo is never tinted.
+                                .text_color(if look.logo_white() { gpui::white() } else { gpui::black() }),
+                        )
+                        .child(div().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child("by PEUR Technologies")),
+                )
+                .child(div().flex_1().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child("Welcome. Connect an AI account, then make it yours. Reopen any time with Qur > Settings… (⌘,)."))
+        } else {
+            div()
+                .flex()
+                .items_center()
+                .gap(look.z(8.))
+                .child(div().flex_1().text_size(look.text(1.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(look.c(ui.text)).child("Settings"))
+                .child(div().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child("changes save as you make them · esc to close"))
+                .child(
+                    div()
+                        .id("settings-close")
+                        .relative()
+                        .p(look.z(3.))
+                        .rounded(look.z(4.))
+                        .cursor_pointer()
+                        .hover(|d| d.bg(look.c(ui.hover_bg)))
+                        .child(svg().path(assets::icon::CLOSE).size(look.z(12.)).text_color(look.c(ui.text_secondary)))
+                        .children(crate::script::mark(|| "settings:close".to_string()))
+                        .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+                )
+        };
+        let footer = self.first_run.then(|| {
+            div()
+                .flex()
+                .items_center()
+                .gap(look.z(8.))
+                .px(look.z(16.))
+                .py(look.z(10.))
+                .border_t_1()
+                .border_color(look.c(ui.border))
+                .child(div().flex_1().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(if any_connected {
+                    "Saved as you go to config.toml and agents.toml. Reopen with Qur > Settings… (⌘,)"
+                } else {
+                    "No AI account connected yet: agents won't run until you do. Connect one any time from Qur > Settings… (⌘,)"
+                }))
+                .child(
+                    div()
+                        .id("setup-done")
+                        .relative()
+                        .px(look.z(14.))
+                        .py(look.z(5.))
+                        .rounded(look.z(5.))
+                        .cursor_pointer()
+                        .text_size(look.text(-1.))
+                        .bg(look.c(ui.button_primary_bg))
+                        .text_color(look.c(ui.button_primary_text))
+                        .child(if any_connected { "Done" } else { "Skip for now" })
+                        .children(crate::script::mark(|| "settings:done".to_string()))
+                        .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+                )
+        });
         div()
             .id("setup")
             .key_context("Setup")
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &crate::commands::setup::Done, _, cx| this.done(cx)))
-            .on_action(cx.listener(|_, _: &crate::commands::setup::Cancel, _, cx| cx.emit(SetupEvent::Cancel)))
+            .on_action(cx.listener(|this, _: &crate::commands::setup::Done, _, cx| this.close(cx)))
+            .on_action(cx.listener(|this, _: &crate::commands::setup::Cancel, _, cx| this.close(cx)))
             .occlude()
-            .w(look.z(760.))
-            .max_h(look.z(640.))
-            .overflow_y_scroll()
-            .p(look.z(20.))
+            .w(w)
+            .h(h)
             .flex()
             .flex_col()
+            .overflow_hidden()
             .bg(look.c(ui.overlay_bg))
             .border_1()
             .border_color(look.c(ui.border_strong))
             .rounded(look.z(10.))
+            .children(drag_listener)
+            .child(div().flex_none().px(look.z(16.)).py(look.z(12.)).border_b_1().border_color(look.c(ui.border)).child(header))
             .child(
                 div()
+                    .flex_1()
+                    .min_h(px(0.))
                     .flex()
-                    .flex_col()
-                    .gap(look.z(2.))
-                    .child(
-                        svg()
-                            .path(if look.logo_white() { "brand/svg/qur-horizontal-white.svg" } else { "brand/svg/qur-horizontal-black.svg" })
-                            .w(look.z(96.))
-                            .h(look.z(32.))
-                            // Pure black or white only: the logo is never tinted.
-                            .text_color(if look.logo_white() { gpui::white() } else { gpui::black() }),
-                    )
-                    .child(div().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child("by PEUR Technologies")),
-            )
-            .child(heading("Connect an AI account"))
-            .child(div().mb(look.z(6.)).text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child("Qur's agents run on a subscription you already have. No API keys, nothing extra to pay. Connect at least one."))
-            .children(cards)
-            .when(!others.is_empty(), |d| d.child(heading("Other agents")).children(others))
-            .child(heading("Agent stage layout"))
-            .child(layout_row)
-            .child(heading("Keys"))
-            .child(keys_row)
-            .child(heading("Top bar"))
-            .child(top_row)
-            .child(heading("Traffic lights in full screen"))
-            .child(lights_row)
-            .child(heading("Gaps"))
-            .child(self.gaps_row(&look, cx))
-            .child(heading("Accent color"))
-            .child(accent_row)
-            .child(heading("Theme"))
-            .child(div().flex().flex_wrap().gap(look.z(12.)).children(grid))
-            .child(
-                div()
-                    .mt(look.z(18.))
-                    .flex()
-                    .items_center()
-                    .gap(look.z(8.))
-                    .child(div().flex_1().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(if any_connected {
-                        "Saved to config.toml and agents.toml; edit them any time. Reopen with Qur > Setup…"
-                    } else {
-                        "No AI account connected yet: agents won't run until you do. Connect one any time from Qur > Setup…"
-                    }))
-                    .child(pill(("setup-skip", 0), "Cancel".into(), false).on_click(cx.listener(|_, _, _, cx| cx.emit(SetupEvent::Cancel))))
+                    .child(nav)
                     .child(
                         div()
-                            .id("setup-done")
-                            .px(look.z(14.))
-                            .py(look.z(5.))
-                            .rounded(look.z(5.))
-                            .cursor_pointer()
-                            .text_size(look.text(-1.))
-                            .bg(look.c(ui.button_primary_bg))
-                            .text_color(look.c(ui.button_primary_text))
-                            .child(if any_connected { "Done" } else { "Skip for now" })
-                            .on_click(cx.listener(|this, _, _, cx| this.done(cx))),
+                            .id("settings-scroll")
+                            .flex_1()
+                            .min_w(px(0.))
+                            .h_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .px(look.z(16.))
+                            .pt(look.z(12.))
+                            // The list follows the scrolling.
+                            .on_scroll(cx.listener(|this, _, _, cx| {
+                                this.follow_scroll = true;
+                                cx.notify();
+                            }))
+                            .children(sections),
                     ),
             )
+            .children(footer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn look(zoom: f32) -> Look {
+        Look {
+            theme: Registry::global().resolve(&qur_theme::ThemeChoice::Auto, true),
+            zoom,
+            opacity: 1.0,
+            blur: false,
+            ui_font: "Inter".into(),
+            code_font: "Menlo".into(),
+            ui_size: 13.,
+            code_size: 13.,
+            line_height: 1.5,
+            tiles: None,
+        }
+    }
+
+    /// The panel keeps its size in a big window, shrinks to fit a small one
+    /// (it scrolls inside), scales with zoom, and never collapses.
+    #[test]
+    fn panel_fits_the_window() {
+        let size = |w: f32, h: f32| gpui::size(px(w), px(h));
+        assert_eq!(panel_size(&look(1.), size(1600., 1000.)), (px(820.), px(640.)));
+        assert_eq!(panel_size(&look(1.), size(700., 600.)), (px(668.), px(490.)));
+        assert_eq!(panel_size(&look(1.5), size(3000., 2000.)), (px(1230.), px(960.)));
+        assert_eq!(panel_size(&look(1.), size(200., 100.)), (px(360.), px(240.)));
+    }
+
+    #[test]
+    fn every_account_agent_is_known() {
+        for svc in &SERVICES {
+            for id in svc.agents {
+                assert!(KNOWN.iter().any(|k| k.0 == id), "{id}");
+            }
+        }
+        assert_eq!(SECTIONS.last(), Some(&"Files"));
     }
 }

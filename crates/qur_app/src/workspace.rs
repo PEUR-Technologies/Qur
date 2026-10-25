@@ -37,7 +37,7 @@ use crate::picker::{PickItem, Picker, PickerEvent};
 use crate::prompt::{PromptEvent, PromptInput};
 use crate::review::{self, Subject};
 use crate::search_view::{SearchEvent, SearchPanel};
-use crate::setup_view::{SetupEvent, SetupView};
+use crate::setup_view::{self, SetupEvent, SetupView};
 use crate::terminal::{Kind, PanelEvent, TerminalPanel};
 use crate::tree_view::{TreeEvent, TreeView};
 
@@ -136,9 +136,9 @@ enum Overlay {
     GoTo(Entity<TextInput>),
     /// Rename Agent…: the selected agent's name.
     Rename(Entity<TextInput>),
-    /// The first-run picker (M6), also Qur > Setup….
+    /// Qur > Settings… (Cmd+,), also the first-run welcome (M6).
     Setup(Entity<SetupView>),
-    /// Qur > Accent Color….
+    /// View > Appearance > Accent Color….
     Accent,
     /// Right-click on an agent's button: its commands, at the pointer.
     AgentMenu { id: String, at: gpui::Point<Pixels> },
@@ -226,8 +226,6 @@ pub struct Workspace {
     /// The Gaps popover's sliders (gap, corner radius) and which one is dragged.
     gap_sliders: Rc<[Cell<Bounds<Pixels>>; 2]>,
     gap_sliding: Option<usize>,
-    /// Setup's Gaps row, previewed before Done saves it: (on, gap).
-    preview_gaps: Option<(bool, f32)>,
     /// Where the traffic lights were last moved to (in from the corner, for window gaps).
     lights_inset: f32,
     title_drag: bool,
@@ -353,7 +351,6 @@ impl Workspace {
             sliding: false,
             gap_sliders: Rc::new([Cell::new(Bounds::default()), Cell::new(Bounds::default())]),
             gap_sliding: None,
-            preview_gaps: None,
             lights_inset: 0.0,
             title_drag: false,
             fullscreen: false,
@@ -376,7 +373,7 @@ impl Workspace {
         // The first-run picker, once (not in scripted runs, unless asked).
         let scripted = ["QUR_DEBUG_ACTIONS", "QUR_DEBUG_TASKS", "QUR_BENCH"].iter().any(|v| std::env::var_os(v).is_some());
         if (first_run && !scripted) || std::env::var_os("QUR_DEBUG_SETUP").is_some() {
-            ws.open_setup(&qur::CheckSetup, window, cx);
+            ws.show_settings(true, window, cx);
         }
         if let Some(e) = err.or(roster_err) {
             ws.flash(e, cx);
@@ -417,14 +414,7 @@ impl Workspace {
             code_size: self.config.editor.font_size,
             line_height: self.config.editor.line_height,
             theme: theme.clone(),
-            tiles: {
-                // Setup previews gaps before they're saved.
-                let mut u = self.config.ui.clone();
-                if let Some((on, gap)) = self.preview_gaps {
-                    (u.gaps, u.gap) = (on, gap);
-                }
-                crate::look::Tiles::from_config(&u)
-            },
+            tiles: crate::look::Tiles::from_config(&self.config.ui),
         };
         window.set_background_appearance(look.background_appearance());
         Look::set(window, look, cx);
@@ -446,6 +436,7 @@ impl Workspace {
             t.browser.update(cx, |b, _| b.accent = accent);
             slot += 1;
         }
+        self.sync_settings(cx);
         window.refresh();
         cx.notify();
     }
@@ -1562,6 +1553,7 @@ impl Workspace {
         };
         self.flash(format!("Peek layout {name}"), cx);
         self.sync_menus(cx);
+        self.sync_settings(cx);
         cx.notify();
     }
     fn cycle_layout(&mut self, _: &qur::CyclePeekLayout, _: &mut Window, cx: &mut Context<Self>) {
@@ -1930,7 +1922,7 @@ impl Workspace {
             Some(Overlay::Picker(..)) => "picker".into(),
             Some(Overlay::GoTo(i)) => format!("goto:{:?}", i.read(cx).text),
             Some(Overlay::Rename(i)) => format!("rename:{:?}", i.read(cx).text),
-            Some(Overlay::Setup(_)) => "setup".into(),
+            Some(Overlay::Setup(v)) => format!("settings:{}", v.read(cx).section_name()),
             Some(Overlay::Accent) => "accent".into(),
             Some(Overlay::AgentMenu { id, .. }) => format!("agent_menu:{id}"),
             Some(Overlay::Layouts) => "layouts".into(),
@@ -3250,18 +3242,8 @@ Commits stay; {label} is told with your next message."));
             (PickerEvent::Confirm(i), PickKind::Themes { names, project_scope }) => {
                 let name = names[*i].clone();
                 let project_scope = *project_scope;
-                self.preview_theme = None;
-                if project_scope {
-                    self.write_setting(true, "theme", Some(name.as_str().into()), cx);
-                } else {
-                    self.write_setting(false, "theme", Some(name.as_str().into()), cx);
-                    self.write_setting(true, "theme", None, cx);
-                }
                 self.overlay = None;
-                self.reload_settings(window, cx);
-                if !project_scope {
-                    self.broadcast_reload(cx);
-                }
+                self.save_theme(&name, project_scope, window, cx);
                 self.restore_focus(window, cx);
             }
             (PickerEvent::Tab, PickKind::Themes { project_scope, .. }) => {
@@ -3384,6 +3366,22 @@ Commits stay; {label} is told with your next message."));
             p.header = Some(header);
             p.select_item(current, cx);
         });
+    }
+
+    /// Keep a theme for this project (its projects/<id>.toml) or for all
+    /// (config.toml, clearing this project's own); the picker and Settings.
+    fn save_theme(&mut self, name: &str, project_scope: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.preview_theme = None;
+        if project_scope {
+            self.write_setting(true, "theme", Some(name.into()), cx);
+        } else {
+            self.write_setting(false, "theme", Some(name.into()), cx);
+            self.write_setting(true, "theme", None, cx);
+        }
+        self.reload_settings(window, cx);
+        if !project_scope {
+            self.broadcast_reload(cx);
+        }
     }
 
     fn use_default_theme(&mut self, _: &qur::UseDefaultTheme, window: &mut Window, cx: &mut Context<Self>) {
@@ -3562,7 +3560,6 @@ Commits stay; {label} is told with your next message."));
         cx.notify();
     }
 
-    /// Qur > Setup… (and the first launch): the first-run picker.
     /// Help > Run Doctor: `qur doctor`'s checks, in a sheet.
     fn run_doctor(&mut self, _: &qur::RunDoctor, window: &mut Window, cx: &mut Context<Self>) {
         self.flash("Running the doctor…", cx);
@@ -3695,7 +3692,7 @@ Commits stay; {label} is told with your next message."));
             .into_any_element()
     }
 
-    /// Qur > Accent Color…: pick which of the theme's accents leads (hover to
+    /// View > Appearance > Accent Color…: pick which of the theme's accents leads (hover to
     /// preview, click to keep).
     fn accent_color(&mut self, _: &qur::AccentColor, window: &mut Window, cx: &mut Context<Self>) {
         self.close_overlays(window, cx);
@@ -3939,7 +3936,7 @@ Commits stay; {label} is told with your next message."));
             .into_any_element()
     }
 
-    /// Qur > Vim Mode: on/off for every editor, saved as `[keys] vim`.
+    /// Edit > Vim Mode (and Settings): on/off for every editor, saved as `[keys] vim`.
     fn toggle_vim(&mut self, _: &qur::VimMode, window: &mut Window, cx: &mut Context<Self>) {
         let on = !self.config.keys.vim;
         self.write_setting(false, "keys.vim", Some(Value::Bool(on)), cx);
@@ -3989,27 +3986,78 @@ Commits stay; {label} is told with your next message."));
         }
     }
 
+    /// Qur > Settings… (Cmd+,): the settings screen.
     fn open_setup(&mut self, _: &qur::CheckSetup, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_settings(false, window, cx);
+    }
+
+    /// The settings in effect, for the settings screen (previews included).
+    fn settings_now(&self, cx: &App) -> setup_view::Current {
+        let eff = self.effective();
+        let preset = self.layout.as_str();
+        let custom = Docks::get(cx, dock::Kind::Acp) != dock::Dock::preset(dock::Kind::Acp, preset) || Docks::get(cx, dock::Kind::Terminal) != dock::Dock::preset(dock::Kind::Terminal, preset);
+        let (hue, brightness) = self.preview_tune.unwrap_or((self.config.ui.accent_hue, self.config.ui.accent_brightness));
+        setup_view::Current {
+            project: self.project_name(),
+            theme: self.preview_theme.clone().unwrap_or(eff.theme),
+            theme_is_project: eff.theme_is_project,
+            opacity: eff.opacity.clamp(qur_theme::MIN_OPACITY, 1.0),
+            blur: eff.blur,
+            window_is_project: eff.window_is_project,
+            accent: self.preview_accent.unwrap_or(self.config.ui.accent) % 6,
+            accent_base: self.accent_base,
+            hue,
+            brightness,
+            vim: self.config.keys.vim,
+            zen: self.config.ui.zen,
+            traffic_lights: self.config.ui.traffic_lights.clone(),
+            gaps: self.config.ui.gaps,
+            gap: self.config.ui.gap,
+            layout: if custom { "yours".into() } else { preset.into() },
+        }
+    }
+
+    /// Show the settings screen what's in effect now (after any change).
+    fn sync_settings(&self, cx: &mut Context<Self>) {
+        let open = match &self.overlay {
+            Some(Overlay::Setup(v)) => Some(v.clone()),
+            _ => None,
+        };
+        for v in open.iter().chain(self.parked_setup.iter()) {
+            let now = self.settings_now(cx);
+            v.update(cx, |v, cx| v.set_current(now, cx));
+        }
+    }
+
+    /// The settings screen; `first_run` makes it the welcome (logo, Skip for
+    /// now / Done). Every change in it goes through the same methods as the
+    /// menu commands and popovers.
+    fn show_settings(&mut self, first_run: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Overlay::Setup(v)) = &self.overlay {
+            let f = v.read(cx).focus.clone();
+            window.focus(&f, cx);
+            return;
+        }
         self.close_overlays(window, cx);
         self.prev_focus = window.focused(cx);
-        // Back from an install or sign-in: the same choices, looked at again.
+        // Back from an install or sign-in: the same screen, looked at again.
         if let Some(view) = self.parked_setup.take() {
-            view.update(cx, |v, cx| v.refresh(cx));
-            let theme = view.read(cx).theme().to_string();
-            if theme != self.config.theme {
-                self.preview_theme = Some(theme);
-                self.apply_look(window, cx);
-            }
+            let now = self.settings_now(cx);
+            view.update(cx, |v, cx| {
+                v.set_current(now, cx);
+                v.refresh(cx);
+            });
             let f = view.read(cx).focus.clone();
             window.focus(&f, cx);
             self.overlay = Some(Overlay::Setup(view));
             cx.notify();
             return;
         }
-        let view = cx.new(|cx| SetupView::new(&self.config, &self.roster, cx));
+        let now = self.settings_now(cx);
+        let view = cx.new(|cx| SetupView::new(now, &self.roster, first_run, cx));
         let sub = cx.subscribe_in(&view, window, |this, view, ev: &SetupEvent, window, cx| match ev {
-            // Install or sign in, in a terminal of its own; Setup steps aside
-            // and comes back by itself when the step has worked.
+            // Install or sign in, in a terminal of its own; Settings step
+            // aside and come back by themselves when the step has worked.
             SetupEvent::RunInTerminal { label, command } => {
                 this.close_overlays(window, cx);
                 this.parked_setup = Some(view.clone());
@@ -4018,68 +4066,50 @@ Commits stay; {label} is told with your next message."));
                 let Some(tid) = this.terms.update(cx, |p, cx| p.open(&root, kind, label.clone(), cx)) else { return };
                 this.shells.push(tid);
                 this.select(Some(Selected::Shell(tid)), window, cx);
-                this.flash(format!("{label}: Setup comes back when it's done (or Qur > Setup…)"), cx);
+                this.flash(format!("{label}: Settings come back when it's done (or Qur > Settings…)"), cx);
             }
             SetupEvent::Ready(msg) => {
                 if this.parked_setup.is_some() && this.overlay.is_none() {
-                    this.open_setup(&qur::CheckSetup, window, cx);
+                    this.show_settings(false, window, cx);
                 }
                 this.flash(msg.clone(), cx);
             }
-            SetupEvent::PreviewTheme(name) => {
-                this.preview_theme = Some(name.clone());
-                this.apply_look(window, cx);
-            }
-            SetupEvent::PreviewAccent(k) => {
-                this.preview_accent = Some(*k);
-                this.apply_look(window, cx);
-            }
-            SetupEvent::PreviewGaps(on, gap) => {
-                this.preview_gaps = Some((*on, *gap));
-                this.apply_look(window, cx);
-            }
-            SetupEvent::Cancel => {
-                this.parked_setup = None;
-                this.close_overlays(window, cx);
-            }
-            SetupEvent::Done(c) => {
-                this.parked_setup = None;
-                this.preview_theme = None;
-                this.write_setting(false, "theme", Some(c.theme.as_str().into()), cx);
-                let preset = matches!(c.layout.as_str(), "A" | "B" | "C");
-                if preset {
-                    this.write_setting(false, "peek_layout", Some(c.layout.as_str().into()), cx);
+            SetupEvent::Agents(agents) => this.save_agents(agents.clone(), cx),
+            SetupEvent::Theme { name, project_scope } => this.save_theme(name, *project_scope, window, cx),
+            SetupEvent::Opacity { project_scope, opacity, blur, save } => {
+                this.set_opacity(*project_scope, *opacity, *blur, window, cx);
+                if *save {
+                    this.save_transparency(*project_scope, cx);
                 }
-                this.write_setting(false, "keys.vim", Some(Value::Bool(c.vim)), cx);
-                this.write_setting(false, "ui.zen", Some(Value::Bool(c.zen)), cx);
-                this.write_setting(false, "ui.traffic_lights", Some(c.traffic_lights.as_str().into()), cx);
-                this.write_setting(false, "ui.accent", Some(Value::Int(c.accent as i64)), cx);
-                this.write_setting(false, "ui.gaps", Some(Value::Bool(c.gaps)), cx);
-                this.write_setting(false, "ui.gap", Some(c.gap.into()), cx);
-                this.preview_gaps = None;
-                this.preview_accent = None;
-                if !c.agents.is_empty() {
-                    // Keep agents added by hand; replace the ones the picker knows.
-                    let mut roster = qur_agents::Roster::load().0;
-                    roster.agents.retain(|a| !matches!(a.id.as_str(), "claude" | "claude-cli" | "codex" | "codex-cli" | "aider"));
-                    let mut agents = c.agents.clone();
-                    agents.extend(roster.agents);
-                    roster.agents = agents;
-                    if let Err(e) = roster.save() {
-                        this.flash(format!("Couldn't save agents.toml: {e}"), cx);
-                    }
-                    this.roster = roster;
+            }
+            SetupEvent::Accent(k) => this.set_accent(*k, window, cx),
+            SetupEvent::Tune { hue, brightness, save } => {
+                if *save {
+                    this.save_tune((*hue, *brightness), window, cx);
+                } else {
+                    this.preview_tune = Some((*hue, *brightness));
+                    this.apply_look(window, cx);
                 }
-                this.overlay = None;
-                this.reload_settings(window, cx);
-                // "Yours" keeps the arrangement as it is.
-                if preset {
-                    this.set_layout(Layout::parse(&c.layout), cx);
-                }
+            }
+            SetupEvent::Gaps { on, gap } => {
+                this.config.ui.gaps = *on;
+                this.config.ui.gap = gap.round().clamp(qur_config::MIN_GAP, qur_config::MAX_GAP);
+                this.write_setting(false, "ui.gaps", Some(Value::Bool(*on)), cx);
+                this.write_setting(false, "ui.gap", Some(this.config.ui.gap.into()), cx);
+                this.apply_look(window, cx);
                 this.broadcast_reload(cx);
                 this.sync_menus(cx);
-                this.restore_focus(window, cx);
-                this.flash("Setup saved", cx);
+                this.sync_settings(cx);
+            }
+            SetupEvent::TrafficLights(key) => {
+                this.write_setting(false, "ui.traffic_lights", Some(key.as_str().into()), cx);
+                this.reload_settings(window, cx);
+                this.broadcast_reload(cx);
+            }
+            SetupEvent::Layout(key) => this.set_layout(Layout::parse(key), cx),
+            SetupEvent::Close => {
+                this.parked_setup = None;
+                this.close_overlays(window, cx);
             }
         });
         self._subs.push(sub);
@@ -4087,6 +4117,20 @@ Commits stay; {label} is told with your next message."));
         window.focus(&f, cx);
         self.overlay = Some(Overlay::Setup(view));
         cx.notify();
+    }
+
+    /// The agents ticked in Settings, first in agents.toml; agents added by
+    /// hand (not ones Settings knows) are kept after them.
+    fn save_agents(&mut self, chosen: Vec<AgentDef>, cx: &mut Context<Self>) {
+        let mut roster = qur_agents::Roster::load().0;
+        roster.agents.retain(|a| !setup_view::KNOWN.iter().any(|k| k.0 == a.id));
+        let mut agents = chosen;
+        agents.extend(roster.agents);
+        roster.agents = agents;
+        if let Err(e) = roster.save() {
+            self.flash(format!("Couldn't save agents.toml: {e}"), cx);
+        }
+        self.roster = roster;
     }
 
     fn new_agent_task(&mut self, _: &qur::NewAgentTask, window: &mut Window, cx: &mut Context<Self>) {
@@ -4168,7 +4212,7 @@ Commits stay; {label} is told with your next message."));
         self.apply_look(window, cx);
         self.broadcast_reload(cx);
         self.sync_menus(cx);
-        self.flash(if on { "Gaps on (Qur > Appearance > Gaps… to adjust)" } else { "Gaps off" }, cx);
+        self.flash(if on { "Gaps on (View > Appearance > Gaps… to adjust)" } else { "Gaps off" }, cx);
     }
 
     /// A Gaps popover change, shown at once (saved on close).
@@ -4228,7 +4272,7 @@ Commits stay; {label} is told with your next message."));
 
     fn close_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.tuning = None;
-        if self.preview_accent.take().is_some() | self.preview_tune.take().is_some() | self.preview_gaps.take().is_some() {
+        if self.preview_accent.take().is_some() | self.preview_tune.take().is_some() {
             self.apply_look(window, cx);
         }
         if matches!(&self.overlay, Some(Overlay::Picker(_, PickKind::Themes { .. })) | Some(Overlay::Setup(_)))
@@ -4243,8 +4287,9 @@ Commits stay; {label} is told with your next message."));
         cx.notify();
     }
 
-    fn set_opacity(&mut self, opacity: f32, blur: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Overlay::Transparency { project_scope }) = self.overlay else { return };
+    /// Opacity and blur for this project or all (shown now, saved by
+    /// `save_transparency`); the popover and Settings.
+    fn set_opacity(&mut self, project_scope: bool, opacity: f32, blur: bool, window: &mut Window, cx: &mut Context<Self>) {
         let min = qur_theme::MIN_OPACITY;
         let opacity = ((opacity.clamp(min, 1.0)) * 100.).round() / 100.;
         if project_scope {
@@ -4253,12 +4298,21 @@ Commits stay; {label} is told with your next message."));
         } else {
             self.config.window.opacity = opacity;
             self.config.window.blur = blur;
+            // Saving for all projects clears this project's own; show that now.
+            self.project.window.opacity = None;
+            self.project.window.blur = None;
         }
         self.apply_look(window, cx);
     }
 
-    fn save_transparency(&mut self, cx: &mut Context<Self>) {
-        let Some(Overlay::Transparency { project_scope }) = self.overlay else { return };
+    /// Esc or a click outside the Transparency popover keeps what it shows.
+    fn save_popover_transparency(&mut self, cx: &mut Context<Self>) {
+        if let Some(Overlay::Transparency { project_scope }) = self.overlay {
+            self.save_transparency(project_scope, cx);
+        }
+    }
+
+    fn save_transparency(&mut self, project_scope: bool, cx: &mut Context<Self>) {
         let eff = self.effective();
         if project_scope {
             self.write_setting(true, "window.opacity", Some(eff.opacity.into()), cx);
@@ -4280,7 +4334,8 @@ Commits stay; {label} is told with your next message."));
         let min = qur_theme::MIN_OPACITY;
         let t = ((x - b.left()) / b.size.width).clamp(0., 1.);
         let blur = self.effective().blur;
-        self.set_opacity(min + (1. - min) * t, blur, window, cx);
+        let Some(Overlay::Transparency { project_scope }) = self.overlay else { return };
+        self.set_opacity(project_scope, min + (1. - min) * t, blur, window, cx);
     }
 
     /// QUR_BENCH=glow: a terminal task's worktree gets 20 probe writes from a
@@ -5350,7 +5405,7 @@ Commits stay; {label} is told with your next message."));
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.overlay = Some(Overlay::Transparency { project_scope: project });
                     let eff = this.effective();
-                    this.set_opacity(eff.opacity, eff.blur, window, cx);
+                    this.set_opacity(project, eff.opacity, eff.blur, window, cx);
                 }))
         };
         div()
@@ -5404,9 +5459,9 @@ Commits stay; {label} is told with your next message."));
                     .cursor_pointer()
                     .child(check(look.blur))
                     .child("Blur background")
-                    .on_click(cx.listener(|this, _, window, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         let eff = this.effective();
-                        this.set_opacity(eff.opacity, !eff.blur, window, cx);
+                        this.set_opacity(project_scope, eff.opacity, !eff.blur, window, cx);
                     })),
             )
             .into_any_element()
@@ -5570,8 +5625,8 @@ fn default_code_font(cx: &App) -> String {
 }
 
 const CONFIG_TEMPLATE: &str = r#"# Qur settings. Saved changes apply right away.
-# Per-project overrides live in projects/<id>.toml (set them from Qur > Theme… / Transparency…).
-# Agents are configured in agents.toml (Qur > Settings > Agents).
+# Per-project overrides live in projects/<id>.toml (set them in Qur > Settings…, or View > Appearance).
+# Agents are configured in agents.toml (Qur > Settings…, or Qur > Settings Files > Agents).
 
 # theme = "Auto"            # Auto follows macOS: Qur Light / Qur Dark
 
@@ -5807,7 +5862,7 @@ impl Render for Workspace {
             // Scripted runs may reach here before the picker is drawn.
             .on_action(cx.listener(|this, _: &commands::setup::Done, _, cx| {
                 if let Some(Overlay::Setup(v)) = &this.overlay {
-                    v.clone().update(cx, |v, cx| v.done(cx));
+                    v.clone().update(cx, |v, cx| v.close(cx));
                 }
             }))
             .on_action(cx.listener(Self::find_in_project))
@@ -5844,7 +5899,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::take_over))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::Transparency { .. } | Overlay::Gaps)) {
-                    this.save_transparency(cx);
+                    this.save_popover_transparency(cx);
                     this.save_gaps(cx);
                     this.close_overlays(window, cx);
                 }
@@ -5853,6 +5908,13 @@ impl Render for Workspace {
             .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::AgentMenu { .. } | Overlay::About)) {
                     this.close_overlays(window, cx);
+                    cx.stop_propagation();
+                }
+                // Settings close on Esc wherever focus is (a slider drag, a terminal).
+                if ev.keystroke.key == "escape"
+                    && let Some(Overlay::Setup(v)) = &this.overlay
+                {
+                    v.clone().update(cx, |v, cx| v.close(cx));
                     cx.stop_propagation();
                 }
             }))
@@ -5891,7 +5953,12 @@ impl Render for Workspace {
                 d.child(div().absolute().size_full().on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, window, cx| {
-                        this.save_transparency(cx);
+                        // Settings close their own way (the first run keeps the agents ticked for you).
+                        if let Some(Overlay::Setup(v)) = &this.overlay {
+                            v.clone().update(cx, |v, cx| v.close(cx));
+                            return;
+                        }
+                        this.save_popover_transparency(cx);
                         this.save_gaps(cx);
                         this.close_overlays(window, cx);
                     }),

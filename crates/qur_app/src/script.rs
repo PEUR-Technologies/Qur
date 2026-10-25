@@ -5,9 +5,10 @@
 //! Steps, comma-separated, run in order with 200 ms between them:
 //! - `qur::Name` dispatches an action; `wait:<ms>` pauses.
 //! - `type:<text>` types text as key presses (`\,` is a comma, `\n` Enter, `\t` Tab, `\\` a backslash).
-//! - `key:<keystrokes>` presses keys, space-separated, as in keymaps: `key:cmd-shift-p`, `key:escape d d`.
+//! - `key:<keystrokes>` presses keys, space-separated, as in keymaps: `key:cmd-shift-p`, `key:escape d d`, `key:cmd-\,` (Cmd+,).
 //! - `click:<at>`, `dclick:` (double), `rclick:` (right), `cmdclick:` (with Cmd).
 //! - `drag:<at>,<at>` presses, moves there in small steps (a frame apart), and releases.
+//! - `scroll:<at>,<dy>` turns the wheel over a point by `dy` points (negative scrolls down).
 //! - `state` prints a `STATE …` line: overlay, code modal, terminal find, git panel, docks.
 //! - `marks` prints a `BOUNDS name x,y wxh` line for every marked element on screen.
 //!
@@ -73,6 +74,7 @@ pub enum Step {
     Keys(String),
     Click { at: At, button: MouseButton, count: usize, cmd: bool },
     Drag { from: At, to: At },
+    Scroll { at: At, dy: f32 },
     State,
     Marks,
 }
@@ -103,7 +105,7 @@ pub fn parse(list: &str) -> Result<Vec<Step>, String> {
         steps.push(match head {
             "wait" => Step::Wait(rest.parse().map_err(|_| format!("{p}: not a number of ms"))?),
             "type" => Step::Type(unescape(rest)),
-            "key" | "keys" => Step::Keys(rest.to_string()),
+            "key" | "keys" => Step::Keys(unescape(rest)),
             "click" => click(at(&p, rest, &mut parts)?, MouseButton::Left, 1, false),
             "dclick" => click(at(&p, rest, &mut parts)?, MouseButton::Left, 2, false),
             "rclick" => click(at(&p, rest, &mut parts)?, MouseButton::Right, 1, false),
@@ -112,6 +114,11 @@ pub fn parse(list: &str) -> Result<Vec<Step>, String> {
                 let from = at(&p, rest, &mut parts)?;
                 let next = parts.next().ok_or_else(|| format!("{p}: needs a second point"))?;
                 Step::Drag { from, to: at(&p, &next, &mut parts)? }
+            }
+            "scroll" => {
+                let at = at(&p, rest, &mut parts)?;
+                let dy = parts.next().ok_or_else(|| format!("{p}: needs an amount"))?;
+                Step::Scroll { at, dy: dy.parse().map_err(|_| format!("{p}: {dy}: not a number"))? }
             }
             "state" => Step::State,
             "marks" => Step::Marks,
@@ -280,6 +287,15 @@ pub fn run(handle: AnyWindowHandle, list: &str, cx: &mut App) {
                     pause(30).await;
                     mouse(handle, cx, PlatformInput::MouseUp(MouseUpEvent { button: left, position: b, modifiers: m, click_count: 1 }));
                 }
+                Step::Scroll { at, dy } => {
+                    let Some(pos) = resolve(handle, cx, &at) else { continue };
+                    println!("INPUT scroll {at:?} at {:.0},{:.0} by {dy} t={t}ms", f32::from(pos.x), f32::from(pos.y));
+                    let m = Modifiers::default();
+                    mouse(handle, cx, PlatformInput::MouseMove(MouseMoveEvent { position: pos, pressed_button: None, modifiers: m }));
+                    pause(30).await;
+                    let delta = gpui::ScrollDelta::Pixels(point(px(0.), px(dy)));
+                    mouse(handle, cx, PlatformInput::Scroll(gpui::ScrollEvent { position: pos, delta, modifiers: m, touch_phase: gpui::TouchPhase::Moved, source: Default::default() }));
+                }
                 Step::State => {
                     let _ = handle.update(cx, |root, window, cx| {
                         fresh(window, cx);
@@ -310,7 +326,7 @@ mod tests {
 
     #[test]
     fn parses_steps() {
-        let s = parse("qur::Find, wait:50, type:a\\, b\\n, key:cmd-shift-p escape, click:10,20, drag:1,2,@tab:X~0.9~0.1, rclick:@agent:tt-1, state, marks").unwrap();
+        let s = parse("qur::Find, wait:50, type:a\\, b\\n, key:cmd-shift-p escape, click:10,20, drag:1,2,@tab:X~0.9~0.1, rclick:@agent:tt-1, scroll:@list,-120, state, marks").unwrap();
         assert_eq!(
             s,
             vec![
@@ -321,12 +337,14 @@ mod tests {
                 Step::Click { at: At::Xy(10., 20.), button: MouseButton::Left, count: 1, cmd: false },
                 Step::Drag { from: At::Xy(1., 2.), to: At::Mark("tab:X".into(), 0.9, 0.1) },
                 Step::Click { at: At::Mark("agent:tt-1".into(), 0.5, 0.5), button: MouseButton::Right, count: 1, cmd: false },
+                Step::Scroll { at: At::Mark("list".into(), 0.5, 0.5), dy: -120. },
                 Step::State,
                 Step::Marks,
             ]
         );
         assert!(parse("click:1").is_err());
         assert!(parse("drag:1,2").is_err());
+        assert!(parse("scroll:@list").is_err());
         assert!(parse("click:@a~x").is_err());
     }
 

@@ -384,7 +384,7 @@ impl EditorView {
         self.apply(paste, cx, move |m, ctx| m.run(cmd, ctx));
     }
 
-    /// Turn Vim mode on or off (Qur > Vim Mode, `[keys] vim`).
+    /// Turn Vim mode on or off (Edit > Vim Mode or Settings, `[keys] vim`).
     pub fn set_vim(&mut self, on: bool, cx: &mut Context<Self>) {
         if on != self.vim.is_some() {
             self.vim = on.then(Vim::new);
