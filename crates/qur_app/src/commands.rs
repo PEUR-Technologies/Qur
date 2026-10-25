@@ -24,7 +24,7 @@ pub mod qur {
             FocusPrompt, FocusInput, StopAgent, TakeOver, NextAgent, PrevAgent, ReviewChanges, Merge,
             KeepWorking, DiscardTask, OpenWorktreeInTerminal, RevealWorktree, KeyboardShortcuts,
             RunDoctor, ShowLogs, ReportProblem, ExpandSelection, ShrinkSelection,
-            RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge, Caffeinate,
+            RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge, Caffeinate, ShowKeepAwake,
         ]
     );
 
@@ -261,6 +261,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::CloseTerminal, "Terminal", "Close Terminal", "cmd-w", T, R),
     cmd!(qur::ToggleTerminal, "View", "Go to Terminal", "ctrl-`", W, R),
     cmd!(qur::Caffeinate, "View", "Keep Mac Awake (caffeinate)", "", W, R),
+    cmd!(qur::ShowKeepAwake, "View", "Show Keep Awake in Sidebar", "", W, R),
     cmd!(terminal::Clear, "Terminal", "Clear", "cmd-k", T, R),
     cmd!(terminal::Find, "Terminal", "Find in Terminal", "cmd-f", T, R),
     cmd!(terminal::Tile, "Terminal", "New Tiled Terminal", "cmd-enter", W, R),
@@ -432,6 +433,7 @@ pub struct MenuState {
     /// A merge stopped on conflicts: the Merge Conflicts items are enabled.
     pub merging: bool,
     pub vim: bool,
+    pub keep_awake: bool,
 }
 
 fn item(action: impl Action) -> MenuItem {
@@ -545,6 +547,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::RevealInFiles),
             item(qur::ToggleTerminal),
             item(qur::Caffeinate),
+            item(qur::ShowKeepAwake).checked(s.keep_awake),
             item(qur::GitPanel),
             M::submenu(Menu::new("Git").items([item(qur::GitStageAll), item(qur::GitUnstageAll), item(qur::GitCommit)])),
             item(qur::SearchPanel),
