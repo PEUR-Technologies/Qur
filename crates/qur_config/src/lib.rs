@@ -107,6 +107,10 @@ pub struct UiConfig {
     pub accent: usize,
     /// Show the Keep Awake switch at the top of the sidebar.
     pub keep_awake: bool,
+    /// Turns every accent this many degrees around the color wheel (-180..180).
+    pub accent_hue: f32,
+    /// Makes every accent lighter (toward 1) or darker (toward -1).
+    pub accent_brightness: f32,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -153,7 +157,7 @@ impl Default for EditorConfig {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        UiConfig { font_size: 13.0, zoom: 1.0, accent: 0, keep_awake: true }
+        UiConfig { font_size: 13.0, zoom: 1.0, accent: 0, keep_awake: true, accent_hue: 0.0, accent_brightness: 0.0 }
     }
 }
 

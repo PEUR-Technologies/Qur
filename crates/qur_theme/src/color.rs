@@ -26,6 +26,42 @@ impl Rgba {
         Rgba((self.0 & 0xffff_ff00) | a as u32)
     }
 
+    /// Turned `hue` degrees around the color wheel, then lighter (`brightness`
+    /// toward 1) or darker (toward -1), in HSL; alpha kept.
+    pub fn tuned(self, hue: f32, brightness: f32) -> Rgba {
+        let [r, g, b, a] = self.to_f32();
+        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+        let l = (max + min) / 2.;
+        let d = max - min;
+        let s = if d == 0. { 0. } else { d / (1. - (2. * l - 1.).abs()) };
+        let h = if d == 0. {
+            0.
+        } else if max == r {
+            60. * ((g - b) / d).rem_euclid(6.)
+        } else if max == g {
+            60. * ((b - r) / d + 2.)
+        } else {
+            60. * ((r - g) / d + 4.)
+        };
+        let h = (h + hue).rem_euclid(360.);
+        // Never all the way to white or black: the accent stays a color.
+        let k = brightness.clamp(-1., 1.) * 0.7;
+        let l = if k >= 0. { l + (1. - l) * k } else { l * (1. + k) };
+        let c = (1. - (2. * l - 1.).abs()) * s;
+        let x = c * (1. - ((h / 60.) % 2. - 1.).abs());
+        let (r, g, b) = match (h / 60.) as u32 {
+            0 => (c, x, 0.),
+            1 => (x, c, 0.),
+            2 => (0., c, x),
+            3 => (0., x, c),
+            4 => (x, 0., c),
+            _ => (c, 0., x),
+        };
+        let m = l - c / 2.;
+        let byte = |v: f32| ((v + m).clamp(0., 1.) * 255.).round() as u32;
+        Rgba(byte(r) << 24 | byte(g) << 16 | byte(b) << 8 | (a * 255.).round() as u32)
+    }
+
     /// Components as 0..=1 floats (for GPUI's `Rgba`).
     pub fn to_f32(self) -> [f32; 4] {
         [self.r(), self.g(), self.b(), self.a()].map(|c| c as f32 / 255.0)

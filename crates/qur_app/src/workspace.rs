@@ -150,6 +150,13 @@ pub struct Workspace {
     preview_theme: Option<String>,
     /// Accent being previewed in the Accent Color popover (not saved yet).
     preview_accent: Option<usize>,
+    /// Accent hue and brightness while a slider is dragged (saved on release).
+    preview_tune: Option<(f32, f32)>,
+    /// The Accent Color sliders (hue, brightness) as last painted, and the one being dragged.
+    tune_sliders: [Rc<Cell<Bounds<Pixels>>>; 2],
+    tuning: Option<usize>,
+    /// The chosen accent before hue and brightness (the sliders' gradients).
+    accent_base: Rgba,
     roster: Roster,
     agents: Vec<Entity<AgentTask>>,
     term_tasks: Vec<TermTask>,
@@ -271,6 +278,10 @@ impl Workspace {
             system_dark: is_dark(window.appearance()),
             preview_theme: None,
             preview_accent: None,
+            preview_tune: None,
+            tune_sliders: Default::default(),
+            tuning: None,
+            accent_base: Rgba(0),
             roster,
             agents: Vec::new(),
             term_tasks: Vec::new(),
@@ -344,14 +355,13 @@ impl Workspace {
         let eff = self.effective();
         let name = self.preview_theme.clone().unwrap_or(eff.theme);
         let choice = if name == qur_config::THEME_AUTO { ThemeChoice::Auto } else { ThemeChoice::Named(name) };
-        let mut theme = Registry::global().resolve(&choice, self.system_dark);
-        // Your accent first ([ui] accent): agents take the palette in order.
+        let theme = Registry::global().resolve(&choice, self.system_dark);
+        // Your accent first ([ui] accent): agents take the palette in order,
+        // tuned by the Accent Color sliders; focus outlines follow it.
         let k = self.preview_accent.unwrap_or(self.config.ui.accent) % 6;
-        if k != 0 {
-            let mut t = (*theme).clone();
-            t.accents.rotate_left(k);
-            theme = std::sync::Arc::new(t);
-        }
+        let (hue, brightness) = self.preview_tune.unwrap_or((self.config.ui.accent_hue, self.config.ui.accent_brightness));
+        self.accent_base = theme.accents[k].base;
+        let theme = std::sync::Arc::new(theme.with_accent(k, hue, brightness));
         let min = qur_theme::MIN_OPACITY;
         let code_font = if self.config.editor.font_family.is_empty() { default_code_font(cx) } else { self.config.editor.font_family.clone() };
         let look = Look {
@@ -3087,8 +3097,81 @@ impl Workspace {
         self.broadcast_reload(cx);
     }
 
+    /// Drag on an Accent Color slider (0 hue, 1 brightness): preview it.
+    fn tune_to(&mut self, which: usize, x: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+        let b = self.tune_sliders[which].get();
+        if b.size.width <= px(0.) {
+            return;
+        }
+        let t = ((x - b.left()) / b.size.width).clamp(0., 1.);
+        let (mut hue, mut brightness) = self.preview_tune.unwrap_or((self.config.ui.accent_hue, self.config.ui.accent_brightness));
+        if which == 0 {
+            hue = (-180. + 360. * t).round();
+        } else {
+            brightness = ((-1. + 2. * t) * 100.).round() / 100.;
+        }
+        self.preview_tune = Some((hue, brightness));
+        self.apply_look(window, cx);
+        cx.notify();
+    }
+
+    /// Save the sliders' hue and brightness (on release, or Reset).
+    fn save_tune(&mut self, tune: (f32, f32), window: &mut Window, cx: &mut Context<Self>) {
+        self.preview_tune = None;
+        self.write_setting(false, "ui.accent_hue", Some(Value::from(tune.0)), cx);
+        self.write_setting(false, "ui.accent_brightness", Some(Value::from(tune.1)), cx);
+        self.reload_settings(window, cx);
+        self.broadcast_reload(cx);
+    }
+
     fn accent_box(&self, look: &Look, cx: &mut Context<Self>) -> gpui::AnyElement {
         let ui = &look.theme.ui;
+        let (hue, brightness) = self.preview_tune.unwrap_or((self.config.ui.accent_hue, self.config.ui.accent_brightness));
+        let base_color = self.accent_base;
+        // A track painted with the colors it gives, and a thumb at `t` (0..=1).
+        let slider = |which: usize, t: f32, color_at: &dyn Fn(f32) -> Rgba| {
+            const STEPS: usize = 24;
+            let bounds = self.tune_sliders[which].clone();
+            let track_w = look.z(220.);
+            div()
+                .id(("accent-slider", which))
+                .relative()
+                .w(track_w)
+                .h(look.z(16.))
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &gpui::MouseDownEvent, window, cx| {
+                    this.tuning = Some(which);
+                    this.tune_to(which, ev.position.x, window, cx);
+                }))
+                .child(canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {}).absolute().size_full())
+                .child(
+                    div()
+                        .absolute()
+                        .top(look.z(4.))
+                        .left_0()
+                        .w(track_w)
+                        .h(look.z(8.))
+                        .rounded(look.z(4.))
+                        .overflow_hidden()
+                        .flex()
+                        .children((0..STEPS).map(|i| div().flex_1().h_full().bg(look.c(color_at(i as f32 / (STEPS - 1) as f32))))),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(look.z(1.))
+                        .left(track_w * t - look.z(7.))
+                        .size(look.z(14.))
+                        .rounded_full()
+                        .border_2()
+                        .border_color(look.c(ui.text))
+                        .bg(look.c(look.theme.accents[0].base)),
+                )
+        };
+        let label = |name: &'static str, value: String| {
+            div().w(look.z(220.)).flex().justify_between().text_size(look.text(-2.)).text_color(look.c(ui.text_secondary)).child(name).child(div().text_color(look.c(ui.text_muted)).child(value))
+        };
+        let tuned = hue != 0. || brightness != 0.;
         // The theme's own order: undo the rotation the look carries.
         let shown = self.preview_accent.unwrap_or(self.config.ui.accent) % 6;
         let saved = self.config.ui.accent % 6;
@@ -3129,7 +3212,23 @@ impl Workspace {
                         this.close_overlays(window, cx);
                     }))
             })))
-            .child(div().text_size(look.text(-3.)).text_color(look.c(ui.text_muted)).child("Agents take the theme's colors in order, starting here. Saved as [ui] accent."))
+            .child(label("Color", format!("{hue:+.0}°")))
+            .child(slider(0, (hue + 180.) / 360., &|t| base_color.tuned(-180. + 360. * t, brightness)))
+            .child(label("Brightness", format!("{:+.0}%", brightness * 100.)))
+            .child(slider(1, (brightness + 1.) / 2., &|t| base_color.tuned(hue, -1. + 2. * t)))
+            .when(tuned, |d| {
+                d.child(
+                    div()
+                        .id("accent-reset")
+                        .text_size(look.text(-2.))
+                        .text_color(look.c(ui.text_secondary))
+                        .cursor_pointer()
+                        .hover(|d| d.text_color(look.c(ui.text)))
+                        .child("Reset color and brightness")
+                        .on_click(cx.listener(|this, _, window, cx| this.save_tune((0., 0.), window, cx))),
+                )
+            })
+            .child(div().text_size(look.text(-3.)).text_color(look.c(ui.text_muted)).child("Agents take the theme's colors in order, starting here; the sliders tune them all. Focus outlines use your color. Saved as [ui] accent, accent_hue, accent_brightness."))
             .into_any_element()
     }
 
@@ -3404,7 +3503,8 @@ impl Workspace {
     }
 
     fn close_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.preview_accent.take().is_some() {
+        self.tuning = None;
+        if self.preview_accent.take().is_some() | self.preview_tune.take().is_some() {
             self.apply_look(window, cx);
         }
         if matches!(&self.overlay, Some(Overlay::Picker(_, PickKind::Themes { .. })) | Some(Overlay::Setup(_)))
@@ -4647,8 +4747,15 @@ impl Render for Workspace {
                     this.close_overlays(window, cx);
                 }
             }))
-            // Sidebar resizing follows the mouse anywhere in the window.
+            // Sidebar resizing and the accent sliders follow the mouse anywhere in the window.
             .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, window, cx| {
+                if let Some(which) = this.tuning {
+                    if ev.pressed_button == Some(MouseButton::Left) {
+                        this.tune_to(which, ev.position.x, window, cx);
+                    } else {
+                        this.tuning = None;
+                    }
+                }
                 if this.resizing {
                     if ev.pressed_button == Some(MouseButton::Left) {
                         let zoom = Look::of(window, cx).zoom;
@@ -4659,7 +4766,14 @@ impl Render for Workspace {
                     }
                 }
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.resizing = false))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                this.resizing = false;
+                if this.tuning.take().is_some()
+                    && let Some(tune) = this.preview_tune
+                {
+                    this.save_tune(tune, window, cx);
+                }
+            }))
             .child(self.title_bar(&look, cx))
             .child(body)
             .children(self.code_modal(&look, cx))
