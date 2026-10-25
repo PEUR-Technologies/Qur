@@ -1260,8 +1260,9 @@ impl Workspace {
     }
 
     /// Split the selected terminal (a shell or an Agent Terminal): a new shell
-    /// in the project folder, like Cmd+T.
-    fn split_terminal(&mut self, vertical: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// in the project folder, like Cmd+T. Below it when `vertical` is
+    /// `Some(true)`; `None` halves it along its longer side (dwindle).
+    fn split_terminal(&mut self, vertical: Option<bool>, window: &mut Window, cx: &mut Context<Self>) {
         let live = match &self.selected {
             Some(Selected::Shell(_)) => true,
             Some(Selected::TermTask(id)) => self.term_task(id).and_then(|t| t.term_id).is_some(),
@@ -1271,13 +1272,16 @@ impl Workspace {
             return self.flash("Select a terminal to split", cx);
         }
         let root = self.root.clone();
-        self.terms.update(cx, |p, cx| p.split_active(&root, vertical, cx));
+        self.terms.update(cx, |p, cx| match vertical {
+            Some(v) => p.split_active(&root, v, false, cx),
+            None => p.dwindle_active(&root, cx),
+        });
         let f = self.terms.read(cx).focus.clone();
         window.focus(&f, cx);
     }
 
-    /// Cmd+Enter (like Mod+Enter in i3): another terminal, tiled into the one
-    /// on screen; with no terminal shown, a new one.
+    /// Cmd+Enter (like Mod+Enter in i3): another terminal, the ones on screen
+    /// laid out as a grid of near-square panes; with no terminal shown, a new one.
     fn tile_terminal(&mut self, _: &ta::Tile, window: &mut Window, cx: &mut Context<Self>) {
         let live = match &self.selected {
             Some(Selected::Shell(_)) => true,
@@ -1288,16 +1292,16 @@ impl Workspace {
             return self.new_terminal(&qur::NewTerminal, window, cx);
         }
         let root = self.root.clone();
-        self.terms.update(cx, |p, cx| p.tile_active(&root, cx));
+        self.terms.update(cx, |p, cx| p.grid_active(&root, cx));
         let f = self.terms.read(cx).focus.clone();
         window.focus(&f, cx);
     }
 
     fn split_right(&mut self, _: &ta::SplitRight, window: &mut Window, cx: &mut Context<Self>) {
-        self.split_terminal(false, window, cx)
+        self.split_terminal(None, window, cx)
     }
     fn split_down(&mut self, _: &ta::SplitDown, window: &mut Window, cx: &mut Context<Self>) {
-        self.split_terminal(true, window, cx)
+        self.split_terminal(Some(true), window, cx)
     }
 
     /// A terminal closed (exit or Cmd+W): forget shells; terminal tasks keep

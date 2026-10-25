@@ -103,7 +103,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 ## Terminal
 - New Terminal `Cmd+T` · New Agent Terminal `Cmd+Shift+T`
 - Next / Previous Terminal `Cmd+Shift+]` / `Cmd+Shift+[`
-- Split Right `Cmd+D` · Split Down `Cmd+Shift+D`
+- New Tiled Terminal (Grid) `Cmd+Enter` · Split (Dwindle) `Cmd+D` · Split Down `Cmd+Shift+D`
 - Focus Pane Left / Right / Above / Below `Cmd+Opt+Arrows`
 - Clear `Cmd+K` · Find in Terminal `Cmd+F`
 - Close Terminal `Cmd+W`
