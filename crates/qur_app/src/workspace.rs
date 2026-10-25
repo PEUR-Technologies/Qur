@@ -1535,10 +1535,10 @@ impl Workspace {
                     a.update(cx, |a, cx| a.set_view(v, cx));
                 }
             }
-            Some(Selected::TermTask(id)) => {
-                if self.term_task(&id).is_some() && dock::Kind::Terminal.panels().contains(&v.panel()) {
-                    Docks::update(cx, dock::Kind::Terminal, |d| d.activate(v.panel()));
-                }
+            Some(Selected::TermTask(id))
+                if self.term_task(&id).is_some() && dock::Kind::Terminal.panels().contains(&v.panel()) =>
+            {
+                Docks::update(cx, dock::Kind::Terminal, |d| d.activate(v.panel()));
             }
             _ => {}
         }
@@ -1687,7 +1687,7 @@ impl Workspace {
                     this.offer_cleanup(&id, window, cx);
                 }
                 Ok(qur_git::MergeOutcome::Refused { reason }) => {
-                    let _ = ask(window, PromptLevel::Warning, "Merge not started", Some(&reason), &["OK"], cx);
+                    drop(ask(window, PromptLevel::Warning, "Merge not started", Some(&reason), &["OK"], cx));
                 }
                 Ok(qur_git::MergeOutcome::Conflicts { files }) => {
                     let detail = format!(
@@ -1865,6 +1865,50 @@ impl Workspace {
     /// The workspace's own focus node (scripted action dispatch, main.rs).
     pub fn root_focus(&self) -> FocusHandle {
         self.focus.clone()
+    }
+
+    /// QUR_DEBUG_ACTIONS `state`: what scripted runs check instead of a
+    /// (possibly stale) screenshot.
+    pub fn debug_state(&self, cx: &App) -> String {
+        let overlay = match &self.overlay {
+            None => "none".to_string(),
+            Some(Overlay::Picker(..)) => "picker".into(),
+            Some(Overlay::GoTo(i)) => format!("goto:{:?}", i.read(cx).text),
+            Some(Overlay::Rename(i)) => format!("rename:{:?}", i.read(cx).text),
+            Some(Overlay::Setup(_)) => "setup".into(),
+            Some(Overlay::Accent) => "accent".into(),
+            Some(Overlay::AgentMenu { id, .. }) => format!("agent_menu:{id}"),
+            Some(Overlay::Layouts) => "layouts".into(),
+            Some(Overlay::About) => "about".into(),
+            Some(Overlay::Transparency { .. }) => "transparency".into(),
+            Some(Overlay::NewTask { .. }) => "new_task".into(),
+        };
+        let selected = match &self.selected {
+            Some(Selected::Agent(id) | Selected::TermTask(id)) => {
+                let title = self.task_parts(id, cx).map(|p| p.2).unwrap_or_default();
+                format!("task:{id}:{title:?}")
+            }
+            Some(Selected::Shell(n)) => format!("shell:{n}"),
+            Some(Selected::Git) => "git".into(),
+            Some(_) => "other".into(),
+            None => "none".into(),
+        };
+        let code = match &self.code {
+            Some(c) => {
+                let e = c.read(cx);
+                let p = e.cursor();
+                let mode = e.vim.as_ref().and_then(|v| v.mode).map(|m| m.label()).unwrap_or("-");
+                let text: String = e.model.rope().to_string().chars().take(200).collect();
+                format!("{}@{}:{} vim={mode} dirty={} text={text:?}", e.title(), p.line + 1, p.col + 1, e.is_dirty())
+            }
+            None => "none".into(),
+        };
+        let vc = self.git.as_ref().map(|g| g.read(cx).debug_state(cx)).unwrap_or_else(|| "none".into());
+        let docks = format!("acp={} terminal={}", Docks::get(cx, dock::Kind::Acp).serialize(), Docks::get(cx, dock::Kind::Terminal).serialize());
+        format!(
+            "overlay={overlay} selected={selected} code={code} term={{{}}} git={{{vc}}} docks={{{docks}}}",
+            self.terms.read(cx).debug_state(cx)
+        )
     }
 
     fn with_conflict_editor(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut EditorView, &mut Context<EditorView>)) {
@@ -3299,7 +3343,7 @@ Commits stay; {label} is told with your next message."));
                 let text = crate::doctor::render(&checks);
                 crate::log(&format!("doctor:\n{text}"));
                 let title = if fails == 0 { "Qur Doctor: all good".to_string() } else { format!("Qur Doctor: {fails} problem(s)") };
-                let _ = ask(window, if fails == 0 { PromptLevel::Info } else { PromptLevel::Warning }, &title, Some(&text), &["OK"], cx);
+                drop(ask(window, if fails == 0 { PromptLevel::Info } else { PromptLevel::Warning }, &title, Some(&text), &["OK"], cx));
                 this.message = None;
                 cx.notify();
             })
@@ -3384,6 +3428,8 @@ Commits stay; {label} is told with your next message."));
                         let sep = (danger && i + 1 == n).then(|| div().my(look.z(4.)).h(px(1.)).bg(look.c(ui.border)).into_any_element());
                         let row = div()
                             .id(("agent-menu-item", i))
+                            .relative()
+                            .children(crate::script::mark(|| format!("menu:{label}")))
                             .mx(look.z(4.))
                             .px(look.z(10.))
                             .py(look.z(4.))
@@ -4207,8 +4253,11 @@ Commits stay; {label} is told with your next message."));
             h.a = a;
             h
         };
+        let name = id.to_string();
         div()
             .id(id)
+            .relative()
+            .children(crate::script::mark(|| format!("agent:{name}")))
             .mx(look.z(6.))
             .mb(look.z(4.))
             .px(look.z(8.))

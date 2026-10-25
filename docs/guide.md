@@ -199,6 +199,27 @@ cargo test --release --workspace   # includes the theme contrast test and ACP te
 scripts/budget.sh 5                # weight budget; needs an unlocked screen (AC power recommended)
 ```
 
+CI (`.github/workflows/ci.yml`, one macOS job) runs clippy with `-D warnings`, the tests, a release build, the 40 MB binary budget, and the `qur doctor` checks that don't need an agent.
+
+### Scripted runs
+
+`QUR_DEBUG_ACTIONS` drives a window after its first frame: comma-separated steps, 200 ms apart. Always use a scratch `QUR_HOME`.
+
+| Step | Does |
+|---|---|
+| `qur::Name` | dispatches that action (as in the palette) |
+| `wait:<ms>` | pauses |
+| `type:<text>` | types the text as key presses: `\,` comma, `\n` Enter, `\t` Tab, `\\` backslash |
+| `key:<keys>` | presses keystrokes, space-separated, keymap syntax: `key:cmd-shift-p`, `key:escape` |
+| `click:<at>` `dclick:` `rclick:` `cmdclick:` | left click, double click, right click, Cmd-click |
+| `drag:<at>,<at>` | press, move there a frame at a time, release (tabs, dividers) |
+| `state` | prints `STATE …`: overlay (and its text), selected agent, code modal (file, line, Vim mode, text), terminal find and selection, Git panel, both dock layouts |
+| `marks` | prints `BOUNDS <name> x,y wxh` for every marked element on screen |
+
+`<at>` is `x,y` in window points, or a marked element: `@tab:Terminal:Live` (its middle) or `@pane:Terminal:root~0.9~0.5` (fractions of its size). Marks: `agent:<button id>` (e.g. `agent:tt-root-1`), `menu:<item>`, `tab:` / `close:` / `add:<Kind>:<Panel>`, `pane:` / `split:<Kind>:<path>` (`root`, then `a`/`b` per split), `term:<session>`, `term-cell:<session>` (one cell, so `@term-cell:1~4.5~0.5` is column 4 of the top row), `git-row:` / `git-act:<staged|unstaged>:<path>`. Marks exist only in scripted runs. Each input step draws the window first, so it works while the window is covered; check `STATE`, `FLASH` and files on disk rather than screenshots.
+
+`scripts/handcheck.sh` runs the hand checks this way (Vim keys, Find in Terminal, Rename, the agent menu, dock tabs and dividers, Cmd-click, the Git panel's stage, diff and typed commit, About, Accent Color, Run Doctor) and prints ✓/✕ per assertion. It needs a logged-in session but no agent: a plain shell stands in for Claude Code.
+
 House rules:
 - Lightness is the product: measure with `scripts/budget.sh`, don't estimate.
 - No UI that isn't in the spec or decisions.
@@ -223,7 +244,7 @@ crates/
   qur_tree      lazy, gitignore-aware file tree
   qur_search    project search and replace (ignore + regex)
 docs/           spec (QUR_HANDOFF.md), owner decisions, keymap, menus, budget, signing, research
-scripts/        bundle.sh (Qur.app), make_icns.swift, budget.sh, shot.sh
+scripts/        bundle.sh (Qur.app), make_icns.swift, budget.sh, shot.sh, handcheck.sh
 spikes/         M0 spikes and test fixtures
 ```
 

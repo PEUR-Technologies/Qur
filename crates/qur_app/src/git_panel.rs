@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use gpui::{Context, Entity, EventEmitter, SharedString, Subscription, Task, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list};
+use gpui::{App, Context, Entity, EventEmitter, SharedString, Subscription, Task, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list};
 use qur_git::{FileDiff, Status};
 
 use crate::changes_view::{Row, diff_row, rows_for};
@@ -42,6 +42,25 @@ pub struct GitPanel {
 impl EventEmitter<GitEvent> for GitPanel {}
 
 impl GitPanel {
+    /// QUR_DEBUG_ACTIONS `state`.
+    pub fn debug_state(&self, cx: &App) -> String {
+        let s = &self.status;
+        let pick = match &self.selected {
+            Some(p) => format!("{}:{}", if p.staged { "staged" } else { "unstaged" }, p.path.display()),
+            None => "-".into(),
+        };
+        let diff: Vec<String> = self.diff.iter().map(|d| format!("{}+{}-{}", d.path.display(), d.added, d.removed)).collect();
+        format!(
+            "message={:?} head={} staged={} unstaged={} untracked={} selected={pick} diff=[{}]",
+            self.message.read(cx).text,
+            s.head.as_deref().map(|h| &h[..h.len().min(8)]).unwrap_or("-"),
+            s.staged.len(),
+            s.unstaged.len(),
+            s.untracked.len(),
+            diff.join(" ")
+        )
+    }
+
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let message = cx.new(|cx| TextInput::new("Commit message (⌘↩ commit)", cx));
         let sub = cx.subscribe_in(&message, window, |this, _, ev: &InputEvent, _, cx| {
@@ -193,8 +212,11 @@ impl Render for GitPanel {
         let entry = |path: PathBuf, code: char, staged: bool, id: SharedString, cx: &mut Context<Self>| {
             let sel = self.selected.as_ref().is_some_and(|p| p.path == path && p.staged == staged);
             let (p1, p2, p3) = (path.clone(), path.clone(), path.clone());
+            let name = format!("{}:{}", if staged { "staged" } else { "unstaged" }, path.display());
             div()
                 .id(id)
+                .relative()
+                .children(crate::script::mark(|| format!("git-row:{name}")))
                 .mx(look.z(4.))
                 .px(look.z(8.))
                 .h(look.z(22.))
@@ -216,7 +238,9 @@ impl Render for GitPanel {
                         .rounded(look.z(3.))
                         .text_color(look.c(ui.text_muted))
                         .hover(|d| d.bg(look.c(ui.active_bg)).text_color(look.c(ui.text)))
+                        .relative()
                         .child(if staged { "−" } else { "+" })
+                        .children(crate::script::mark(|| format!("git-act:{}:{}", if staged { "staged" } else { "unstaged" }, p1.display())))
                         .on_click(cx.listener(move |p, _, _, cx| {
                             cx.stop_propagation();
                             if staged { p.unstage(p1.clone(), cx) } else { p.stage(p1.clone(), cx) }
