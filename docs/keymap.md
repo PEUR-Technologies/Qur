@@ -115,6 +115,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+Shift+T` | New Agent Terminal | M2 ✅ |
 | `Ctrl+1..9` | Select session N in the sidebar | M2 ✅ |
 | `Ctrl+Opt+Up/Down` | Previous / next session | M2 ✅ |
+| `Ctrl+T` | Switch to an agent or terminal by name (not subagents); works in terminals too, so the shell doesn't get Ctrl+T | ✅ |
 | `Cmd+I` | Focus the prompt bar | M2 ✅ |
 | `/` (not typing) | Focus Input Field: the agent's prompt, the search box or the terminal, like a browser's search shortcut | ✅ |
 | `Enter` / `Shift+Enter` | Send (queues during a turn) / newline | M2 ✅ |

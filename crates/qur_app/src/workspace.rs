@@ -112,6 +112,8 @@ enum PickKind {
     Mention { root: PathBuf, files: Vec<PathBuf>, target: Entity<PromptInput> },
     Themes { names: Vec<String>, project_scope: bool },
     Projects(Vec<PathBuf>),
+    /// Agents, Agent Terminals and shells (not subagents), for Ctrl+T.
+    Sessions(Vec<Selected>),
     /// The agent's slash commands, inserted into its prompt.
     Slash { names: Vec<String>, target: Entity<PromptInput> },
     /// A session setting's values (mode, model…) for one agent.
@@ -1364,6 +1366,33 @@ impl Workspace {
             None => 0,
         };
         self.select(Some(order[next].clone()), window, cx);
+    }
+
+    /// Ctrl+T: pick an agent or terminal by name. The list starts after the
+    /// one you're in (so Ctrl+T, Return goes to the next), which comes last.
+    fn switch_session(&mut self, _: &qur::SwitchSession, window: &mut Window, cx: &mut Context<Self>) {
+        let mut order = self.session_order();
+        if order.is_empty() {
+            return self.flash("No agents or terminals yet", cx);
+        }
+        if let Some(i) = self.selected.as_ref().and_then(|s| order.iter().position(|o| o == s)) {
+            order.rotate_left(i + 1);
+        }
+        let panel = self.terms.read(cx);
+        let items = order
+            .iter()
+            .map(|s| {
+                let (title, kind) = match s {
+                    Selected::Agent(id) => (self.agent(id).map(|a| a.read(cx).record.title.clone()).unwrap_or_default(), "Agent"),
+                    Selected::TermTask(id) => (self.term_task(id).map(|t| t.record.title.clone()).unwrap_or_default(), "Agent Terminal"),
+                    Selected::Shell(tid) => (panel.session_by_id(*tid).map(|s| s.label.clone()).unwrap_or_default(), "Terminal"),
+                    _ => (String::new(), ""),
+                };
+                let item = PickItem::new(title).detail(kind);
+                if Some(s) == self.selected.as_ref() { item.right("current") } else { item }
+            })
+            .collect();
+        self.open_picker("Switch to an agent or terminal…", items, PickKind::Sessions(order), false, window, cx);
     }
 
     fn next_session(&mut self, _: &qur::NextAgent, window: &mut Window, cx: &mut Context<Self>) {
@@ -2686,6 +2715,13 @@ impl Workspace {
                 }
                 let f = agent.read(cx).prompt.read(cx).focus.clone();
                 window.focus(&f, cx);
+            }
+            (PickerEvent::Confirm(i), PickKind::Sessions(order)) => {
+                let target = order.get(*i).cloned();
+                self.close_overlays(window, cx);
+                if target.is_some() {
+                    self.select(target, window, cx);
+                }
             }
             (PickerEvent::Confirm(i), PickKind::Projects(list)) => {
                 let target = list.get(*i).cloned();
@@ -4546,6 +4582,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::next_terminal))
             .on_action(cx.listener(Self::prev_terminal))
             .on_action(cx.listener(Self::next_session))
+            .on_action(cx.listener(Self::switch_session))
             .on_action(cx.listener(Self::prev_session))
             .on_action(cx.listener(Self::select_session))
             .on_action(cx.listener(Self::focus_prompt))

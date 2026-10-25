@@ -90,7 +90,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Rename Agent… (also double-click the agent's button)
 - Permission: Allow Once `Cmd+Y` · Allow for This Task `Cmd+Opt+Y` · Deny `Cmd+Opt+Z`
 - ---
-- Next Agent · Previous Agent · Agent 1–9 `Ctrl+1..9`
+- Next Agent · Previous Agent · Switch Agent or Terminal… `Ctrl+T` · Agent 1–9 `Ctrl+1..9`
 - ---
 - Review Changes `Cmd+4` · Merge into My Branch · Keep Working · Discard Task…
 - Run Checks Now (the project's `[checks] command`, decision 29)
