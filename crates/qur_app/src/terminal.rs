@@ -393,6 +393,37 @@ impl Tile {
         }
     }
 
+    /// `ids` as a grid in a `w`×`h` area: as many rows as keep the panes
+    /// closest to square, the panes shared evenly between them (fuller rows
+    /// first), every row and pane the same size.
+    fn grid(ids: &[usize], w: f32, h: f32) -> Tile {
+        let n = ids.len().max(1);
+        let off_square = |rows: usize| {
+            let cols = n.div_ceil(rows);
+            ((w / cols as f32) / (h / rows as f32)).ln().abs()
+        };
+        let rows = (1..=n).min_by(|&a, &b| off_square(a).total_cmp(&off_square(b))).unwrap_or(1);
+        // Even shares in nested halves: the first of k takes 1/k.
+        fn chain(mut tiles: Vec<Tile>, vertical: bool) -> Tile {
+            let first = tiles.remove(0);
+            if tiles.is_empty() {
+                return first;
+            }
+            let ratio = 1. / (tiles.len() + 1) as f32;
+            Tile::Split { vertical, ratio, a: Box::new(first), b: Box::new(chain(tiles, vertical)) }
+        }
+        let mut rest = ids;
+        let rows: Vec<Tile> = (0..rows)
+            .map(|r| {
+                let take = n / rows + usize::from(r < n % rows);
+                let (row, more) = rest.split_at(take);
+                rest = more;
+                chain(row.iter().map(|&id| Tile::Term(id)).collect(), false)
+            })
+            .collect();
+        chain(rows, true)
+    }
+
     /// Whether the split directly holding `id` stacks top/bottom.
     fn parent_vertical(&self, id: usize) -> Option<bool> {
         match self {
@@ -616,6 +647,7 @@ impl TerminalPanel {
                 next = Some(if rest.contains(&group.last) { group.last } else { rest[0] });
                 if rest.len() > 1 {
                     self.groups.push(Group { owner, tile, last: next.unwrap_or(owner) });
+                    self.regrid(owner);
                 }
             }
         }
@@ -673,8 +705,22 @@ impl TerminalPanel {
                 self.groups.push(Group { owner: target, tile, last: new });
             }
         }
+        self.regrid(new);
         cx.notify();
         Some(new)
+    }
+
+    /// Lay the group holding `id` out again as a grid of near-square panes,
+    /// oldest first, so added terminals never end up as thin rows or columns.
+    fn regrid(&mut self, id: usize) {
+        let Some(g) = self.groups.iter_mut().find(|g| g.tile.ids().contains(&id)) else { return };
+        let mut ids = g.tile.ids();
+        ids.sort_unstable();
+        // The area the group fills: its panes as last painted (a new pane
+        // has no size yet; it shares the space its neighbours had).
+        let area = ids.iter().filter_map(|i| self.pane_bounds.get(i)).copied().reduce(|a, b| a.union(&b));
+        let (w, h) = area.map(|b| (f32::from(b.size.width), f32::from(b.size.height))).filter(|(w, h)| *w > 0. && *h > 0.).unwrap_or((2., 1.));
+        g.tile = Tile::grid(&ids, w, h);
     }
 
     /// Tiling-WM style (dwindle, like Hyprland or bspwm): split the focused
@@ -1465,6 +1511,7 @@ impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
         let ui = look.theme.ui.clone();
+        let split = self.active_group().is_some();
         let tiles = match self.active_group().map(|g| g.tile.clone()) {
             Some(t) => Some(self.tile(&t, Vec::new(), true, &look, cx)),
             None => self.active_session().map(|s| s.id).map(|id| self.tile(&Tile::Term(id), Vec::new(), false, &look, cx)),
@@ -1517,6 +1564,8 @@ impl Render for TerminalPanel {
                     .flex_1()
                     .min_h(px(0.))
                     .flex()
+                    // Split panes float as tiles with a gap all round (Hyprland).
+                    .when(split, |d| d.p(look.z(6.)))
                     // Files dragged in from Finder become their paths, as in Terminal.
                     .drag_over::<gpui::ExternalPaths>(|s, _, window, cx| {
                         let l = Look::of(window, cx);
@@ -1548,7 +1597,9 @@ impl TerminalPanel {
                     .size_full()
                     .px(look.z(8.))
                     .py(look.z(4.))
-                    .when(split, |d| d.border_t_2().border_color(if on { look.c(ui.focus_ring) } else { gpui::transparent_black() }))
+                    // Tiling-WM look: each pane its own rounded box, the
+                    // focused one outlined in the accent.
+                    .when(split, |d| d.rounded(look.z(6.)).border_1().border_color(look.c(if on { look.theme.accents[0].base } else { ui.border })))
                     .child(GridElement { panel: cx.entity(), id: *id })
                     .into_any_element()
             }
@@ -1565,13 +1616,20 @@ impl TerminalPanel {
                 };
                 let handle = div()
                     .id(SharedString::from(format!("term-split-{path:?}")))
+                    .group(SharedString::from(format!("term-split-{path:?}")))
                     .flex_none()
                     .relative()
-                    .bg(look.c(ui.border))
-                    .hover(|d| d.bg(look.c(ui.focus_ring)))
-                    .when(*vertical, |d| d.h(px(1.)).w_full().cursor_row_resize())
-                    .when(!*vertical, |d| d.w(px(1.)).h_full().cursor_col_resize())
-                    // A wider grab area than the 1 px line.
+                    // The gap between tiles; the accent shows while hovered.
+                    .when(*vertical, |d| d.h(look.z(6.)).w_full().cursor_row_resize())
+                    .when(!*vertical, |d| d.w(look.z(6.)).h_full().cursor_col_resize())
+                    .child(
+                        div()
+                            .absolute()
+                            .when(*vertical, |d| d.left_0().right_0().top(look.z(2.5)).h(px(1.)))
+                            .when(!*vertical, |d| d.top_0().bottom_0().left(look.z(2.5)).w(px(1.)))
+                            .group_hover(SharedString::from(format!("term-split-{path:?}")), |d| d.bg(look.c(look.theme.accents[0].base))),
+                    )
+                    // A wider grab area than the gap.
                     .child(div().absolute().when(*vertical, |d| d.left_0().right_0().top(px(-3.)).h(px(7.))).when(!*vertical, |d| d.top_0().bottom_0().left(px(-3.)).w(px(7.))))
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                         if let Some(b) = sb.borrow().get(&p2).copied() {
@@ -1864,6 +1922,29 @@ mod tests {
         assert_eq!(clean_title("yobi@mac:~/qur"), None);
         assert_eq!(clean_title("~/qur"), None);
         assert_eq!(clean_title("   "), None);
+    }
+
+    #[test]
+    fn grid_keeps_panes_near_square() {
+        // Rows of Term ids, read back from a grid.
+        fn rows(t: &Tile) -> Vec<Vec<usize>> {
+            match t {
+                Tile::Split { vertical: true, a, b, .. } => [rows(a), rows(b)].concat(),
+                t => vec![t.ids()],
+            }
+        }
+        // A wide panel: two side by side, then a 2×2.
+        assert_eq!(rows(&Tile::grid(&[1, 2], 1600., 800.)), vec![vec![1, 2]]);
+        assert_eq!(rows(&Tile::grid(&[1, 2, 3, 4], 1600., 900.)), vec![vec![1, 2], vec![3, 4]]);
+        // Five: three on top, two below, never five thin columns.
+        assert_eq!(rows(&Tile::grid(&[1, 2, 3, 4, 5], 1600., 900.)), vec![vec![1, 2, 3], vec![4, 5]]);
+        // A tall panel stacks them.
+        assert_eq!(rows(&Tile::grid(&[1, 2], 600., 1200.)), vec![vec![1], vec![2]]);
+        // Shares are even: a row of three gives the first a third.
+        match Tile::grid(&[1, 2, 3], 3000., 1000.) {
+            Tile::Split { vertical: false, ratio, .. } => assert!((ratio - 1. / 3.).abs() < 1e-6),
+            t => panic!("{t:?}"),
+        }
     }
 
     #[test]

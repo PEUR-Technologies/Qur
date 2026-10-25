@@ -105,6 +105,8 @@ pub struct UiConfig {
     /// Which of the theme's six accents comes first (agents take them in
     /// order from here): 0 = the theme's own first (Qur's orange).
     pub accent: usize,
+    /// Show the Keep Awake switch at the top of the sidebar.
+    pub keep_awake: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -151,7 +153,7 @@ impl Default for EditorConfig {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        UiConfig { font_size: 13.0, zoom: 1.0, accent: 0 }
+        UiConfig { font_size: 13.0, zoom: 1.0, accent: 0, keep_awake: true }
     }
 }
 
