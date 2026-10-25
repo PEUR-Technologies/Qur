@@ -8,14 +8,18 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - About Qur
 - Check Setup… (re-opens the first-run picker)
 - ---
+- Appearance ▸
+  - Theme… `Cmd+K Cmd+T` (scope: This Project / All Projects)
+  - Use Default Theme for This Project
+  - ---
+  - Accent Color… (hue and brightness sliders, live)
+  - Transparency… (opacity slider + blur, live)
+- Vim Mode (checkmark)
+- ---
 - Settings ▸
   - Open config.toml `Cmd+,`
   - Open keymap.toml
   - Agents (agents.toml)
-- Theme… `Cmd+K Cmd+T` (scope: This Project / All Projects)
-- Use Default Theme for This Project
-- Transparency… (opacity slider + blur, live)
-- Vim Mode (checkmark)
 - ---
 - Hide Qur `Cmd+H` · Hide Others `Cmd+Opt+H` · Show All
 - ---
