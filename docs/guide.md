@@ -25,7 +25,7 @@ qur doctor                             # checks git, the agents and their adapte
 
 Building needs **Rust** stable ([rustup](https://rustup.rs)) and **Xcode** with the Metal toolchain (`xcodebuild -downloadComponent MetalToolchain` once if the build asks). Release signing and notarization: [docs/signing.md](signing.md). Notifications need the app bundle; everything else also runs straight from `target/release/qur`.
 
-On first launch a short picker asks which agents to use, the stage layout, the keys (VS Code, optionally with Vim) and the theme; Qur > Setup… reopens it.
+On first launch the settings screen opens as a welcome: connect an AI account (install and sign in, decision 45), then pick the theme, accent, layout and keys if you like. **Qur > Settings…** (`Cmd+,`) brings it back any time.
 
 Then open a project (File > Open Folder, or `qur ~/path/to/repo`) and press `Cmd+Shift+T` for an Agent Terminal (Claude in its own worktree), or `Cmd+Shift+N` for a structured agent task. Describe the task and watch.
 
@@ -94,14 +94,14 @@ One window is one project. There's no permanent editor area: the window is for a
 
 ### Editor and looks
 
-- Code modal with tree-sitter highlighting for 13 languages, multi-cursor, regex find/replace, soft wrap and VS Code keybindings, plus optional Vim mode (Qur > Vim Mode).
+- Code modal with tree-sitter highlighting for 13 languages, multi-cursor, regex find/replace, soft wrap and VS Code keybindings, plus optional Vim mode (Edit > Vim Mode, or Settings).
 - **Go to Symbol in File** (`Cmd+Shift+O`): functions, methods, types, classes, headings, keys… from the same tree-sitter parse as the colors (no language server). Arrow keys preview each symbol; Esc puts the cursor back.
 - **Expand / Shrink Selection** (`Ctrl+Shift+Cmd+→` / `←`): grows every cursor's selection to the enclosing syntax node (word, call, statement, block, function…), and shrinks back one step at a time. Files Qur doesn't parse grow by word, line, then the whole file.
 - With soft wrap on, `End` / `Cmd+→` stops at the end of the visual row first, then the line; `Home` / `Cmd+←` likewise.
 - Input methods (Japanese, Chinese, Korean, press-and-hold accents): the text being composed shows underlined at the cursor until you commit it.
-- A first-run picker for agents, layout, keys and theme (Qur > Setup… reopens it).
+- **Settings** (`Cmd+,`): one screen with a section list. Agents (install, sign in, which agents to use), Appearance (theme for this project or all, accent color and brightness, transparency and blur, top bar, traffic lights in full screen), Editor (Vim mode, keys), Layout (the agent stage presets as diagrams), and Files (open config.toml, keymap.toml, agents.toml). Changes apply and save as you make them; Esc closes. It also opens by itself on first launch.
 - 17 built-in themes plus Auto (follows macOS), a theme per project, and window transparency with blur. Every theme passes a contrast test.
-- Every command is in the macOS menu bar and the command palette (`Cmd+Shift+P`). No toolbars or settings screens.
+- Every command is in the macOS menu bar and the command palette (`Cmd+Shift+P`). No toolbars; the one settings screen is Qur > Settings…, and its settings are also menu commands (View > Appearance, Edit > Vim Mode).
 
 ## Everyday keys
 
@@ -126,9 +126,9 @@ Everything lives in `~/Library/Application Support/Qur/`. Qur never writes into 
 
 | File | What |
 |---|---|
-| `config.toml` | Theme, window opacity/blur, editor font, soft wrap, peek layout, `[keys] vim`, `[alerts]`. Qur > Settings opens it; saved changes apply right away. |
+| `config.toml` | Theme, window opacity/blur, editor font, soft wrap, peek layout, `[keys] vim`, `[alerts]`. Qur > Settings… changes most of it; Qur > Settings Files > Open config.toml opens it, and saved changes apply right away. |
 | `agents.toml` | Which agents Qur can start (ACP or terminal mode). Written on first launch. |
-| `keymap.toml` | Your own key bindings (see below). Qur > Settings > Open keymap.toml; saved changes apply right away. |
+| `keymap.toml` | Your own key bindings (see below). Qur > Settings Files > Open keymap.toml (or Settings > Editor); saved changes apply right away. |
 | `projects/<id>.toml` | Per-project theme, opacity, `[worktree] setup = "pnpm install"` (runs in each new worktree before the agent starts), `[checks] command = "cargo check"` (runs after each agent turn that changed files), and `[run] command` / `url` with `$PORT` (Run Project). |
 | `projects/<id>.tasks.toml` | Tasks, so they survive restarts and resume their sessions. |
 | `worktrees/<id>/<task>/` | The task worktrees. |
@@ -210,15 +210,16 @@ CI (`.github/workflows/ci.yml`, one macOS job) runs clippy with `-D warnings`, t
 | `qur::Name` | dispatches that action (as in the palette) |
 | `wait:<ms>` | pauses |
 | `type:<text>` | types the text as key presses: `\,` comma, `\n` Enter, `\t` Tab, `\\` backslash |
-| `key:<keys>` | presses keystrokes, space-separated, keymap syntax: `key:cmd-shift-p`, `key:escape` |
+| `key:<keys>` | presses keystrokes, space-separated, keymap syntax: `key:cmd-shift-p`, `key:escape`, `key:cmd-\,` (Cmd+,) |
 | `click:<at>` `dclick:` `rclick:` `cmdclick:` | left click, double click, right click, Cmd-click |
-| `drag:<at>,<at>` | press, move there a frame at a time, release (tabs, dividers) |
+| `drag:<at>,<at>` | press, move there a frame at a time, release (tabs, dividers, sliders) |
+| `scroll:<at>,<dy>` | turns the scroll wheel over a point by `dy` points (negative scrolls down) |
 | `state` | prints `STATE …`: overlay (and its text), selected agent, code modal (file, line, Vim mode, text), terminal find and selection, Git panel, both dock layouts |
 | `marks` | prints `BOUNDS <name> x,y wxh` for every marked element on screen |
 
-`<at>` is `x,y` in window points, or a marked element: `@tab:Terminal:Live` (its middle) or `@pane:Terminal:root~0.9~0.5` (fractions of its size). Marks: `agent:<button id>` (e.g. `agent:tt-root-1`), `menu:<item>`, `tab:` / `close:` / `add:<Kind>:<Panel>`, `pane:` / `split:<Kind>:<path>` (`root`, then `a`/`b` per split), `term:<session>`, `term-cell:<session>` (one cell, so `@term-cell:1~4.5~0.5` is column 4 of the top row), `git-row:` / `git-act:<staged|unstaged>:<path>`. Marks exist only in scripted runs. Each input step draws the window first, so it works while the window is covered; check `STATE`, `FLASH` and files on disk rather than screenshots.
+`<at>` is `x,y` in window points, or a marked element: `@tab:Terminal:Live` (its middle) or `@pane:Terminal:root~0.9~0.5` (fractions of its size). Marks: `agent:<button id>` (e.g. `agent:tt-root-1`), `menu:<item>`, `tab:` / `close:` / `add:<Kind>:<Panel>`, `pane:` / `split:<Kind>:<path>` (`root`, then `a`/`b` per split), `term:<session>`, `term-cell:<session>` (one cell, so `@term-cell:1~4.5~0.5` is column 4 of the top row), `git-row:` / `git-act:<staged|unstaged>:<path>`, and in Settings `settings:nav:<Section>`, `settings:<row>:<choice>` (`settings:vim:on`, `settings:top:zen`, `settings:lights:mono`, `settings:theme-scope:project`), `settings:theme:<Auto|n>`, `settings:slider:<Opacity|Hue|Brightness>`, `settings:blur`, `settings:file:<name>`, `settings:close`, `settings:done`. Marks exist only in scripted runs. Each input step draws the window first, so it works while the window is covered; check `STATE`, `FLASH` and files on disk rather than screenshots.
 
-`scripts/handcheck.sh` runs the hand checks this way (Vim keys, Find in Terminal, Rename, the agent menu, dock tabs and dividers, Cmd-click, the Git panel's stage, diff and typed commit, About, Accent Color, Run Doctor) and prints ✓/✕ per assertion. It needs a logged-in session but no agent: a plain shell stands in for Claude Code.
+`scripts/handcheck.sh` runs the hand checks this way (Vim keys, Find in Terminal, Rename, the agent menu, dock tabs and dividers, Cmd-click, the Git panel's stage, diff and typed commit, About, Accent Color, Run Doctor, Settings from `Cmd+,` saving Vim, a theme, opacity and blur, and the first-run welcome) and prints ✓/✕ per assertion. It needs a logged-in session but no agent: a plain shell stands in for Claude Code.
 
 House rules:
 - Lightness is the product: measure with `scripts/budget.sh`, don't estimate.

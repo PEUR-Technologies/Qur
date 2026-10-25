@@ -6,20 +6,13 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 
 ## Qur
 - About Qur
-- Check Setup… (re-opens the first-run picker)
-- ---
-- Appearance ▸
-  - Theme… `Cmd+K Cmd+T` (scope: This Project / All Projects)
-  - Use Default Theme for This Project
-  - ---
-  - Accent Color… (hue and brightness sliders, live)
-  - Transparency… (opacity slider + blur, live)
-- Vim Mode (checkmark)
-- ---
-- Settings ▸
-  - Open config.toml `Cmd+,`
+- Settings… `Cmd+,` (the settings screen; it also opens by itself on first launch)
+- Settings Files ▸
+  - Open config.toml
   - Open keymap.toml (created with examples when missing)
   - Agents (agents.toml)
+- ---
+- Services ▸
 - ---
 - Hide Qur `Cmd+H` · Hide Others `Cmd+Opt+H` · Show All
 - ---
@@ -53,6 +46,8 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Indent `Cmd+]` · Outdent `Cmd+[`
 - Trim Trailing Whitespace
 - ---
+- Vim Mode (checkmark)
+- ---
 - (macOS adds Start Dictation / Emoji & Symbols)
 
 ## Selection
@@ -78,6 +73,12 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Soft Wrap `Opt+Z` (checkmark)
 - Zoom In `Cmd+=` · Zoom Out `Cmd+-` · Reset Zoom `Cmd+0`
 - ---
+- Appearance ▸
+  - Theme… `Cmd+K Cmd+T` (scope: This Project / All Projects)
+  - Use Default Theme for This Project
+  - ---
+  - Accent Color… (hue and brightness sliders, live)
+  - Transparency… (opacity slider + blur, live)
 - Zen Mode `Ctrl+Cmd+Z` (checkmark)
 - Enter Full Screen `Ctrl+Cmd+F`
 
@@ -127,7 +128,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 
 ## What this removes from the window
 
-- No toolbar, no gear icon, no settings screen. Theme, transparency, Vim and config live under the **Qur** menu.
+- No toolbar, no gear icon. The one settings screen is **Qur > Settings…** (`Cmd+,`), the macOS place for it: Agents, Appearance (theme, accent, transparency, top bar, traffic lights), Editor (Vim mode, keys), Layout, and links to the settings files. Each of its settings is also a menu command or popover (View > Appearance, Edit > Vim Mode, View > Zen Mode, View > Peek Layout), and each change there saves the same way.
 - Peek header keeps only the Follow toggle and Live/To-do/Chat/Changes segments (layout B). Layout switching moves to the **View** menu and shortcut.
 - Merge/Discard keep their buttons only in the Changes view (handoff section 10), since they are the action of that view; they are also in the **Agent** menu.
-- The "Transparency…" popover is the only settings surface outside the first-run and theme pickers.
+- The quick popovers stay: Theme… (picker), Accent Color… and Transparency… open in place without the settings screen.

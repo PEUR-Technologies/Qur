@@ -140,7 +140,27 @@ check_panels() {  # About and Accent Color open (and a click outside closes them
   ok "Run Doctor showed its sheet" grep -qE '^PROMPT (Doctor|.*doctor|.*good|.*problem|.*warning)' "$LOG"
 }
 
-ALL=(vim find_terminal rename rename_click dock cmd_click git_commit git_stage panels)
+cfg_has() { grep -qE -- "$1" "$QUR_HOME/config.toml"; }
+check_settings() {  # Cmd+, opens Settings; Vim, a theme and the opacity slider save live; Esc closes.
+  setup settings
+  drive "wait:1500,key:cmd-\\,,wait:300,state,click:@settings:nav:Editor,wait:200,click:@settings:vim:on,wait:300,state,click:@settings:nav:Appearance,wait:200,click:@settings:theme:1,wait:300,scroll:@settings:nav:Files~3~0.5,-500,wait:200,drag:@settings:slider:Opacity~0.95~0.5,@settings:slider:Opacity~0.1~0.5,wait:300,click:@settings:blur,wait:300,key:escape,wait:200,state,qur::Quit"
+  ok "Cmd+, opened Settings (not config.toml)" grep -qF 'overlay=settings:Agents ' "$LOG"
+  ok "the section list jumped to Editor" grep -qF 'overlay=settings:Editor ' "$LOG"
+  ok "Vim on, saved at once" cfg_has '^vim = true'
+  ok "a theme click saved it for all projects" cfg_has '^theme = "'
+  ok "the opacity slider saved its value" cfg_has '^opacity = 0\.6[0-9]*$'
+  ok "Blur clicked off, saved" cfg_has '^blur = false'
+  ok "Esc closed Settings" state_has 'overlay=none'
+}
+
+check_first_run() {  # QUR_DEBUG_SETUP=1: the first-run welcome; Done (or Skip for now) closes it.
+  setup first_run
+  QUR_DEBUG_SETUP=1 drive "wait:2500,state,click:@settings:done,wait:300,state,qur::Quit"
+  ok "the welcome opened by itself" grep -qF 'overlay=settings:Agents ' "$LOG"
+  ok "Done closed it" state_has 'overlay=none'
+}
+
+ALL=(vim find_terminal rename rename_click dock cmd_click git_commit git_stage panels settings first_run)
 [ "${1:-}" = "-l" ] && { printf '%s\n' "${ALL[@]}"; exit 0; }
 for c in "${@:-${ALL[@]}}"; do
   echo "$c"

@@ -177,15 +177,15 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::HideOthers, "Qur", "Hide Others", "cmd-alt-h", W, R),
     cmd!(qur::ShowAll, "Qur", "Show All", "", W, R),
     cmd!(qur::About, "Qur", "About Qur", "", W, R),
-    cmd!(qur::CheckSetup, "Qur", "Setup…", "", W, R),
-    cmd!(qur::OpenConfig, "Qur", "Open config.toml", "cmd-,", W, R),
+    cmd!(qur::CheckSetup, "Qur", "Settings…", "cmd-,", W, R),
+    cmd!(qur::OpenConfig, "Qur", "Open config.toml", "", W, R),
     cmd!(qur::OpenKeymap, "Qur", "Open keymap.toml", "", W, R),
     cmd!(qur::OpenAgents, "Qur", "Agents (agents.toml)", "", W, R),
-    cmd!(qur::ThemePicker, "Qur", "Theme…", "cmd-k cmd-t", NT, R),
-    cmd!(qur::AccentColor, "Qur", "Accent Color…", "", W, R),
-    cmd!(qur::UseDefaultTheme, "Qur", "Use Default Theme for This Project", "", W, R),
-    cmd!(qur::Transparency, "Qur", "Transparency…", "", W, R),
-    cmd!(qur::VimMode, "Qur", "Vim Mode", "", W, R),
+    cmd!(qur::ThemePicker, "View", "Theme…", "cmd-k cmd-t", NT, R),
+    cmd!(qur::AccentColor, "View", "Accent Color…", "", W, R),
+    cmd!(qur::UseDefaultTheme, "View", "Use Default Theme for This Project", "", W, R),
+    cmd!(qur::Transparency, "View", "Transparency…", "", W, R),
+    cmd!(qur::VimMode, "Edit", "Vim Mode", "", W, R),
     cmd!(qur::NewWindow, "File", "New Window", "cmd-n", W, R),
     cmd!(qur::NewAgentTask, "Agent", "New Agent Task…", "cmd-shift-n", W, R),
     cmd!(qur::OpenFolder, "File", "Open Folder…", "cmd-o", W, R),
@@ -570,17 +570,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
         Menu::new("Qur").items([
             titled("About Qur", qur::About),
             item(qur::CheckSetup),
-            sep(),
-            M::submenu(Menu::new("Appearance").items([
-                item(qur::ThemePicker),
-                item(qur::UseDefaultTheme),
-                sep(),
-                item(qur::AccentColor),
-                item(qur::Transparency),
-            ])),
-            item(qur::VimMode).checked(s.vim),
-            sep(),
-            M::submenu(Menu::new("Settings").items([item(qur::OpenConfig), item(qur::OpenKeymap), item(qur::OpenAgents)])),
+            M::submenu(Menu::new("Settings Files").items([item(qur::OpenConfig), item(qur::OpenKeymap), item(qur::OpenAgents)])),
             sep(),
             M::os_submenu("Services", SystemMenuType::Services),
             sep(),
@@ -630,6 +620,8 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(editor::Indent),
             item(editor::Outdent),
             item(editor::TrimWhitespace),
+            sep(),
+            item(qur::VimMode).checked(s.vim),
         ]),
         Menu::new("Selection").items([
             item(editor::SelectLine),
@@ -683,6 +675,13 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::ZoomOut),
             item(qur::ZoomReset),
             sep(),
+            M::submenu(Menu::new("Appearance").items([
+                item(qur::ThemePicker),
+                item(qur::UseDefaultTheme),
+                sep(),
+                item(qur::AccentColor),
+                item(qur::Transparency),
+            ])),
             item(qur::ZenMode).checked(s.zen),
             item(qur::ToggleFullScreen),
         ]),
@@ -780,6 +779,19 @@ mod tests {
         let e = resolve("Line Start").unwrap_err();
         assert!(e.contains("editor::LineStart") && e.contains("terminal::SendLineStart"), "{e}");
         assert!(resolve("No Such Command").unwrap_err().contains("no command"));
+    }
+
+    /// Cmd+, opens Settings (macOS standard), not config.toml; the files stay
+    /// reachable from Qur > Settings Files and the palette.
+    #[test]
+    fn settings_on_cmd_comma() {
+        assert_eq!(COMMANDS[resolve("qur::CheckSetup").unwrap()].keys(), "cmd-,");
+        assert_eq!(COMMANDS[resolve("Qur: Settings…").unwrap()].action_name(), "qur::CheckSetup");
+        let bound: Vec<&str> = COMMANDS.iter().filter(|c| c.keys().split('|').any(|k| k == "cmd-,")).map(|c| c.action_name()).collect();
+        assert_eq!(bound, ["qur::CheckSetup"]);
+        assert_eq!(COMMANDS[resolve("qur::OpenConfig").unwrap()].keys(), "");
+        assert_eq!(COMMANDS[resolve("View: Theme…").unwrap()].action_name(), "qur::ThemePicker");
+        assert_eq!(COMMANDS[resolve("Edit: Vim Mode").unwrap()].action_name(), "qur::VimMode");
     }
 
     #[test]

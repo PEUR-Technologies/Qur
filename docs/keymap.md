@@ -10,7 +10,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 |---|---|---|---|
 | `Cmd+Q` | Quit Qur | Qur | S |
 | `Cmd+H` / `Cmd+Opt+H` | Hide Qur / Hide Others | Qur | S |
-| `Cmd+,` | Open config.toml | Qur > Settings… | M1+ |
+| `Cmd+,` | Settings… (agents, appearance, editor, layout, files; changes apply and save at once, Esc closes) | Qur | ✅ |
 | `Cmd+N` | New Window | File | M1+ |
 | `Cmd+Shift+N` | New Agent Task (same as sidebar `+`) | File | M2 ✅ |
 | `Cmd+O` | Open Folder… | File | M1+ |
@@ -20,7 +20,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Ctrl+Cmd+F` | Toggle Full Screen | View | S |
 | `Ctrl+Cmd+Z` | Zen Mode (hide the top bar until the mouse nears the top) | View | ✅ |
 | `Cmd+Shift+P` / `F1` | Command Palette | View | S |
-| `Cmd+K Cmd+T` | Theme Picker | Qur | M1 |
+| `Cmd+K Cmd+T` | Theme Picker | View > Appearance | M1 |
 | `Cmd+B` | Toggle Sidebar | View | S |
 | `Cmd+=` / `Cmd+-` / `Cmd+0` | Zoom In / Out / Reset (UI + code font) | View | S |
 
@@ -143,8 +143,8 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd`-click (in a terminal) | Open a URL, or `path:line:col` in the code modal | M5 ✅ |
 | Agent menu / double-click a button | Rename Agent… | M5 ✅ |
 | `Cmd+Shift+F` / `Cmd+Shift+H` | Find / Replace in Project (Search view; ⌥C case, ⌥W word, ⌥R regex) | M6 ✅ |
-| Qur > Vim Mode | Vim keys in the code modal: normal / insert / visual / visual line | M6 ✅ |
-| Qur > Setup… | First-run picker (Enter saves, Esc cancels) | M6 ✅ |
+| Edit > Vim Mode (also Settings > Editor) | Vim keys in the code modal: normal / insert / visual / visual line | M6 ✅ |
+| Qur > Settings Files | Open config.toml, keymap.toml, agents.toml (no default keys; `Cmd+,` opens Settings) | ✅ |
 | Agent > Merge Conflicts | Next / Previous Conflict, Accept Ours / Theirs / Both, Finish Merge, Abort Merge (no default keys) | M4 ✅ |
 | View > Git | Stage All Changes, Unstage All Changes, Commit Staged… (no default keys) | M4 ✅ |
 | Changes view: click a line / ⌘-click | Comment on the line (sent to the agent as one message) / open the file there | M4 ✅ |
