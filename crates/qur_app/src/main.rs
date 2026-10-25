@@ -20,6 +20,7 @@ mod markdown;
 mod monitor;
 mod picker;
 mod prompt;
+mod review;
 mod search_view;
 mod setup_view;
 mod terminal;

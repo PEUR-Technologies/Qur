@@ -35,6 +35,7 @@ use crate::input::{InputEvent, TextInput};
 use crate::look::Look;
 use crate::picker::{PickItem, Picker, PickerEvent};
 use crate::prompt::{PromptEvent, PromptInput};
+use crate::review::{self, Subject};
 use crate::search_view::{SearchEvent, SearchPanel};
 use crate::setup_view::{SetupEvent, SetupView};
 use crate::terminal::{Kind, PanelEvent, TerminalPanel};
@@ -147,6 +148,9 @@ enum Overlay {
     About,
     Transparency { project_scope: bool },
     NewTask { input: Entity<PromptInput>, agent: usize },
+    /// Review Agent's Work… / Plan…: the reviewer (agent and model) for
+    /// task `task`, and an optional instruction line.
+    Review { input: Entity<TextInput>, task: String, subject: Subject, choices: Vec<review::Choice>, chosen: usize, touched: bool },
 }
 
 pub struct Workspace {
@@ -198,6 +202,9 @@ pub struct Workspace {
     overlay: Option<Overlay>,
     /// File picker shown over the New Agent Task dialog (`@` mentions).
     mention_over_dialog: Option<Entity<Picker>>,
+    /// Which CLIs ("claude", "codex") are signed in, asked once per window
+    /// when the reviewer picker first opens (it picks the default reviewer).
+    review_logins: Option<HashMap<String, bool>>,
     prev_focus: Option<FocusHandle>,
     /// Setup, set aside while its install or sign-in runs in a terminal.
     parked_setup: Option<Entity<SetupView>>,
@@ -320,6 +327,7 @@ impl Workspace {
             resizing: false,
             overlay: None,
             mention_over_dialog: None,
+            review_logins: None,
             prev_focus: None,
             parked_setup: None,
             nav: Vec::new(),
@@ -497,6 +505,7 @@ impl Workspace {
             recent: qur_config::State::load().recent_projects,
             merging: self.merge.is_some(),
             turns: self.selected_last_turn(cx).is_some(),
+            review: self.review_state(cx),
             vim: self.config.keys.vim,
             keep_awake: self.config.ui.keep_awake,
             zen: self.config.ui.zen,
@@ -846,6 +855,18 @@ impl Workspace {
                 a.start(cx);
             }
         });
+        // Its reviewer from last time: back under it, stopped (session/load
+        // shows its findings again once you send it something).
+        let link = a.read(cx).record.review.clone();
+        if let Some(link) = link {
+            match self.roster.get(&link.agent).cloned() {
+                Some(def) => {
+                    println!("REVIEW {} restored ({} {})", a.read(cx).record.id, link.agent, link.model.as_deref().unwrap_or("default model"));
+                    a.update(cx, |a, cx| a.attach_reviewer(&link, def, window, cx));
+                }
+                None => a.update(cx, |a, _| a.record.review = None),
+            }
+        }
         AGENT_IDS.with(|m| m.borrow_mut().insert(a.entity_id(), id));
         let monitor = a.read(cx).monitor.clone();
         self.watch_monitor(&monitor, window, cx);
@@ -880,9 +901,16 @@ impl Workspace {
                 }
                 this.sync_badge(window);
                 this.save_tasks(cx);
+                // A plan may have arrived: Review Agent's Plan… follows.
+                this.sync_menus(cx);
                 cx.notify();
             }
             AgentEvent::Subagents => cx.notify(),
+            AgentEvent::Review => {
+                this.save_tasks(cx);
+                this.sync_menus(cx);
+                cx.notify();
+            }
             AgentEvent::TurnsChanged => this.sync_menus(cx),
             AgentEvent::Rewind(n) => {
                 let id = a.read(cx).record.id.clone();
@@ -990,7 +1018,7 @@ impl Workspace {
                         renamed: false,
                         in_root: false,
                         queued: Vec::new(),
-                        turns: Vec::new(),
+                        turns: Vec::new(), review: None,
                     };
                     let debug_browser = std::env::var_os("QUR_DEBUG_BROWSER_URL").is_some();
                     match def.mode {
@@ -1084,7 +1112,7 @@ impl Workspace {
                 renamed: false,
                 in_root: true,
                 queued: Vec::new(),
-                turns: Vec::new(),
+                turns: Vec::new(), review: None,
             };
             let id = record.id.clone();
             self.add_term_task(record, window, cx);
@@ -1123,7 +1151,7 @@ impl Workspace {
                         renamed: false,
                         in_root: false,
                         queued: Vec::new(),
-                        turns: Vec::new(),
+                        turns: Vec::new(), review: None,
                     };
                     this.add_term_task(record, window, cx);
                     this.apply_look(window, cx);
@@ -1683,6 +1711,10 @@ impl Workspace {
                     if let Some(g) = &this.git {
                         g.update(cx, |g, cx| g.refresh(cx));
                     }
+                    // Its review was of work that's merged now: the reviewer goes.
+                    if let Some(a) = this.agent(&id).cloned() {
+                        a.update(cx, |a, cx| a.close_review(cx));
+                    }
                     this.flash(format!("Merged “{title}” into your branch ({})", &commit[..commit.len().min(8)]), cx);
                     this.offer_cleanup(&id, window, cx);
                 }
@@ -2103,6 +2135,140 @@ impl Workspace {
             }
             None => self.no_turn_message(cx),
         }
+    }
+
+    // -- second-opinion review ---------------------------------------------------
+
+    fn review_state(&self, cx: &App) -> commands::ReviewState {
+        let Some(a) = self.selected_agent() else { return commands::ReviewState::default() };
+        let a = a.read(cx);
+        commands::ReviewState { work: true, plan: a.plan_text().is_some(), findings: a.has_findings(cx) }
+    }
+
+    fn review_work(&mut self, _: &qur::ReviewWork, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_review_picker(Subject::Work, window, cx);
+    }
+
+    fn review_plan(&mut self, _: &qur::ReviewPlan, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_review_picker(Subject::Plan, window, cx);
+    }
+
+    fn send_review_findings(&mut self, _: &qur::SendReviewFindings, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(a) = self.selected_agent() else { return self.flash("Select an agent first", cx) };
+        if !a.update(cx, |a, cx| a.send_findings(window, cx)) {
+            self.flash("The reviewer has no findings yet", cx);
+        }
+    }
+
+    /// Review Agent's Work… / Plan…: a small picker for the reviewer (agent
+    /// and model) and an optional instruction. Up/Down or Tab change the
+    /// reviewer, Enter starts it.
+    fn open_review_picker(&mut self, subject: Subject, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(a) = self.selected_agent() else {
+            let msg = match self.selected {
+                Some(Selected::TermTask(_)) => "Agent Terminals can't be reviewed yet: reviews are for structured agents",
+                _ => "Select an agent first",
+            };
+            return self.flash(msg, cx);
+        };
+        if subject == Subject::Plan && a.read(cx).plan_text().is_none() {
+            return self.flash("This agent has no plan yet", cx);
+        }
+        let (id, task_agent, models) = {
+            let a = a.read(cx);
+            (a.record.id.clone(), a.def.id.clone(), review::model_option(&a.settings).cloned())
+        };
+        let choices = review::choices(&self.roster.agents, &task_agent, models.as_ref(), |d| qur_agents::which(&d.command).is_some());
+        if choices.is_empty() {
+            return self.flash("No structured agent is installed to review with (Qur > Setup…)", cx);
+        }
+        // Dev/test: QUR_DEBUG_REVIEW="<agent id>[:<model>][|instruction]" starts
+        // it without the picker (model: part of its name, e.g. "haiku").
+        if let Ok(spec) = std::env::var("QUR_DEBUG_REVIEW") {
+            let (who, instruction) = spec.split_once('|').unwrap_or((spec.as_str(), ""));
+            let (agent, model) = who.split_once(':').unwrap_or((who, ""));
+            let model = model.to_lowercase();
+            let fits = |c: &review::Choice| {
+                self.roster.agents[c.agent].id == agent
+                    && (model.is_empty() || c.model.as_ref().is_some_and(|(v, n)| v.to_lowercase().contains(&model) || n.to_lowercase().contains(&model)))
+            };
+            println!("REVIEW choices {:?}", choices.iter().map(|c| c.label(&self.roster.agents)).collect::<Vec<_>>());
+            let pick = choices.iter().position(fits).unwrap_or(0);
+            let choice = choices[pick].clone();
+            return self.start_review(&id, choice, subject, instruction.to_string(), window, cx);
+        }
+        self.close_overlays(window, cx);
+        self.prev_focus = window.focused(cx);
+        let input = cx.new(|cx| TextInput::new("Optional: what should the reviewer look at?", cx));
+        let sub = cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, window, cx| match ev {
+            InputEvent::Confirm { .. } => {
+                let Some(Overlay::Review { task, subject, choices, chosen, .. }) = this.overlay.take() else { return };
+                let instruction = input.read(cx).text.clone();
+                this.prev_focus = None;
+                this.start_review(&task, choices[chosen].clone(), subject, instruction, window, cx);
+            }
+            InputEvent::Cancel => this.close_overlays(window, cx),
+            InputEvent::Up | InputEvent::Down | InputEvent::Tab => {
+                if let Some(Overlay::Review { choices, chosen, touched, .. }) = &mut this.overlay {
+                    let n = choices.len();
+                    *chosen = if matches!(ev, InputEvent::Up) { (*chosen + n - 1) % n } else { (*chosen + 1) % n };
+                    *touched = true;
+                    cx.notify();
+                }
+            }
+            _ => {}
+        });
+        self._subs.push(sub);
+        let logins = self.review_logins.clone();
+        let signed_in = |d: &AgentDef| logins.as_ref().is_some_and(|l| l.get(&review::vendor(d)) == Some(&true));
+        let chosen = review::default_choice(&choices, &self.roster.agents, &task_agent, signed_in);
+        // First time: ask the CLIs who's signed in (they're slow), then move
+        // the default to the other vendor if you haven't picked yet.
+        if self.review_logins.is_none() {
+            let mut clis: Vec<String> = choices.iter().map(|c| review::vendor(&self.roster.agents[c.agent])).collect();
+            clis.dedup();
+            let bg = cx.background_executor().clone();
+            cx.spawn_in(window, async move |this, cx| {
+                let logins = bg
+                    .spawn(async move {
+                        clis.into_iter()
+                            .filter(|c| c == "claude" || c == "codex")
+                            .map(|c| {
+                                let ok = matches!(crate::doctor::login(&c), crate::doctor::Login::In(_));
+                                (c, ok)
+                            })
+                            .collect::<HashMap<_, _>>()
+                    })
+                    .await;
+                this.update(cx, |this, cx| {
+                    println!("REVIEW logins {logins:?}");
+                    let roster = this.roster.agents.clone();
+                    if let Some(Overlay::Review { choices, chosen, touched: false, task, .. }) = &mut this.overlay {
+                        let task_agent = this.agents.iter().find(|a| a.read(cx).record.id == *task).map(|a| a.read(cx).def.id.clone()).unwrap_or_default();
+                        *chosen = review::default_choice(choices, &roster, &task_agent, |d| logins.get(&review::vendor(d)) == Some(&true));
+                    }
+                    this.review_logins = Some(logins);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+        let f = input.read(cx).focus.clone();
+        window.focus(&f, cx);
+        self.overlay = Some(Overlay::Review { input, task: id, subject, choices, chosen, touched: false });
+        cx.notify();
+    }
+
+    /// Start the reviewer and show it.
+    fn start_review(&mut self, id: &str, choice: review::Choice, subject: Subject, instruction: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(a) = self.agent(id).cloned() else { return };
+        let Some(def) = self.roster.agents.get(choice.agent).cloned() else { return };
+        let label = choice.label(&self.roster.agents);
+        self.select(Some(Selected::Agent(id.to_string())), window, cx);
+        a.update(cx, |a, cx| a.start_review(def, choice.model, subject, instruction, window, cx));
+        Docks::update(cx, dock::Kind::Acp, |d| d.activate(dock::Panel::Session));
+        self.flash(format!("Reviewing with {label}: read-only (Qur denies its edits and commands)"), cx);
     }
 
     fn no_turn_message(&mut self, cx: &mut Context<Self>) {
@@ -3058,6 +3224,7 @@ Commits stay; {label} is told with your next message."));
         }
         let cmds: Vec<_> = commands::palette_commands().collect();
         let turns = self.selected_last_turn(cx).is_some();
+        let review = self.review_state(cx);
         let items = cmds
             .iter()
             .map(|c| {
@@ -3065,7 +3232,7 @@ Commits stay; {label} is told with your next message."));
                     commands::Tier::Ready => commands::display_keys(&c.first_keys()),
                     commands::Tier::Later(m) => format!("coming in {m}"),
                 };
-                let available = turns || !commands::needs_turn(c);
+                let available = (turns || !commands::needs_turn(c)) && commands::review_available(c, review);
                 PickItem::new(format!("{}: {}", c.category, c.title)).right(right).enabled(c.ready() && available)
             })
             .collect();
@@ -3359,6 +3526,14 @@ Commits stay; {label} is told with your next message."));
             let turns = self.agent(id).is_some_and(|a| a.read(cx).record.last_turn().is_some());
             items.push(("Show Last Turn's Changes", || Box::new(qur::ShowLastTurn), turns, false));
             items.push(("Rewind Last Turn…", || Box::new(qur::RewindLastTurn), turns, false));
+            let review = self.agent(id).map(|a| {
+                let a = a.read(cx);
+                (a.plan_text().is_some(), a.has_findings(cx))
+            });
+            let (plan, findings) = review.unwrap_or_default();
+            items.push(("Review Agent's Work…", || Box::new(qur::ReviewWork), true, false));
+            items.push(("Review Agent's Plan…", || Box::new(qur::ReviewPlan), plan, false));
+            items.push(("Send Review Findings to Agent", || Box::new(qur::SendReviewFindings), findings, false));
             items.push(("Stop", || Box::new(qur::StopAgent), true, false));
         }
         items.push((if in_root { "Close Agent…" } else { "Delete Agent…" }, || Box::new(qur::DiscardTask), true, true));
@@ -3945,7 +4120,7 @@ Commits stay; {label} is told with your next message."));
                     renamed: false,
                     in_root: false,
                     queued: Vec::new(),
-                    turns: Vec::new(),
+                    turns: Vec::new(), review: None,
                 };
                 this.add_term_task(record, window, cx);
                 // Show the tree without starting a terminal process.
@@ -4281,7 +4456,10 @@ Commits stay; {label} is told with your next message."));
                     this.select(Some(Selected::Agent(id.clone())), window, cx);
                     // The agent's own row shows its chat, not a subagent's log.
                     if let Some(a) = this.agent(&id).cloned() {
-                        a.update(cx, |a, cx| a.show_subagent(None, cx));
+                        a.update(cx, |a, cx| {
+                            a.show_subagent(None, cx);
+                            a.show_review(false, cx);
+                        });
                     }
                     if ev.click_count() == 2 {
                         this.rename_agent(&qur::RenameAgent, window, cx);
@@ -4327,6 +4505,57 @@ Commits stay; {label} is told with your next message."));
                                 .on_click(cx.listener(move |_, _, _, cx| {
                                     cx.stop_propagation();
                                     agent.update(cx, |a, cx| a.stop_subagent(&sid, cx));
+                                })),
+                        )
+                    });
+                agents.push(row.into_any_element());
+            }
+            // Its reviewer (Review Agent's Work…), indented like a subagent;
+            // a click shows its chat in the agent's chat panel.
+            if let Some(r) = a.read(cx).reviewer.clone() {
+                let (title, status, findings) = {
+                    let r = r.read(cx);
+                    (r.record.title.clone(), r.status.clone(), r.findings().is_some())
+                };
+                let (open, unread) = {
+                    let a = a.read(cx);
+                    (sel && a.open_review, a.review_unread)
+                };
+                let detail = match &status {
+                    Status::Done if findings => "findings ready".to_string(),
+                    Status::Working => r.read(cx).last_line().unwrap_or_else(|| "reviewing…".into()),
+                    s => s.label(),
+                };
+                let running = matches!(status, Status::Working | Status::NeedsYou | Status::Starting);
+                let glyph = if running { "~" } else { status.glyph() };
+                let id = a.read(cx).record.id.clone();
+                let agent = a.clone();
+                let row = self
+                    .session_row(format!("review-{id}").into(), None, format!("↳ {title}"), detail, glyph, open, look)
+                    .pl(look.z(22.))
+                    .when(unread, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
+                    .on_click({
+                        let agent = agent.clone();
+                        cx.listener(move |this, _, window, cx| {
+                            this.select(Some(Selected::Agent(id.clone())), window, cx);
+                            agent.update(cx, |a, cx| a.show_review(true, cx));
+                            Docks::update(cx, dock::Kind::Acp, |d| d.activate(dock::Panel::Session));
+                        })
+                    })
+                    .when(running, |d| {
+                        d.child(
+                            div()
+                                .id(SharedString::from(format!("review-stop-{}", a.read(cx).record.id)))
+                                .flex_none()
+                                .px(look.z(4.))
+                                .rounded(look.z(3.))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(look.c(ui.hover_bg)))
+                                .text_color(look.c(ui.text_muted))
+                                .child("✕")
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.stop_propagation();
+                                    r.update(cx, |r, cx| r.stop(cx));
                                 })),
                         )
                     });
@@ -4793,6 +5022,71 @@ Commits stay; {label} is told with your next message."));
                         .into_any_element(),
                 )
             }
+            Overlay::Review { input, subject, choices, chosen, .. } => {
+                let roster = &self.roster.agents;
+                let chosen = *chosen;
+                let chips: Vec<_> = choices
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        let def = &roster[c.agent];
+                        let signed_out = self.review_logins.as_ref().and_then(|l| l.get(&review::vendor(def))) == Some(&false);
+                        let label = if signed_out { format!("{} (not signed in)", c.label(roster)) } else { c.label(roster) };
+                        div()
+                            .id(("review-chip", i))
+                            .px(look.z(8.))
+                            .py(look.z(2.))
+                            .rounded(look.z(4.))
+                            .cursor_pointer()
+                            .text_size(look.text(-1.))
+                            .text_color(look.c(if i == chosen { ui.text } else { ui.text_muted }))
+                            .when(i == chosen, |d| d.bg(look.c(ui.active_bg)))
+                            .child(label)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(Overlay::Review { chosen, touched, .. }) = &mut this.overlay {
+                                    *chosen = i;
+                                    *touched = true;
+                                    cx.notify();
+                                }
+                            }))
+                    })
+                    .collect();
+                let title = match subject {
+                    Subject::Work => "Review the agent's work",
+                    Subject::Plan => "Review the agent's plan",
+                };
+                Some(centered(
+                    div()
+                        .w(look.z(600.))
+                        .p(look.z(12.))
+                        .flex()
+                        .flex_col()
+                        .gap(look.z(10.))
+                        .bg(look.c(ui.overlay_bg))
+                        .border_1()
+                        .border_color(look.c(ui.border_strong))
+                        .rounded(look.z(8.))
+                        .child(div().font_weight(gpui::FontWeight::MEDIUM).child(title))
+                        .child(div().flex().flex_wrap().items_center().gap(look.z(6.)).child(div().text_size(look.text(-1.)).text_color(look.c(ui.text_muted)).child("Reviewer")).children(chips))
+                        .child(
+                            div()
+                                .px(look.z(8.))
+                                .py(look.z(6.))
+                                .rounded(look.z(4.))
+                                .border_1()
+                                .border_color(look.c(ui.border))
+                                .bg(look.c(ui.editor_bg))
+                                .child(input.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(look.text(-2.))
+                                .text_color(look.c(ui.text_muted))
+                                .child("↩ start · ↑↓ reviewer · esc cancel. It reads the task's diff and chat in the same worktree, on the reviewer's own account (one more session's usage). Read-only: Qur denies every edit or command it asks for and starts it in plan or read-only mode; that's Qur's rule, not an OS sandbox."),
+                        )
+                        .into_any_element(),
+                ))
+            }
         }
     }
 
@@ -5180,6 +5474,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::review_changes))
             .on_action(cx.listener(Self::show_last_turn))
             .on_action(cx.listener(Self::rewind_last_turn))
+            .on_action(cx.listener(Self::review_work))
+            .on_action(cx.listener(Self::review_plan))
+            .on_action(cx.listener(Self::send_review_findings))
             .on_action(cx.listener(Self::keep_working))
             .on_action(cx.listener(Self::cycle_layout))
             .on_action(cx.listener(Self::layout_a))

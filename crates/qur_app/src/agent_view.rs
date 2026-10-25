@@ -17,8 +17,10 @@ use qur_acp::{
     PlanEntry, PlanStatus, PromptBlock, RequestId, SessionId, SessionUpdate, StopReason, ToolCall, ToolCallId, ToolCallUpdate,
     ToolContent, ToolKind, ToolStatus,
 };
-use qur_agents::{AgentDef, QueuedMessage, TaskRecord};
+use qur_agents::{AgentDef, QueuedMessage, ReviewLink, TaskRecord};
 use qur_theme::Rgba;
+
+use crate::review::{self, Subject};
 
 use crate::browser_view::{Attachment, BrowserPane, BrowserPaneEvent, base64};
 use crate::commands::agent as aa;
@@ -105,6 +107,20 @@ pub enum AgentEvent {
     Rewind(u32),
     /// A turn started, ended or was rewound (menus).
     TurnsChanged,
+    /// The task's reviewer started, changed state or went away (save, sidebar).
+    Review,
+}
+
+/// What makes an `AgentTask` a reviewer: a second-opinion session on
+/// another task, in that task's worktree, kept read-only by Qur (every
+/// permission request denied, plan / read-only mode). Not an OS sandbox.
+#[derive(Clone, Debug)]
+pub struct ReviewRole {
+    pub subject: Subject,
+    /// The model to switch to once the session is open (None: its default).
+    pub model: Option<String>,
+    /// For the sidebar: "codex", "opus".
+    pub short: String,
 }
 
 #[derive(Clone)]
@@ -303,11 +319,28 @@ pub struct AgentTask {
     rewind_note: Option<String>,
     /// A Rewind is restoring files: messages wait.
     rewinding: bool,
+    /// Set when this task is itself a reviewer (see `ReviewRole`).
+    pub review: Option<ReviewRole>,
+    /// This task's reviewer (Review Agent's Work…), shown under it in the sidebar.
+    pub reviewer: Option<Entity<AgentTask>>,
+    /// The stage's chat panel shows the reviewer instead of the chat.
+    pub open_review: bool,
+    /// The reviewer finished while you weren't looking at it.
+    pub review_unread: bool,
+    _review_subs: Vec<Subscription>,
     _events: Option<Task<()>>,
     _subs: Vec<Subscription>,
 }
 
 impl EventEmitter<AgentEvent> for AgentTask {}
+
+/// The views a task shows besides its chat (a reviewer borrows its task's).
+struct Parts {
+    monitor: Entity<TaskMonitor>,
+    live: Entity<LivePane>,
+    browser: Entity<BrowserPane>,
+    changes: Entity<ChangesView>,
+}
 
 impl AgentTask {
     #[allow(clippy::too_many_arguments)]
@@ -328,7 +361,6 @@ impl AgentTask {
             }
             ChangesEvent::Open(p, line) => cx.emit(AgentEvent::OpenFile(p.clone(), *line)),
         });
-        let wt = record.worktree.clone();
         let monitor = cx.new(|cx| TaskMonitor::new(record.worktree.clone(), record.base.clone(), accent, record.in_root, cx));
         let label = def.label.clone();
         let live = cx.new(|cx| LivePane::new(monitor.clone(), label, wrap, tab, window, cx));
@@ -364,7 +396,39 @@ impl AgentTask {
                 cx.emit(AgentEvent::Changed);
             }
         });
-        let prompt = cx.new(|cx| PromptInput::new(format!("Ask {}…  (@ to mention a file)", def.label), wt, cx));
+        let parts = Parts { monitor, live, browser, changes };
+        Self::build(record, def, accent, layout, project_root, parts, None, vec![live_sub, monitor_sub, browser_sub, files_sub, changes_sub], window, cx)
+    }
+
+    /// A reviewer for `parent` (Review Agent's Work…): its own agent process
+    /// and chat, in the parent's worktree. It shares the parent's heatmap,
+    /// Live, Browser and Changes views (no second file watcher), and makes
+    /// no turn checkpoints (it doesn't change files).
+    pub fn new_reviewer(parent: &AgentTask, record: TaskRecord, def: AgentDef, role: ReviewRole, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let parts = Parts { monitor: parent.monitor.clone(), live: parent.live.clone(), browser: parent.browser.clone(), changes: parent.changes.clone() };
+        Self::build(record, def, parent.accent, parent.layout, parent.project_root.clone(), parts, Some(role), Vec::new(), window, cx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        record: TaskRecord,
+        def: AgentDef,
+        accent: Rgba,
+        layout: Layout,
+        project_root: PathBuf,
+        parts: Parts,
+        review: Option<ReviewRole>,
+        mut subs: Vec<Subscription>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let Parts { monitor, live, browser, changes } = parts;
+        let wt = record.worktree.clone();
+        let placeholder = match &review {
+            Some(_) => format!("Ask {} a follow-up (read-only)…", def.label),
+            None => format!("Ask {}…  (@ to mention a file)", def.label),
+        };
+        let prompt = cx.new(|cx| PromptInput::new(placeholder, wt, cx));
         let sub = cx.subscribe_in(&prompt, window, |this, _, ev: &PromptEvent, _, cx| match ev {
             PromptEvent::Submit => this.submit(cx),
             PromptEvent::Cancel => this.stop(cx),
@@ -430,8 +494,16 @@ impl AgentTask {
             rewind_after_stop: None,
             rewind_note: None,
             rewinding: false,
+            review,
+            reviewer: None,
+            open_review: false,
+            review_unread: false,
+            _review_subs: Vec::new(),
             _events: None,
-            _subs: vec![sub, live_sub, monitor_sub, browser_sub, files_sub, changes_sub],
+            _subs: {
+                subs.push(sub);
+                subs
+            },
         }
     }
 
@@ -604,6 +676,7 @@ impl AgentTask {
     fn open_session(&mut self, client: Client, cx: &mut Context<Self>) {
         let saved = self.record.session_id.clone().filter(|_| self.load_session).map(SessionId::from);
         let cwd = self.record.worktree.clone();
+        let role = self.review.clone();
         cx.spawn(async move |this, cx| {
             let session = match saved {
                 Some(id) => match client.load_session(&id, &cwd).await {
@@ -620,6 +693,12 @@ impl AgentTask {
                     Ok(Err(e)) => return this.update(cx, |t, cx| t.fail(format!("session/new: {e}"), cx)).ok(),
                     Err(_) => return this.update(cx, |t, cx| t.fail("agent exited during start".into(), cx)).ok(),
                 },
+            };
+            // A reviewer goes to its read-only mode and its model before
+            // anything is sent (also after a restart: modes aren't saved).
+            let settings = match &role {
+                Some(role) => review_setup(&client, &session, settings, role).await,
+                None => settings,
             };
             this.update(cx, |t, cx| {
                 t.sign_in = None;
@@ -836,7 +915,10 @@ impl AgentTask {
         let active = matches!(s, Status::Working | Status::NeedsYou);
         // A thought that was streaming folds when the turn stops.
         self.remeasure_last_thought();
-        self.monitor.update(cx, |m, _| m.set_turn_active(active));
+        // A reviewer shares its task's heatmap but never owns its turn.
+        if self.review.is_none() {
+            self.monitor.update(cx, |m, _| m.set_turn_active(active));
+        }
         if self.status != s {
             self.status = s;
             cx.emit(AgentEvent::Changed);
@@ -1035,8 +1117,10 @@ impl AgentTask {
         // Checkpoint the worktree before the agent can touch it, then send.
         let wt = self.record.worktree.clone();
         let bg = cx.background_executor().clone();
+        // A reviewer changes no files: no checkpoints, no turn refs.
+        let checkpoint = self.review.is_none();
         cx.spawn(async move |this, cx| {
-            let start = bg.spawn(async move { qur_git::snapshot_tree(&wt) }).await;
+            let start = if checkpoint { bg.spawn(async move { qur_git::snapshot_tree(&wt) }).await } else { Err(String::new()) };
             let Ok(rx) = this.update(cx, |t, cx| {
                 t.begin_turn(start, cx);
                 client.prompt(&session, blocks)
@@ -1113,7 +1197,15 @@ impl AgentTask {
         if !matches!(self.status, Status::Error(_)) {
             self.set_status(Status::Stopped, cx);
         }
-        handle
+        // The task's reviewer stops with it.
+        let reviewer = self.reviewer.clone().and_then(|r| r.update(cx, |r, cx| r.shutdown(cx)));
+        match (handle, reviewer) {
+            (Some(a), Some(b)) => Some(std::thread::spawn(move || {
+                let _ = a.join();
+                let _ = b.join();
+            })),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Answer by kind (the Agent menu's Allow Once / Allow for This Task / Deny).
@@ -1188,6 +1280,10 @@ impl AgentTask {
 
     /// Shift+Tab: the next mode, as in Claude Code's own terminal UI.
     fn cycle_mode(&mut self, _: &aa::CycleMode, _: &mut Window, cx: &mut Context<Self>) {
+        // A reviewer stays in its read-only mode.
+        if self.review.is_some() {
+            return;
+        }
         let Some(o) = self.settings.iter().find(|o| o.is_mode()) else { return };
         if let Some(next) = o.next_value().map(str::to_string) {
             let id = o.id.clone();
@@ -1237,7 +1333,12 @@ impl AgentTask {
                 SessionUpdate::UserMessage(c) => {
                     // Replayed history (session/load).
                     match self.chat.last_mut() {
-                        Some(ChatItem::User(s)) if self.status == Status::Starting => s.push_str(&c.text),
+                        // A reviewer's later blocks are the diff and chat it was sent: not shown again.
+                        Some(ChatItem::User(s)) if self.status == Status::Starting => {
+                            if self.review.is_none() {
+                                s.push_str(&c.text)
+                            }
+                        }
                         _ => self.push(ChatItem::User(c.text)),
                     }
                 }
@@ -1246,12 +1347,15 @@ impl AgentTask {
                     let paths: Vec<PathBuf> = t.locations.iter().map(|l| l.path.clone()).collect();
                     let (k, st) = (heat_kind(t.kind), heat_status(t.status));
                     let lines: Vec<(PathBuf, u32)> = t.locations.iter().filter_map(|l| Some((l.path.clone(), l.line?))).collect();
-                    self.monitor.update(cx, |m, cx| {
-                        m.on_tool(&id, Some(k), Some(st), &paths, cx);
-                        for (p, l) in &lines {
-                            m.tool_line(&id, p, *l);
-                        }
-                    });
+                    // A reviewer's reads aren't the task agent's work: no heat.
+                    if self.review.is_none() {
+                        self.monitor.update(cx, |m, cx| {
+                            m.on_tool(&id, Some(k), Some(st), &paths, cx);
+                            for (p, l) in &lines {
+                                m.tool_line(&id, p, *l);
+                            }
+                        });
+                    }
                     self.tools.insert(id.clone(), t);
                     self.push(ChatItem::Tool(id.clone()));
                     self.track_turn_tool(id);
@@ -1261,12 +1365,14 @@ impl AgentTask {
                     let paths: Vec<PathBuf> = u.locations.iter().flatten().map(|l| l.path.clone()).collect();
                     let (k, st) = (u.kind.map(heat_kind), u.status.map(heat_status));
                     let lines: Vec<(PathBuf, u32)> = u.locations.iter().flatten().filter_map(|l| Some((l.path.clone(), l.line?))).collect();
-                    self.monitor.update(cx, |m, cx| {
-                        m.on_tool(&id, k, st, &paths, cx);
-                        for (p, l) in &lines {
-                            m.tool_line(&id, p, *l);
-                        }
-                    });
+                    if self.review.is_none() {
+                        self.monitor.update(cx, |m, cx| {
+                            m.on_tool(&id, k, st, &paths, cx);
+                            for (p, l) in &lines {
+                                m.tool_line(&id, p, *l);
+                            }
+                        });
+                    }
                     match self.tools.get_mut(&id) {
                         Some(t) => t.apply(&u),
                         None => {
@@ -1311,6 +1417,22 @@ impl AgentTask {
                 }
                 _ => {}
             },
+            // A reviewer is read-only: whatever it asks to do is denied at
+            // once, and no permission bar shows. Its chat says what was denied.
+            Event::Permission { id, tool_call, options, .. } if self.review.is_some() => {
+                let what = tool_call
+                    .title
+                    .clone()
+                    .or_else(|| self.tools.get(&tool_call.id).map(|t| t.title.clone()))
+                    .filter(|t| !t.trim().is_empty())
+                    .unwrap_or_else(|| "a tool".into());
+                let reply = review::deny_option(&options);
+                println!("REVIEW {} denied {:?} \"{what}\" with {}", self.record.id, tool_call.kind, reply.as_deref().unwrap_or("cancel"));
+                if let Some(c) = &self.client {
+                    c.respond_permission(id, reply.map_or(PermissionOutcome::Cancelled, PermissionOutcome::Selected));
+                }
+                self.push(ChatItem::Notice(format!("Qur denied “{what}”: reviews are read-only.")));
+            }
             Event::Permission { id, tool_call, options, .. } => {
                 let paths: Vec<PathBuf> = tool_call.locations.iter().flatten().map(|l| l.path.clone()).collect();
                 self.monitor.update(cx, |m, cx| m.on_permission(&paths, true, cx));
@@ -1920,6 +2042,43 @@ const MAX_TOOL_LINES: usize = 200;
 const MAX_STDERR_LINES: usize = 80;
 
 /// `s` quoted for a POSIX shell when it needs it.
+/// A reviewer's session settings: its read-only mode (`plan`, or Codex's
+/// read-only), then the model picked for it. Returns the settings as the
+/// agent now has them. A refusal is logged; Qur's deny still applies.
+async fn review_setup(client: &Client, session: &SessionId, mut settings: Vec<ConfigOption>, role: &ReviewRole) -> Vec<ConfigOption> {
+    let mut wanted: Vec<(String, String)> = Vec::new();
+    match review::read_only_mode(&settings) {
+        Some(m) => wanted.push(m),
+        None => println!("REVIEW {session} no read-only mode offered: Qur's deny is all there is"),
+    }
+    if let Some(m) = &role.model
+        && let Some(o) = review::model_option(&settings)
+        && o.current != *m
+        && o.values.iter().any(|v| v.value == *m)
+    {
+        wanted.push((o.id.clone(), m.clone()));
+    }
+    for (id, value) in wanted {
+        let Some(opt) = settings.iter().find(|o| o.id == id).cloned() else { continue };
+        match client.set_option(session, &opt, &value).await {
+            Ok(Ok(Some(list))) => {
+                let legacy = settings.iter().find(|o| o.legacy_mode).cloned().filter(|_| !list.iter().any(ConfigOption::is_mode));
+                settings = legacy.into_iter().chain(list).collect();
+                println!("REVIEW {session} set {id}={value}");
+            }
+            Ok(Ok(None)) => {
+                if let Some(o) = settings.iter_mut().find(|o| o.id == id) {
+                    o.current = value.clone();
+                }
+                println!("REVIEW {session} set {id}={value}");
+            }
+            Ok(Err(e)) => eprintln!("REVIEW {session} couldn't set {id}={value}: {e}"),
+            Err(_) => {}
+        }
+    }
+    settings
+}
+
 fn shell_quote(s: &str) -> String {
     if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-=:@%+,".contains(c)) {
         return s.to_string();
@@ -2056,6 +2215,9 @@ impl AgentTask {
     /// To-do + Chat + permission bar + prompt (the "side notes").
     /// Show a subagent's work in place of the chat (`None`: back to the chat).
     pub fn show_subagent(&mut self, id: Option<SessionId>, cx: &mut Context<Self>) {
+        if id.is_some() {
+            self.open_review = false;
+        }
         self.open_subagent = id;
         cx.notify();
     }
@@ -2121,6 +2283,11 @@ impl AgentTask {
     }
 
     fn notes(&self, show_plan: bool, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        if self.open_review
+            && let Some(r) = &self.reviewer
+        {
+            return self.review_view(r, look, cx);
+        }
         if let Some(sub) = self.open_subagent.as_ref().and_then(|id| self.subagents.iter().find(|s| s.id == *id)) {
             return self.subagent_view(sub, look, cx);
         }
@@ -2360,7 +2527,9 @@ impl AgentTask {
         let start = match start {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("TURN {} no checkpoint: {e}", self.record.id);
+                if self.review.is_none() {
+                    eprintln!("TURN {} no checkpoint: {e}", self.record.id);
+                }
                 self.turn_n = None;
                 return;
             }
@@ -2575,6 +2744,281 @@ impl AgentTask {
     }
 }
 
+// -- second-opinion review ------------------------------------------------------
+
+impl AgentTask {
+    /// The chat for a reviewer: messages and tool calls, oldest first.
+    pub fn thread_entries(&self) -> Vec<review::Entry> {
+        self.chat
+            .iter()
+            .filter_map(|c| match c {
+                ChatItem::User(t) => Some(review::Entry::new(review::Role::User, t.clone())),
+                ChatItem::Agent(t) => Some(review::Entry::new(review::Role::Agent, t.clone())),
+                ChatItem::Tool(id) => self.tools.get(id).map(|t| {
+                    let at = t.locations.first().map(|l| format!(" ({})", self.rel(&l.path))).unwrap_or_default();
+                    review::Entry::new(review::Role::Tool, format!("{}{at}", t.title))
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The agent's plan (its To-do), one line per step; None without one.
+    pub fn plan_text(&self) -> Option<String> {
+        (!self.plan.is_empty()).then(|| {
+            self.plan
+                .iter()
+                .map(|e| {
+                    let mark = match e.status {
+                        PlanStatus::Completed => "[x]",
+                        PlanStatus::InProgress => "[~]",
+                        PlanStatus::Pending => "[ ]",
+                    };
+                    format!("- {mark} {}", e.content.trim())
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    }
+
+    /// A reviewer's findings: what it said since the last message it was
+    /// sent. None while it's working or before it has said anything.
+    pub fn findings(&self) -> Option<String> {
+        if matches!(self.status, Status::Working | Status::NeedsYou | Status::Starting) {
+            return None;
+        }
+        let from = self.chat.iter().rposition(|c| matches!(c, ChatItem::User(_))).map_or(0, |i| i + 1);
+        let text = self.chat[from..]
+            .iter()
+            .filter_map(|c| match c {
+                ChatItem::Agent(t) => Some(t.trim()),
+                _ => None,
+            })
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Review Agent's Work… / Plan…: start a reviewer (replacing an earlier
+    /// one) and send it the task's diff, chat (and plan) once its session is open.
+    pub fn start_review(&mut self, def: AgentDef, model: Option<(String, String)>, subject: Subject, instruction: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_review(cx);
+        let (model, model_name) = model.unzip();
+        let link = ReviewLink { agent: def.id.clone(), model, model_name, subject: subject.as_str().into(), session_id: None, created: qur_agents::now_secs() };
+        self.record.review = Some(link.clone());
+        let r = self.attach_reviewer(&link, def, window, cx);
+        let thread = review::serialize_thread(&self.thread_entries(), review::THREAD_CAP);
+        let plan = if subject == Subject::Plan { self.plan_text() } else { None };
+        let (wt, base) = (self.record.worktree.clone(), self.record.base.clone());
+        println!("REVIEW {} start {} subject={} thread={}B", self.record.id, r.read(cx).record.title, subject.as_str(), thread.len());
+        self.open_review = true;
+        self.review_unread = false;
+        cx.emit(AgentEvent::Review);
+        cx.notify();
+        let weak = r.downgrade();
+        let bg = cx.background_executor().clone();
+        cx.spawn(async move |_, cx| {
+            let files = {
+                let (wt, base) = (wt.clone(), base.clone());
+                bg.spawn(async move { qur_git::task_diff(&wt, &base) }).await
+            };
+            let (diff, summary) = match &files {
+                Ok(f) => {
+                    let (a, d) = f.iter().fold((0, 0), |(a, d), f| (a + f.added, d + f.removed));
+                    (review::diff_text(f, review::DIFF_CAP), format!("diff: {} file(s) +{a} −{d}", f.len()))
+                }
+                Err(e) => (format!("(Qur couldn't compute the diff: {e})"), "no diff".to_string()),
+            };
+            let prompt = review::review_prompt(subject, &thread, &base, &diff, plan.as_deref(), &instruction);
+            let mut text = match subject {
+                Subject::Work => "Review the agent's work.".to_string(),
+                Subject::Plan => "Review the agent's plan.".to_string(),
+            };
+            if !instruction.trim().is_empty() {
+                text = format!("{text} {}", instruction.trim());
+            }
+            let labels = vec![summary, format!("chat: {} KB", thread.len().div_ceil(1024))];
+            println!("REVIEW prompt {} bytes ({})", prompt.len(), labels.join(", "));
+            weak.update(cx, |r, cx| r.send_out(Outgoing { text, mentions: Vec::new(), context: vec![prompt], labels, images: Vec::new() }, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Make the reviewer for `link` (a new review, or one saved in tasks.toml,
+    /// which stays stopped until you send it something).
+    pub fn attach_reviewer(&mut self, link: &ReviewLink, def: AgentDef, window: &mut Window, cx: &mut Context<Self>) -> Entity<AgentTask> {
+        let short = review::short_name(&def, link.model_name.as_deref());
+        let role = ReviewRole { subject: Subject::parse(&link.subject), model: link.model.clone(), short: short.clone() };
+        let mut record = self.record.clone();
+        record.id = format!("{}~review", self.record.id);
+        record.agent = def.id.clone();
+        record.title = format!("review · {short}");
+        record.renamed = true;
+        record.session_id = link.session_id.clone();
+        record.queued.clear();
+        record.turns.clear();
+        record.review = None;
+        let r = cx.new(|cx| AgentTask::new_reviewer(self, record, def, role, window, cx));
+        let sub = cx.subscribe(&r, |this, r, ev: &AgentEvent, cx| match ev {
+            AgentEvent::Changed => {
+                let (sid, status, bytes) = {
+                    let r = r.read(cx);
+                    (r.record.session_id.clone(), r.status.clone(), r.findings().map_or(0, |f| f.len()))
+                };
+                if let Some(link) = &mut this.record.review {
+                    link.session_id = sid;
+                }
+                if status == Status::Done {
+                    println!("REVIEW {} done: findings {bytes}B", this.record.id);
+                    if !this.open_review {
+                        this.review_unread = true;
+                    }
+                }
+                cx.emit(AgentEvent::Review);
+                cx.notify();
+            }
+            AgentEvent::OpenFile(p, line) => cx.emit(AgentEvent::OpenFile(p.clone(), *line)),
+            AgentEvent::RunInTerminal { label, command } => cx.emit(AgentEvent::RunInTerminal { label: label.clone(), command: command.clone() }),
+            _ => {}
+        });
+        let obs = cx.observe(&r, |_, _, cx| cx.notify());
+        self._review_subs = vec![sub, obs];
+        self.reviewer = Some(r.clone());
+        r
+    }
+
+    /// Stop the reviewer and forget it (its row and its link in tasks.toml).
+    pub fn close_review(&mut self, cx: &mut Context<Self>) {
+        self._review_subs.clear();
+        if let Some(r) = self.reviewer.take() {
+            // Shuts down on a thread of its own; nothing to wait for.
+            drop(r.update(cx, |r, cx| r.shutdown(cx)));
+        }
+        self.open_review = false;
+        self.review_unread = false;
+        if self.record.review.take().is_some() {
+            cx.emit(AgentEvent::Review);
+        }
+        cx.notify();
+    }
+
+    /// Show the reviewer in place of the chat (its sidebar row), or the chat.
+    pub fn show_review(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.open_review = on && self.reviewer.is_some();
+        if self.open_review {
+            self.open_subagent = None;
+            self.review_unread = false;
+            // A reviewer saved from last time: start it so its chat loads
+            // (session/load). Nothing is sent.
+            if let Some(r) = &self.reviewer {
+                r.update(cx, |r, cx| {
+                    if r.status == Status::Stopped && r.record.session_id.is_some() {
+                        r.start(cx);
+                    }
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    /// The reviewer has findings to hand over (Send Findings to Agent).
+    pub fn has_findings(&self, cx: &App) -> bool {
+        self.reviewer.as_ref().is_some_and(|r| r.read(cx).findings().is_some())
+    }
+
+    /// Send Findings to Agent: the handoff prompt goes into this agent's
+    /// prompt, to edit and send (queued if the agent is busy). Before
+    /// anything you'd typed.
+    pub fn send_findings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(r) = self.reviewer.clone() else { return false };
+        let (findings, role) = {
+            let r = r.read(cx);
+            (r.findings(), r.review.clone())
+        };
+        let (Some(findings), Some(role)) = (findings, role) else { return false };
+        let text = review::handoff_prompt(role.subject, &role.short, &findings);
+        println!("REVIEW {} handoff {}B into the prompt", self.record.id, text.len());
+        self.prompt.update(cx, |p, cx| {
+            let typed = p.text.trim().to_string();
+            let text = if typed.is_empty() { text } else { format!("{text}\n\n{typed}") };
+            p.set_text(&text, cx);
+        });
+        self.open_review = false;
+        self.follow_bottom();
+        let f = self.prompt.read(cx).focus.clone();
+        window.focus(&f, cx);
+        cx.notify();
+        true
+    }
+
+    /// The reviewer in the chat panel: a bar (back, its name and state,
+    /// Send Findings, Stop or Close), the read-only note, then its chat.
+    fn review_view(&self, r: &Entity<AgentTask>, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = &look.theme.ui;
+        let (title, status, findings) = {
+            let r = r.read(cx);
+            (r.record.title.clone(), r.status.clone(), r.findings().is_some())
+        };
+        let working = matches!(status, Status::Working | Status::NeedsYou | Status::Starting);
+        let button = |label: &'static str, key: &'static str| {
+            div().id(key).flex_none().px(look.z(8.)).py(look.z(2.)).rounded(look.z(4.)).cursor_pointer().bg(look.c(ui.button_bg)).text_color(look.c(ui.button_text)).child(label)
+        };
+        let mut tint = look.c(self.accent);
+        tint.a = 0.22;
+        let reviewer = r.clone();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_none()
+                    .px(look.z(16.))
+                    .py(look.z(8.))
+                    .flex()
+                    .items_center()
+                    .gap(look.z(8.))
+                    .border_b_1()
+                    .border_color(look.c(ui.border))
+                    .child(button("← Chat", "review-back").on_click(cx.listener(|t, _, _, cx| t.show_review(false, cx))))
+                    .child(div().flex_1().min_w(px(0.)).truncate().font_weight(gpui::FontWeight::MEDIUM).child(format!("↳ {title}")))
+                    .child(div().flex_none().text_color(look.c(if matches!(status, Status::Error(_)) { ui.error } else { ui.text_muted })).child(status.label()))
+                    .when(findings && !working, |d| {
+                        d.child(
+                            div()
+                                .id("review-send")
+                                .flex_none()
+                                .px(look.z(8.))
+                                .py(look.z(2.))
+                                .rounded(look.z(4.))
+                                .cursor_pointer()
+                                .border_1()
+                                .border_color(look.c(self.accent))
+                                .bg(tint)
+                                .text_color(look.c(ui.text))
+                                .child("Send Findings to Agent")
+                                .on_click(cx.listener(|t, _, window, cx| {
+                                    t.send_findings(window, cx);
+                                })),
+                        )
+                    })
+                    .when(working, |d| d.child(button("Stop", "review-stop").on_click(move |_, _, cx| reviewer.update(cx, |r, cx| r.stop(cx)))))
+                    .when(!working, |d| d.child(button("Close", "review-close").on_click(cx.listener(|t, _, _, cx| t.close_review(cx))))),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .px(look.z(16.))
+                    .py(look.z(4.))
+                    .text_size(look.text(-2.))
+                    .text_color(look.c(ui.text_muted))
+                    .child("Read-only review: Qur denies every edit or command it asks to run, and starts it in its plan or read-only mode. This is Qur's own rule, not an OS sandbox."),
+            )
+            .child(div().flex_1().min_h(px(0.)).child(r.clone()))
+    }
+}
+
 impl Render for AgentTask {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
@@ -2584,6 +3028,20 @@ impl Render for AgentTask {
             self.list.remeasure();
         }
         let ui = look.theme.ui.clone();
+        // A reviewer is shown inside its task's chat panel (`review_view`):
+        // just its chat and prompt.
+        if self.review.is_some() {
+            return div()
+                .key_context("AgentView")
+                .track_focus(&self.focus)
+                // Shift+Tab here mustn't reach the task's own mode.
+                .on_action(cx.listener(Self::cycle_mode))
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(self.notes(true, &look, cx).flex_1().min_h(px(0.)))
+                .into_any_element();
+        }
         let header = self.header(&look, cx);
         // The stage is a dock you can rearrange (dock.rs).
         let todo_shown = Docks::get(cx, Kind::Acp).is_visible(Panel::Todo);
@@ -2610,6 +3068,7 @@ impl Render for AgentTask {
             .bg(look.bg(ui.editor_bg))
             .child(header)
             .child(body)
+            .into_any_element()
     }
 }
 
