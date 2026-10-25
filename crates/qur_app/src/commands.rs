@@ -24,7 +24,7 @@ pub mod qur {
             FocusPrompt, FocusInput, StopAgent, TakeOver, NextAgent, PrevAgent, ReviewChanges, Merge,
             KeepWorking, DiscardTask, OpenWorktreeInTerminal, RevealWorktree, KeyboardShortcuts,
             RunDoctor, ShowLogs, ReportProblem, ExpandSelection, ShrinkSelection,
-            RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge, Caffeinate, ShowKeepAwake, SwitchSession,
+            RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge, Caffeinate, ShowKeepAwake, SwitchSession, ZenMode,
         ]
     );
 
@@ -263,6 +263,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::ToggleTerminal, "View", "Go to Terminal", "ctrl-`", W, R),
     cmd!(qur::Caffeinate, "View", "Keep Mac Awake (caffeinate)", "", W, R),
     cmd!(qur::ShowKeepAwake, "View", "Show Keep Awake in Sidebar", "", W, R),
+    cmd!(qur::ZenMode, "View", "Zen Mode", "ctrl-cmd-z", W, R),
     cmd!(terminal::Clear, "Terminal", "Clear", "cmd-k", T, R),
     cmd!(terminal::Find, "Terminal", "Find in Terminal", "cmd-f", T, R),
     cmd!(terminal::Tile, "Terminal", "New Tiled Terminal (Grid)", "cmd-enter", W, R),
@@ -437,6 +438,7 @@ pub struct MenuState {
     pub merging: bool,
     pub vim: bool,
     pub keep_awake: bool,
+    pub zen: bool,
 }
 
 fn item(action: impl Action) -> MenuItem {
@@ -577,6 +579,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::ZoomOut),
             item(qur::ZoomReset),
             sep(),
+            item(qur::ZenMode).checked(s.zen),
             item(qur::ToggleFullScreen),
         ]),
         Menu::new("Go").items([

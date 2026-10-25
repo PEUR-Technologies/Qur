@@ -81,6 +81,7 @@ pub struct Choices {
     pub agents: Vec<AgentDef>,
     pub layout: String,
     pub vim: bool,
+    pub zen: bool,
     pub theme: String,
     pub accent: usize,
 }
@@ -102,6 +103,7 @@ pub struct SetupView {
     agents: Vec<Found>,
     layout: String,
     vim: bool,
+    zen: bool,
     theme: String,
     accent: usize,
     /// Each service's sign-in; `None` while checking.
@@ -149,6 +151,7 @@ impl SetupView {
             agents,
             layout,
             vim: config.keys.vim,
+            zen: config.ui.zen,
             theme: config.theme.clone(),
             accent: config.ui.accent % 6,
             logins: [None, None],
@@ -315,7 +318,7 @@ impl SetupView {
 
     pub fn done(&mut self, cx: &mut Context<Self>) {
         let agents = self.agents.iter().filter(|f| f.enabled).map(|f| f.def.clone()).collect();
-        cx.emit(SetupEvent::Done(Choices { agents, layout: self.layout.clone(), vim: self.vim, theme: self.theme.clone(), accent: self.accent }));
+        cx.emit(SetupEvent::Done(Choices { agents, layout: self.layout.clone(), vim: self.vim, zen: self.zen, theme: self.theme.clone(), accent: self.accent }));
     }
 }
 
@@ -552,6 +555,18 @@ impl Render for SetupView {
                 this.vim = true;
                 cx.notify();
             })));
+        // 4a. Top bar: always there, or zen mode (slides down at the top edge).
+        let top_row = div()
+            .flex()
+            .gap(look.z(8.))
+            .child(pill(("top", 0), "Zen: show at the top edge".into(), self.zen).on_click(cx.listener(|this, _, _, cx| {
+                this.zen = true;
+                cx.notify();
+            })))
+            .child(pill(("top", 1), "Always show".into(), !self.zen).on_click(cx.listener(|this, _, _, cx| {
+                this.zen = false;
+                cx.notify();
+            })));
         // 4b. Accent: the theme's palette in its own order (the look shown is
         // rotated by the accent being previewed).
         let mut palette = look.theme.accents;
@@ -662,6 +677,8 @@ impl Render for SetupView {
             .child(layout_row)
             .child(heading("Keys"))
             .child(keys_row)
+            .child(heading("Top bar"))
+            .child(top_row)
             .child(heading("Accent color"))
             .child(accent_row)
             .child(heading("Theme"))

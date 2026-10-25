@@ -130,3 +130,4 @@ These amend `docs/QUR_HANDOFF.md`. Newest last.
     - Plainer Check errors ("it stopped right after starting; try Install again").
     - With no account connected, Done reads **Skip for now** and says agents won't run until one is.
     - The in-chat sign-in callout (decision 43) stays, for logins that expire later.
+46. **Zen mode** (owner, 2026-10-25: "max out the space at the top… like in helium", "hover near edges… so i dont have to hover at the exact pixel"). Amends decision 1. View > Zen Mode `Ctrl+Cmd+Z`, saved as `[ui] zen` (on by default; Setup's **Top bar** row chooses Zen or Always show), hides the top bar and the traffic lights. Moving the mouse into the top 16 px of the window slides the bar down over 160 ms, pushing the content down; it slides away once the mouse is more than 8 px below the bar (not while dragging the window by it). The traffic lights are hidden through AppKit (`setHidden:`), since GPUI can only move them.

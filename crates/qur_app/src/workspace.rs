@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyWindowHandle, App, AppContext, Bounds, Context, Entity, FocusHandle, MouseButton, Pixels, PromptLevel,
+    Animation, AnimationExt, AnyElement, AnyWindowHandle, App, AppContext, Bounds, Context, Entity, FocusHandle, MouseButton, Pixels, PromptLevel,
     SharedString, Subscription, Task, Window, WindowAppearance, canvas, div, prelude::*, px, svg,
 };
 use qur_acp::PermissionKind;
@@ -44,6 +44,12 @@ use crate::tree_view::{TreeEvent, TreeView};
 pub const TITLEBAR_H: f32 = 32.0;
 /// Left inset that clears the traffic lights placed at (9, 9).
 const TRAFFIC_LIGHTS_W: f32 = 78.0;
+/// Zen mode: the strip at the top that shows the bar (generous, so you don't
+/// have to hit the edge pixel), and how far below the bar the mouse may
+/// wander before the bar slides away.
+const ZEN_EDGE: f32 = 16.0;
+const ZEN_SLACK: f32 = 8.0;
+const ZEN_SLIDE: Duration = Duration::from_millis(160);
 const SIDEBAR_DEFAULT_W: f32 = 280.0;
 const SIDEBAR_MIN_W: f32 = 200.0;
 const SIDEBAR_MAX_W: f32 = 560.0;
@@ -208,6 +214,10 @@ pub struct Workspace {
     title_drag: bool,
     /// Full screen hides the traffic lights, so the title bar starts at the edge.
     fullscreen: bool,
+    /// Zen mode: the top bar is slid down because the mouse reached the top edge.
+    zen_shown: bool,
+    /// Whether the traffic lights are hidden now (zen mode with the bar away).
+    lights_hidden: bool,
     first_frame: bool,
     _subs: Vec<Subscription>,
 }
@@ -320,6 +330,8 @@ impl Workspace {
             sliding: false,
             title_drag: false,
             fullscreen: false,
+            zen_shown: false,
+            lights_hidden: false,
             first_frame: false,
             _subs: subs,
         };
@@ -479,6 +491,7 @@ impl Workspace {
             merging: self.merge.is_some(),
             vim: self.config.keys.vim,
             keep_awake: self.config.ui.keep_awake,
+            zen: self.config.ui.zen,
         }
     }
 
@@ -3406,6 +3419,36 @@ impl Workspace {
         self.sync_menus(cx);
     }
 
+    /// View > Zen Mode, saved as `[ui] zen`: the top bar and traffic lights
+    /// hide and slide back down while the mouse is at the top edge.
+    fn toggle_zen(&mut self, _: &qur::ZenMode, window: &mut Window, cx: &mut Context<Self>) {
+        let on = !self.config.ui.zen;
+        self.write_setting(false, "ui.zen", Some(Value::Bool(on)), cx);
+        self.reload_settings(window, cx);
+        self.broadcast_reload(cx);
+        self.sync_menus(cx);
+        self.zen_shown = false;
+        self.flash(if on { "Zen mode on (move the mouse to the top edge for the bar)" } else { "Zen mode off" }, cx);
+    }
+
+    /// Zen mode: slide the bar down at the top edge, and away once the mouse
+    /// leaves it (not while dragging the window by it).
+    fn zen_track(&mut self, y: Pixels, window: &Window, cx: &mut Context<Self>) {
+        if !self.config.ui.zen {
+            return;
+        }
+        let zoom = Look::of(window, cx).zoom;
+        let show = if self.zen_shown {
+            self.title_drag || y <= px((TITLEBAR_H + ZEN_SLACK) * zoom)
+        } else {
+            y <= px(ZEN_EDGE * zoom)
+        };
+        if show != self.zen_shown {
+            self.zen_shown = show;
+            cx.notify();
+        }
+    }
+
     fn open_setup(&mut self, _: &qur::CheckSetup, window: &mut Window, cx: &mut Context<Self>) {
         self.close_overlays(window, cx);
         self.prev_focus = window.focused(cx);
@@ -3464,6 +3507,7 @@ impl Workspace {
                     this.write_setting(false, "peek_layout", Some(c.layout.as_str().into()), cx);
                 }
                 this.write_setting(false, "keys.vim", Some(Value::Bool(c.vim)), cx);
+                this.write_setting(false, "ui.zen", Some(Value::Bool(c.zen)), cx);
                 this.write_setting(false, "ui.accent", Some(Value::Int(c.accent as i64)), cx);
                 this.preview_accent = None;
                 if !c.agents.is_empty() {
@@ -3485,6 +3529,7 @@ impl Workspace {
                     this.set_layout(Layout::parse(&c.layout), cx);
                 }
                 this.broadcast_reload(cx);
+                this.sync_menus(cx);
                 this.restore_focus(window, cx);
                 this.flash("Setup saved", cx);
             }
@@ -3775,6 +3820,31 @@ impl Workspace {
             .children(session.map(|s| div().min_w(px(0.)).truncate().text_color(look.c(ui.text_secondary)).child(s)))
             .child(div().flex_1())
             .children(message.map(|m| div().flex_none().max_w(look.z(420.)).truncate().text_size(look.text(-1.)).text_color(look.c(ui.text_secondary)).child(m)))
+    }
+
+    /// The title bar, or in zen mode the bar sliding in and out from above:
+    /// it grows from nothing, pushing the window's content down.
+    fn top(&self, look: &Look, cx: &mut Context<Self>) -> AnyElement {
+        let bar = self.title_bar(look, cx);
+        if !self.config.ui.zen {
+            return bar.into_any_element();
+        }
+        let full = f32::from(look.z(TITLEBAR_H));
+        let shown = self.zen_shown;
+        div()
+            .w_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .justify_end()
+            .overflow_hidden()
+            .child(bar)
+            .with_animation(
+                if shown { "zen-in" } else { "zen-out" },
+                Animation::new(ZEN_SLIDE).with_easing(gpui::ease_out_quint()),
+                move |d, t| d.h(px(full * if shown { t } else { 1. - t })),
+            )
+            .into_any_element()
     }
 
     fn section_header(&self, label: SharedString, look: &Look) -> gpui::Div {
@@ -4629,6 +4699,11 @@ const CONFIG_TEMPLATE: &str = r#"# Qur settings. Saved changes apply right away.
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.fullscreen = window.is_fullscreen();
+        let zen_hidden = self.config.ui.zen && !self.zen_shown;
+        if zen_hidden != self.lights_hidden {
+            self.lights_hidden = zen_hidden;
+            set_traffic_lights_hidden(window, zen_hidden);
+        }
         let look = Look::of(window, cx);
         let ui = look.theme.ui.clone();
         if !self.first_frame {
@@ -4764,6 +4839,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_setup))
             .on_action(cx.listener(Self::toggle_vim))
             .on_action(cx.listener(Self::toggle_keep_awake))
+            .on_action(cx.listener(Self::toggle_zen))
             .on_action(cx.listener(Self::run_doctor))
             .on_action(cx.listener(Self::keyboard_shortcuts))
             .on_action(cx.listener(Self::show_logs))
@@ -4812,6 +4888,7 @@ impl Render for Workspace {
             }))
             // Sidebar resizing and the accent sliders follow the mouse anywhere in the window.
             .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, window, cx| {
+                this.zen_track(ev.position.y, window, cx);
                 if let Some(which) = this.tuning {
                     if ev.pressed_button == Some(MouseButton::Left) {
                         this.tune_to(which, ev.position.x, window, cx);
@@ -4837,7 +4914,7 @@ impl Render for Workspace {
                     this.save_tune(tune, window, cx);
                 }
             }))
-            .child(self.title_bar(&look, cx))
+            .child(self.top(&look, cx))
             .child(body)
             .children(self.code_modal(&look, cx))
             .when(any_overlay, |d| {
@@ -4969,3 +5046,33 @@ mod tests {
         assert_eq!(local_port("http://localhost"), None);
     }
 }
+
+/// Hide or show the close, minimize and zoom buttons (zen mode). GPUI only
+/// moves them, so this asks AppKit directly.
+#[cfg(target_os = "macos")]
+fn set_traffic_lights_hidden(window: &Window, hidden: bool) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+    // SAFETY: on the main thread, with GPUI's live content view; `window` and
+    // `standardWindowButton:` may return nil, which is checked.
+    unsafe {
+        let view = h.ns_view.as_ptr().cast::<AnyObject>();
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        // NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton.
+        for kind in 0usize..3 {
+            let button: *mut AnyObject = msg_send![ns_window, standardWindowButton: kind];
+            if !button.is_null() {
+                let _: () = msg_send![button, setHidden: hidden];
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_traffic_lights_hidden(_: &Window, _: bool) {}

@@ -18,6 +18,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+Shift+W` | Close Window | File | S |
 | `Cmd+M` | Minimize | Window | S |
 | `Ctrl+Cmd+F` | Toggle Full Screen | View | S |
+| `Ctrl+Cmd+Z` | Zen Mode (hide the top bar until the mouse nears the top) | View | ✅ |
 | `Cmd+Shift+P` / `F1` | Command Palette | View | S |
 | `Cmd+K Cmd+T` | Theme Picker | Qur | M1 |
 | `Cmd+B` | Toggle Sidebar | View | S |

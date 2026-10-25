@@ -74,6 +74,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Soft Wrap `Opt+Z` (checkmark)
 - Zoom In `Cmd+=` · Zoom Out `Cmd+-` · Reset Zoom `Cmd+0`
 - ---
+- Zen Mode `Ctrl+Cmd+Z` (checkmark)
 - Enter Full Screen `Ctrl+Cmd+F`
 
 ## Go
