@@ -46,8 +46,9 @@ impl Workspace {
         let u = &self.config.ui;
         let gaps = format!("on={} gap={} rounded={} radius={} border={} sidebar_w={}", u.gaps, u.gap, u.rounded, u.radius, u.tile_border, self.sidebar_w);
         let sidebar = format!("on={} mode={} side={} shown={} visible={} sections={}", self.sidebar, u.sidebar, u.sidebar_side, self.sidebar_shown, self.sidebar_visible(), u.sidebar_sections.join(","));
+        let viewer = self.viewer.as_ref().map_or_else(|| "none".into(), |v| v.debug_state());
         format!(
-            "overlay={overlay} selected={selected} code={code} term={{{}}} git={{{vc}}} docks={{{docks}}} gaps={{{gaps}}} sidebar={{{sidebar}}}",
+            "overlay={overlay} selected={selected} code={code} viewer={viewer} term={{{}}} git={{{vc}}} docks={{{docks}}} gaps={{{gaps}}} sidebar={{{sidebar}}}",
             self.terms.read(cx).debug_state(cx)
         )
     }

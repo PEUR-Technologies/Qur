@@ -98,7 +98,7 @@ impl AgentTask {
             }
             let labels = vec![summary, format!("chat: {} KB", thread.len().div_ceil(1024))];
             println!("REVIEW prompt {} bytes ({})", prompt.len(), labels.join(", "));
-            weak.update(cx, |r, cx| r.send_out(Outgoing { text, mentions: Vec::new(), context: vec![prompt], labels, images: Vec::new() }, cx)).ok();
+            weak.update(cx, |r, cx| r.send_out(Outgoing { text, mentions: Vec::new(), context: vec![prompt], labels, images: Vec::new(), files: Vec::new() }, cx)).ok();
         })
         .detach();
     }

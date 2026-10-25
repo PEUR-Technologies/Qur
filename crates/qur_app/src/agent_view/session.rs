@@ -318,12 +318,15 @@ impl AgentTask {
         self.follow_bottom();
         let mut out = Outgoing::plain(if text.trim().is_empty() { "Adjust this.".into() } else { text }, mentions);
         for a in atts {
-            out.labels.push(a.label.to_string());
+            // Picks show by name in the message; images and files as their own row under it.
             if !a.context.is_empty() {
+                out.labels.push(a.label.to_string());
                 out.context.push(a.context);
             }
-            if let Some(png) = a.png {
-                out.images.push(png);
+            match (a.image, a.path) {
+                (Some(img), path) => out.images.push((img, path)),
+                (None, Some(path)) => out.files.push(path),
+                (None, None) => {}
             }
         }
         if matches!(self.status, Status::Working | Status::NeedsYou | Status::Starting) || self.setting_up || self.sign_in.is_some() || self.rewinding {
@@ -388,9 +391,13 @@ impl AgentTask {
             .context
             .iter()
             .enumerate()
-            .map(|(i, c)| Attachment { label: if named { o.labels[i].clone().into() } else { "Context".into() }, context: c.clone(), png: None })
+            .map(|(i, c)| Attachment::pick(if named { o.labels[i].clone().into() } else { "Context".into() }, c.clone(), None))
             .collect();
-        atts.extend(o.images.into_iter().map(|png| Attachment { label: "Image".into(), context: String::new(), png: Some(png) }));
+        atts.extend(o.images.into_iter().map(|(img, path)| {
+            let label = path.as_deref().map_or_else(|| "Image".into(), crate::files::chip_name);
+            Attachment::image(label.into(), img, path)
+        }));
+        atts.extend(o.files.into_iter().map(Attachment::file));
         self.prompt.update(cx, |p, cx| {
             let typed = p.text.trim().to_string();
             let text = if typed.is_empty() { o.text.clone() } else { format!("{}\n{typed}", o.text) };
@@ -409,7 +416,14 @@ impl AgentTask {
         self.record.queued = self
             .pending
             .iter()
-            .map(|o| QueuedMessage { text: o.text.clone(), mentions: o.mentions.clone(), context: o.context.clone(), labels: o.labels.clone() })
+            .map(|o| QueuedMessage {
+                text: o.text.clone(),
+                mentions: o.mentions.clone(),
+                context: o.context.clone(),
+                labels: o.labels.clone(),
+                // An image file comes back as a link to it (images aren't saved).
+                files: o.images.iter().filter_map(|(_, p)| p.clone()).chain(o.files.iter().cloned()).collect(),
+            })
             .collect();
         cx.emit(AgentEvent::Changed);
     }
@@ -463,28 +477,40 @@ impl AgentTask {
         }
         let shown = out.shown();
         let (Some(client), Some(session)) = (self.client.clone(), self.session_id.clone()) else {
-            self.queued = Some(out);
+            self.queued = Some(out.clone());
             self.push(ChatItem::User(shown));
+            self.push_sent(&out);
             self.start(cx);
             return;
         };
-        if self.queued.is_none() && !matches!(self.chat.last(), Some(ChatItem::User(t)) if *t == shown) {
+        // The last message, past its attachments row.
+        let last = self.chat.iter().rev().find(|c| !matches!(c, ChatItem::Files(_)));
+        if self.queued.is_none() && !matches!(last, Some(ChatItem::User(t)) if *t == shown) {
             self.push(ChatItem::User(shown));
+            self.push_sent(&out);
         }
         // Kept for Retry / Edit & resend, and re-queued if a sign-in is needed.
         self.last_sent = Some(out.clone());
         let sent = out.clone();
-        let Outgoing { text, mentions, context, images, .. } = out;
+        let Outgoing { text, mentions, context, images, files, .. } = out;
         let mut blocks = vec![PromptBlock::Text(text)];
         for c in context {
             blocks.push(PromptBlock::Text(c));
         }
-        if self.images_ok {
-            for png in images {
-                blocks.push(PromptBlock::Image { mime: "image/png".into(), data_base64: base64(&png) });
+        // An image file also says where it is (the agent may want to use it);
+        // an agent that takes no images gets just the link.
+        let mut links = Vec::new();
+        for (img, path) in images {
+            if self.images_ok {
+                blocks.push(PromptBlock::Image { mime: img.format.mime_type().into(), data_base64: base64(img.bytes()) });
+                if let Some(p) = path {
+                    blocks.push(PromptBlock::Text(format!("(The image above is the file {}.)", p.display())));
+                }
+            } else {
+                links.extend(path);
             }
         }
-        for m in mentions {
+        for m in mentions.into_iter().chain(links).chain(files) {
             let name = m.strip_prefix(&self.record.worktree).unwrap_or(&m).to_string_lossy().into_owned();
             blocks.push(PromptBlock::ResourceLink { uri: format!("file://{}", m.display()), name });
         }

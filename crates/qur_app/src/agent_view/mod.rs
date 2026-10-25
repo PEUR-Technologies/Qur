@@ -36,6 +36,7 @@ use crate::changes_view::{ChangesEvent, ChangesView};
 use crate::dock::{self, Docks, Kind, Panel};
 use crate::input::{InputEvent, TextInput};
 use crate::live::{LiveEvent, LivePane};
+use crate::files::Preview;
 use crate::look::Look;
 use crate::markdown::{FindHl, find_all};
 use crate::monitor::{TaskMonitor, heat_kind, heat_status};
@@ -99,6 +100,8 @@ pub enum AgentEvent {
     Changed,
     /// The user clicked a file in a tool call: open it in the code modal.
     OpenFile(PathBuf, Option<u32>),
+    /// The user clicked an attachment (in the prompt or a sent message).
+    Preview(Preview),
     /// `@` typed in the prompt: open the mention picker for this worktree.
     MentionRequested,
     /// `/` typed: offer this agent's settings and slash commands.
@@ -148,10 +151,21 @@ enum ChatItem {
     Image(Arc<gpui::Image>, (u32, u32)),
     /// A file or web link in a message: click opens it.
     Link { uri: String, name: String },
+    /// What you attached to the message above: images and files, shown
+    /// small under it; click shows one.
+    Files(Vec<Sent>),
     /// A failed or cut-short turn, or the agent exiting.
     Failure(Failure),
     /// End of turn N: "3 files · +12 −4 · View · Rewind".
     Turn(u32),
+}
+
+/// One attachment shown under a sent message.
+#[derive(Clone)]
+enum Sent {
+    /// With its size in pixels (None for SVG), and the file it came from.
+    Image(Arc<gpui::Image>, Option<(u32, u32)>, Option<PathBuf>),
+    File(PathBuf),
 }
 
 /// What an error callout shows: a line, the full error (stderr tail…), and
@@ -257,15 +271,24 @@ struct Outgoing {
     /// What the user typed (shown in the chat).
     text: String,
     mentions: Vec<PathBuf>,
-    /// Browser picks: context text for the agent, plus screenshots.
+    /// Browser picks: context text for the agent, and their chip labels.
     context: Vec<String>,
     labels: Vec<String>,
-    images: Vec<Vec<u8>>,
+    /// Screenshots, pasted images and image files (with the file's path).
+    images: Vec<(Arc<gpui::Image>, Option<PathBuf>)>,
+    /// Other files pasted or dropped in: sent as links.
+    files: Vec<PathBuf>,
 }
 
 impl Outgoing {
     fn plain(text: String, mentions: Vec<PathBuf>) -> Self {
-        Outgoing { text, mentions, context: Vec::new(), labels: Vec::new(), images: Vec::new() }
+        Outgoing { text, mentions, context: Vec::new(), labels: Vec::new(), images: Vec::new(), files: Vec::new() }
+    }
+    /// The chat row of what was attached, if anything was.
+    fn sent(&self) -> Option<ChatItem> {
+        let images = self.images.iter().map(|(img, path)| Sent::Image(img.clone(), crate::files::image_size(img.bytes()), path.clone()));
+        let all: Vec<Sent> = images.chain(self.files.iter().cloned().map(Sent::File)).collect();
+        (!all.is_empty()).then_some(ChatItem::Files(all))
     }
     fn shown(&self) -> String {
         if self.labels.is_empty() { self.text.clone() } else { format!("{}\n\n＋ {}", self.text, self.labels.join(", ")) }
@@ -462,6 +485,7 @@ impl AgentTask {
             PromptEvent::MentionRequested => cx.emit(AgentEvent::MentionRequested),
             PromptEvent::SlashRequested => cx.emit(AgentEvent::SlashRequested),
             PromptEvent::UpInEmpty => this.edit_queued(this.pending.len().wrapping_sub(1), cx),
+            PromptEvent::Preview(p) => cx.emit(AgentEvent::Preview(p.clone())),
             PromptEvent::Changed => {}
         });
         let list = ListState::new(0, ListAlignment::Bottom, px(400.));
@@ -474,7 +498,14 @@ impl AgentTask {
         let record_queue = record
             .queued
             .iter()
-            .map(|q| Outgoing { text: q.text.clone(), mentions: q.mentions.clone(), context: q.context.clone(), labels: q.labels.clone(), images: Vec::new() })
+            .map(|q| Outgoing {
+                text: q.text.clone(),
+                mentions: q.mentions.clone(),
+                context: q.context.clone(),
+                labels: q.labels.clone(),
+                images: Vec::new(),
+                files: q.files.clone(),
+            })
             .collect();
         AgentTask {
             record,
@@ -755,6 +786,16 @@ fn chat_markdown(title: &str, agent: &str, chat: &[ChatItem], tools: &HashMap<To
             }
             ChatItem::Image(_, (w, h)) => add(&mut out, &format!("*[image {w}×{h}]*"), false, &mut prev_tool),
             ChatItem::Link { uri, name } => add(&mut out, &format!("[{name}]({uri})"), false, &mut prev_tool),
+            ChatItem::Files(files) => {
+                let names: Vec<String> = files
+                    .iter()
+                    .map(|f| match f {
+                        Sent::Image(_, _, Some(p)) | Sent::File(p) => format!("[{}](file://{})", crate::files::chip_name(p), p.display()),
+                        Sent::Image(..) => "*[image]*".into(),
+                    })
+                    .collect();
+                add(&mut out, &format!("> ＋ {}", names.join(", ")), false, &mut prev_tool);
+            }
             ChatItem::Failure(f) => {
                 let text = match &f.summary {
                     Some(s) => format!("**{}**\n{s}", f.title),

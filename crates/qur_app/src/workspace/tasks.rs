@@ -105,9 +105,9 @@ impl Workspace {
             return self.flash("Start the agent's terminal first", cx);
         };
         let mut text = a.context.trim_end().to_string();
-        if let Some(png) = &a.png {
+        if let Some(img) = &a.image {
             let path = std::env::temp_dir().join(format!("qur-pick-{}.png", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())));
-            if std::fs::write(&path, png).is_ok() {
+            if std::fs::write(&path, img.bytes()).is_ok() {
                 text.push_str(&format!("\nScreenshot: {}", path.display()));
             }
         }
@@ -291,6 +291,7 @@ impl Workspace {
                 let at = line.map(|l| Point { line: (l as usize).saturating_sub(1), col: 0 });
                 this.open_path_at(&p, at, window, cx);
             }
+            AgentEvent::Preview(p) => this.preview(p.clone(), window, cx),
             AgentEvent::Merge => {
                 let id = a.read(cx).record.id.clone();
                 this.merge_task(&id, window, cx);
@@ -883,7 +884,16 @@ impl Workspace {
             PromptEvent::Submit => {
                 let Some(Overlay::NewTask { agent, .. }) = &this.overlay else { return };
                 let agent = *agent;
-                let (text, mentions) = input.update(cx, |i, cx| i.take(cx));
+                let (text, mut mentions) = input.update(cx, |i, cx| i.take(cx));
+                // A new task starts from text: attached files go as mentions,
+                // a pasted image as a file in the temp folder.
+                for a in input.update(cx, |i, _| i.take_attachments()) {
+                    match (a.path, a.image) {
+                        (Some(p), _) => mentions.push(p),
+                        (None, Some(img)) => mentions.extend(pasted_image_file(&img)),
+                        (None, None) => {}
+                    }
+                }
                 this.overlay = None;
                 this.prev_focus = None;
                 this.start_task(agent, text, mentions, window, cx);
@@ -918,6 +928,7 @@ impl Workspace {
                 this.mention_over_dialog = Some(p);
                 cx.notify();
             }
+            PromptEvent::Preview(p) => this.preview(p.clone(), window, cx),
             PromptEvent::Changed | PromptEvent::SlashRequested | PromptEvent::UpInEmpty => {}
         });
         self._subs.push(sub);
@@ -953,4 +964,12 @@ fn first_line(text: &str) -> String {
 /// Notification tag for an agent: `qur:<window>:<task id>` (main.rs parses it).
 fn alert_tag(window: &Window, id: &str) -> String {
     format!("qur:{}:{id}", window.window_handle().window_id().as_u64())
+}
+
+/// A pasted image saved where an agent can read it (`qur-paste-<ms>.png`).
+fn pasted_image_file(img: &gpui::Image) -> Option<PathBuf> {
+    let ext = img.format.extension();
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    let path = std::env::temp_dir().join(format!("qur-paste-{ms}.{ext}"));
+    std::fs::write(&path, img.bytes()).ok().map(|_| path)
 }

@@ -12,6 +12,7 @@ mod commands;
 mod dock;
 mod doctor;
 mod editor_view;
+mod files;
 mod git_panel;
 mod input;
 mod live;

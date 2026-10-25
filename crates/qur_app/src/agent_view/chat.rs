@@ -72,12 +72,7 @@ impl AgentTask {
             Some(Media::Image { mime, data }) => match gpui::ImageFormat::from_mime_type(&mime) {
                 Some(f) => {
                     // The size now: GPUI decodes later, after the row is measured.
-                    let size = image::ImageReader::new(std::io::Cursor::new(&data))
-                        .with_guessed_format()
-                        .ok()
-                        .and_then(|r| r.into_dimensions().ok())
-                        .filter(|(w, h)| *w > 0 && *h > 0);
-                    match size {
+                    match crate::files::image_size(&data) {
                         Some(size) => self.push(ChatItem::Image(Arc::new(gpui::Image::from_bytes(f, data)), size)),
                         None => self.push(ChatItem::Notice("[image that couldn't be read]".into())),
                     }
@@ -86,6 +81,13 @@ impl AgentTask {
             },
             Some(Media::Link { uri, name }) => self.push(ChatItem::Link { uri, name }),
             None => {}
+        }
+    }
+
+    /// The images and files attached to a message, as a row under it.
+    pub(super) fn push_sent(&mut self, out: &Outgoing) {
+        if let Some(row) = out.sent() {
+            self.push(row);
         }
     }
 
@@ -218,13 +220,24 @@ impl AgentTask {
                 .into_any_element(),
             // At its own size, at most 480 high and never wider than the
             // chat; the aspect ratio keeps the height right when it shrinks.
+            // Click shows it full size.
             ChatItem::Image(image, (w, h)) => {
                 let (w, h) = (*w as f32, *h as f32);
                 let width = w * (480. / h).min(1.);
+                let preview = Preview::Image { label: "Image".into(), image: image.clone() };
                 pad(div())
-                    .child(img(image.clone()).w(look.z(width)).max_w_full().aspect_ratio(w / h).rounded(look.z(4.)).border_1().border_color(look.c(ui.border)))
+                    .child(
+                        div()
+                            .id(("image", ix))
+                            .w(look.z(width))
+                            .max_w_full()
+                            .cursor_pointer()
+                            .child(img(image.clone()).w_full().aspect_ratio(w / h).rounded(look.z(4.)).border_1().border_color(look.c(ui.border)))
+                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(AgentEvent::Preview(preview.clone())))),
+                    )
                     .into_any_element()
             }
+            ChatItem::Files(files) => pad(div()).pt(px(0.)).child(self.sent_row(ix, files, look, cx)).into_any_element(),
             ChatItem::Link { uri, name } => {
                 let target = uri.clone();
                 pad(div())
@@ -269,6 +282,58 @@ impl AgentTask {
                 div().w_full().flex().flex_col().child(self.group_header(run, open, look, cx)).children(row).into_any_element()
             }
         }
+    }
+
+    /// A message's attachments: images as thumbnails (at most 96 high), files
+    /// as chips. Click shows one: the viewer, or the code modal for text.
+    fn sent_row(&self, ix: usize, files: &[Sent], look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = &look.theme.ui;
+        div().flex().flex_wrap().gap(look.z(6.)).children(files.iter().enumerate().map(|(i, f)| {
+            let (preview, el) = match f {
+                Sent::Image(image, size, path) => {
+                    let (w, h) = size.map_or((96., 96.), |(w, h)| (w as f32, h as f32));
+                    let height = h.min(96.);
+                    let width = (w * height / h).min(320.);
+                    let preview = match path {
+                        Some(p) => Preview::File(p.clone()),
+                        None => Preview::Image { label: "Image".into(), image: image.clone() },
+                    };
+                    let el = img(image.clone())
+                        .w(look.z(width))
+                        .h(look.z(height))
+                        .object_fit(gpui::ObjectFit::Cover)
+                        .rounded(look.z(4.))
+                        .border_1()
+                        .border_color(look.c(ui.border))
+                        .into_any_element();
+                    (preview, el)
+                }
+                Sent::File(p) => {
+                    let el = div()
+                        .flex()
+                        .items_center()
+                        .gap(look.z(6.))
+                        .px(look.z(8.))
+                        .py(look.z(2.))
+                        .rounded(look.z(4.))
+                        .border_1()
+                        .border_color(look.c(ui.border))
+                        .bg(look.c(ui.panel_bg))
+                        .text_size(look.text(-1.))
+                        .text_color(look.c(ui.text_secondary))
+                        .hover(|d| d.text_color(look.c(ui.text)).border_color(look.c(ui.border_strong)))
+                        .child(div().flex_none().text_color(look.c(ui.text_muted)).child("▤"))
+                        .child(div().max_w(look.z(260.)).truncate().child(crate::files::chip_name(p)))
+                        .into_any_element();
+                    (Preview::File(p.clone()), el)
+                }
+            };
+            div()
+                .id(SharedString::from(format!("sent-{ix}-{i}")))
+                .cursor_pointer()
+                .child(el)
+                .on_click(cx.listener(move |_, _, _, cx| cx.emit(AgentEvent::Preview(preview.clone()))))
+        }))
     }
 
     /// One tool call's row: kind, title, counts, status, and its body when

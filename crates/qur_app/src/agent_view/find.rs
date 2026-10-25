@@ -102,7 +102,7 @@ impl AgentTask {
                 }
                 count
             }
-            ChatItem::Image(..) | ChatItem::Turn(_) => 0,
+            ChatItem::Image(..) | ChatItem::Files(_) | ChatItem::Turn(_) => 0,
         }
     }
 

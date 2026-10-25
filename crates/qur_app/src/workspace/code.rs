@@ -80,11 +80,17 @@ impl Workspace {
     }
 
     pub(super) fn open_path_at(&mut self, path: &Path, at: Option<Point>, window: &mut Window, cx: &mut Context<Self>) {
+        // Images show in the viewer, not as text.
+        if crate::files::viewable(path).is_some() {
+            return self.view_file(path, window, cx);
+        }
         self.record_nav(cx);
         let buf = match self.buffers.find(path, cx) {
             Some(b) => b,
             None => match self.load_buffer(path, window, cx) {
                 Ok(b) => b,
+                // Not text: the viewer says what it is and offers to open it elsewhere.
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => return self.view_file(path, window, cx),
                 Err(e) => {
                     self.flash(format!("Couldn't open {}: {e}", path.display()), cx);
                     return;
@@ -292,6 +298,22 @@ impl Workspace {
     pub(super) fn noop_undo(&mut self, _: &edit::Undo, _: &mut Window, _: &mut Context<Self>) {}
     pub(super) fn noop_redo(&mut self, _: &edit::Redo, _: &mut Window, _: &mut Context<Self>) {}
 
+    /// A file's path for a modal's title: relative to the main checkout or
+    /// to the task worktree it's in, with that task's title.
+    pub(super) fn where_is(&self, path: &Path, cx: &App) -> (String, Option<String>) {
+        let owner = self
+            .agents
+            .iter()
+            .map(|a| (a.read(cx).record.worktree.clone(), a.read(cx).record.title.clone()))
+            .chain(self.term_tasks.iter().map(|t| (t.record.worktree.clone(), t.record.title.clone())))
+            .find(|(wt, _)| path.starts_with(wt));
+        let rel = match &owner {
+            Some((wt, _)) => path.strip_prefix(wt).unwrap_or(path).to_string_lossy().into_owned(),
+            None => path.strip_prefix(&self.root).unwrap_or(path).to_string_lossy().into_owned(),
+        };
+        (rel, owner.map(|(_, t)| t))
+    }
+
     pub(super) fn code_modal(&self, look: &Look, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let code = self.code.clone()?;
         let ui = &look.theme.ui;
@@ -299,18 +321,8 @@ impl Workspace {
         let (title, dirty, owner) = {
             let c = code.read(cx);
             let path = c.path().map(Path::to_path_buf).unwrap_or_default();
-            // Which tree is this file in: the main checkout or a task's worktree?
-            let owner = self
-                .agents
-                .iter()
-                .map(|a| (a.read(cx).record.worktree.clone(), a.read(cx).record.title.clone()))
-                .chain(self.term_tasks.iter().map(|t| (t.record.worktree.clone(), t.record.title.clone())))
-                .find(|(wt, _)| path.starts_with(wt));
-            let rel = match &owner {
-                Some((wt, _)) => path.strip_prefix(wt).unwrap_or(&path).to_string_lossy().into_owned(),
-                None => path.strip_prefix(&self.root).unwrap_or(&path).to_string_lossy().into_owned(),
-            };
-            (rel, c.is_dirty(), owner.map(|(_, t)| t))
+            let (rel, owner) = self.where_is(&path, cx);
+            (rel, c.is_dirty(), owner)
         };
         Some(
             div()

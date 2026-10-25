@@ -2,7 +2,7 @@
 
 Read this first when you pick the project up, whether you're a person or a Claude session. It covers where things stand, the rules, how to work on the code, and what's next. Keep it current: update **Status** and **Next** at the end of every session.
 
-Last updated: 2026-10-26, release v0.1.5. All milestones M0–M7 are done, plus the 2026-10-25 improvements (decisions 49–58) and the 2026-10-26 window and pane work (decisions 59–61). The newest build is installed at `/Applications/Qur.app`.
+Last updated: 2026-10-26, release v0.1.5. All milestones M0–M7 are done, plus the 2026-10-25 improvements (decisions 49–58), the 2026-10-26 window and pane work (decisions 59–61) and files in the chat (decision 62, not yet released). The newest build is installed at `/Applications/Qur.app`.
 
 ## What Qur is
 
@@ -45,6 +45,7 @@ All milestones are on `main`. There are 259 tests (`cargo test --release --works
 | README (owner, PR #1) | README shortened to visuals (`docs/images/window.svg`, `flow.svg`, `numbers.svg`); the full guide moved to `docs/guide.md` | — |
 | 2026-10-25 improvements (v0.1.4) | Turn checkpoints and Rewind; Go to Symbol, Expand/Shrink Selection, `keymap.toml`, IME marked text; nested ignores in the watcher, deleted-file rows, own-save heat attribution; Appearance submenu; terminal names; chat text size; CI and scripted input (`handcheck.sh`); chat polish (Find in Chat, grouped tool calls, permission queue, Allow All Pending, Copy Chat as Markdown); cross-vendor second-opinion review; window gaps; Settings screen (`Cmd+,`); `workspace/` and `agent_view/` split into modules | 49–58 |
 | 2026-10-26 window and panes (v0.1.5) | No window shadow with gaps; zen and gaps together, zen's bar easing the content down; the bar zooms (never below 32 pt) with Qur's own traffic lights; Chrome-style sidebar (always / auto-hide / hidden, left or right, sections reordered by dragging); dock rearranging like macOS tiling (drop preview, nearest-edge targets, whole-pane drags, one + menu, × always clickable) with panes gliding into place, split terminals too; the Browser steps aside and zen holds still during drags | 59–61 |
+| 2026-10-26 files in the chat | Paste or drop files and images into the ACP prompt as chips (images sent as images, fitted to the 5 MB limit; other files as links); thumbnails and file chips under sent messages; a file viewer modal for images and non-text files (also from the tree); zen's bar slides without re-laying out the stage every frame | 62 |
 
 Latest numbers (`docs/budget.md`, M7 table, measured on battery): app 25 MB, first frame 113 ms, idle 73 MB, 3 agents 129 MB, glow 81 ms, keystroke p99 2.0 ms, search 51 ms. `lsof` shows no network sockets in Qur's own process.
 
@@ -55,6 +56,7 @@ Latest numbers (`docs/budget.md`, M7 table, measured on battery): app 25 MB, fir
 - **Hand checks and the real mouse:** `handcheck.sh`'s drags mix with the real pointer's moves over the window, so leave the mouse still while it runs (the `dock` and `sidebar` drag checks fail at random otherwise).
 - **Window gaps:** that a click in a gap never falls through to the window behind (the root paints alpha 1/255; raise it to 2/255 in `Look::root_bg` if it does).
 - **Typing that scripts can't do:** IME composition (Japanese, Chinese, Korean; press-and-hold accents), `Ctrl+Shift+Cmd+→/←`, a key rebound in `keymap.toml`.
+- **Files in the chat:** pasting files copied in Finder and a screenshot into an ACP prompt, dropping files from Finder on it, the chips and thumbnails, and the file viewer's looks (scripted runs check that the viewer opens and closes, never pictures, and don't touch the clipboard). Zen's slide without the stutter.
 - **Terminal paste:** an image (Cmd+V sends Ctrl+V to Claude), copied files, and files dragged onto a terminal (scripted runs would overwrite the clipboard).
 - **Alerts:** the chime being audible, and notifications in the installed app.
 - **Codex as reviewer:** Codex isn't installed on the dev Mac, so only Claude reviewing Claude ran; check that `codex-acp` offers a read-only mode.

@@ -17,6 +17,7 @@ mod sidebar;
 mod tasks;
 mod top_bar;
 mod turns;
+mod viewer;
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -26,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     Animation, AnimationExt, AnyElement, AnyWindowHandle, App, AppContext, Bounds, ClipboardItem, Context, Entity, FocusHandle, MouseButton, Pixels, PromptLevel,
-    SharedString, Subscription, Task, Window, WindowAppearance, canvas, div, prelude::*, px, svg,
+    SharedString, Subscription, Task, Window, WindowAppearance, canvas, div, img, prelude::*, px, svg,
 };
 use qur_acp::PermissionKind;
 use qur_agents::{AgentDef, Mode, Roster, TaskRecord, TaskStore};
@@ -206,6 +207,8 @@ pub struct Workspace {
     /// The code modal (decision 18).
     code: Option<Entity<EditorView>>,
     code_prev_focus: Option<FocusHandle>,
+    /// The file viewer: an image, or a file that isn't text.
+    viewer: Option<viewer::Viewer>,
     sidebar: bool,
     sidebar_w: f32,
     /// `[ui] sidebar = "auto"`: the sidebar is slid in because the mouse
@@ -349,6 +352,7 @@ impl Workspace {
             buffers: Buffers { list: Vec::new() },
             code: None,
             code_prev_focus: None,
+            viewer: None,
             sidebar,
             sidebar_w: SIDEBAR_DEFAULT_W,
             sidebar_shown: false,
@@ -625,7 +629,7 @@ impl Render for Workspace {
         // shows, and never under a modal, picker or popover (decision 26).
         // Nor while a tab or pane is dragged: a web view drawn over the dock
         // hid the drop preview and took the drag's mouse moves.
-        let covered = self.overlay.is_some() || self.code.is_some() || cx.has_active_drag();
+        let covered = self.overlay.is_some() || self.code.is_some() || self.viewer.is_some() || cx.has_active_drag();
         for a in self.agents.clone() {
             let (id, wants, browser) = {
                 let t = a.read(cx);
@@ -648,7 +652,6 @@ impl Render for Workspace {
         }
         let sidebar = self.sidebar_visible();
         let body = div()
-            .flex_1()
             .min_h(px(0.))
             .flex()
             // `[ui] sidebar_side = "right"`: the same row, mirrored.
@@ -657,6 +660,16 @@ impl Render for Workspace {
             .when(sidebar && tiled, |d| d.child(self.sidebar_gap(&look, cx)))
             .child(div().flex_1().min_w(px(0.)).h_full().child(self.stage(&look, cx)));
         let zen = self.config.ui.zen;
+        // While zen's bar slides, the content keeps the height it has with the
+        // bar away and moves down under a clip, so it's laid out again once a
+        // slide (when the bar has arrived, or as it starts to leave), not every
+        // frame: terminals resizing their PTYs each frame made the slide stutter.
+        let body = if zen && zen_p > 0. && zen_p < 1. {
+            let h = window.viewport_size().height - if tiled { look.gap() * 2. } else { px(0.) };
+            div().flex_1().min_h(px(0.)).flex().flex_col().overflow_hidden().child(body.flex_none().h(h))
+        } else {
+            body.flex_1()
+        };
         // With window gaps the regions sit a gap apart and in from the edges.
         let frame = div()
             .flex_1()
@@ -668,6 +681,7 @@ impl Render for Workspace {
             .when(!zen || zen_p > 0., |d| d.child(self.top(&look, zen_p, cx)))
             .child(body);
         let any_overlay = self.overlay.is_some();
+        let over_dialog = matches!(self.overlay, Some(Overlay::NewTask { .. }));
         div()
             .key_context("Workspace")
             .track_focus(&self.focus)
@@ -821,6 +835,11 @@ impl Render for Workspace {
             }))
             // Before the focused view sees it (a terminal would take Esc for itself).
             .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
+                // The file viewer sits over everything: Esc is its own.
+                if ev.keystroke.key == "escape" && this.viewer.is_some() {
+                    this.close_viewer(window, cx);
+                    return cx.stop_propagation();
+                }
                 if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::AgentMenu { .. } | Overlay::About)) {
                     this.close_overlays(window, cx);
                     cx.stop_propagation();
@@ -870,7 +889,9 @@ impl Render for Workspace {
             }))
             .child(frame)
             .children(crate::script::mark(|| "window".to_string()))
-            .children(self.code_modal(&look, cx))
+            // A text file opened from a chip in the New Agent Task dialog shows
+            // over the dialog; any other code modal sits under the pickers.
+            .when(!over_dialog, |d| d.children(self.code_modal(&look, cx)))
             .when(any_overlay, |d| {
                 d.child(div().absolute().size_full().on_mouse_down(
                     MouseButton::Left,
@@ -887,6 +908,8 @@ impl Render for Workspace {
                 ))
             })
             .children(self.overlay_el(&look, cx))
+            .when(over_dialog, |d| d.children(self.code_modal(&look, cx)))
+            .children(self.viewer_modal(&look, cx))
     }
 }
 

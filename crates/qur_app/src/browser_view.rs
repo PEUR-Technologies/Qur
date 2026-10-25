@@ -6,7 +6,9 @@
 //! only run while you use it.
 
 use std::cell::Cell;
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -23,13 +25,32 @@ use crate::look::Look;
 /// Hidden this long → the web view (and its WebKit processes) is freed.
 const IDLE_RELEASE: Duration = Duration::from_secs(300);
 
-/// Something picked in the page, ready for the agent.
+/// Something for the agent's next message: a pick in the page, or an
+/// image or file pasted or dropped into the prompt.
 #[derive(Clone)]
 pub struct Attachment {
     pub label: SharedString,
     /// Text context for the agent (selector, source, HTML, styles, URL).
     pub context: String,
-    pub png: Option<Vec<u8>>,
+    /// An image to send (a screenshot, a pasted image, an image file).
+    pub image: Option<Arc<gpui::Image>>,
+    /// The file it came from: sent as a link when it isn't an image.
+    pub path: Option<PathBuf>,
+}
+
+impl Attachment {
+    pub fn pick(label: SharedString, context: String, png: Option<Vec<u8>>) -> Self {
+        let image = png.filter(|p| !p.is_empty()).map(|p| Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, p)));
+        Attachment { label, context, image, path: None }
+    }
+
+    pub fn image(label: SharedString, image: Arc<gpui::Image>, path: Option<PathBuf>) -> Self {
+        Attachment { label, context: String::new(), image: Some(image), path }
+    }
+
+    pub fn file(path: PathBuf) -> Self {
+        Attachment { label: crate::files::chip_name(&path).into(), context: String::new(), image: None, path: Some(path) }
+    }
 }
 
 pub enum BrowserPaneEvent {
@@ -168,7 +189,7 @@ impl BrowserPane {
             BrowserEvent::Text { text, url } => {
                 let label: SharedString = format!("“{}”", truncate(&text, 40)).into();
                 let context = format!("Text the user selected on {url}:\n\n> {}\n", text.trim().replace('\n', "\n> "));
-                cx.emit(BrowserPaneEvent::Attach(Attachment { label, context, png: None }));
+                cx.emit(BrowserPaneEvent::Attach(Attachment::pick(label, context, None)));
             }
             BrowserEvent::Picked(p) => self.picked(p, cx),
         }
@@ -183,7 +204,7 @@ impl BrowserPane {
         let mut async_cx = cx.to_async();
         web.snapshot(Some(p.rect), move |png| {
             let _ = this.update(&mut async_cx, |_, cx| {
-                cx.emit(BrowserPaneEvent::Attach(Attachment { label, context, png }));
+                cx.emit(BrowserPaneEvent::Attach(Attachment::pick(label, context, png)));
             });
         });
     }

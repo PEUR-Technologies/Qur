@@ -299,6 +299,9 @@ pub struct QueuedMessage {
     pub context: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    /// Files pasted or dropped into the prompt (sent as links).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -395,7 +398,7 @@ mod tests {
             in_root: false,
             queued: vec![
                 QueuedMessage { text: "then run the tests\nand fix them".into(), ..Default::default() },
-                QueuedMessage { text: "look".into(), mentions: vec![wt.join("a.rs")], context: vec!["<div>".into()], labels: vec!["div.nav".into()] },
+                QueuedMessage { text: "look".into(), mentions: vec![wt.join("a.rs")], context: vec!["<div>".into()], labels: vec!["div.nav".into()], files: vec![PathBuf::from("/tmp/shot.pdf")] },
             ],
             turns: vec![
                 Turn { n: 1, start: "aa".into(), end: Some("bb".into()), files: 2, added: 12, removed: 4, rewound: true },
