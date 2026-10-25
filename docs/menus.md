@@ -93,6 +93,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Next Agent · Previous Agent · Switch Agent or Terminal… `Ctrl+T` · Agent 1–9 `Ctrl+1..9`
 - ---
 - Review Changes `Cmd+4` · Merge into My Branch · Keep Working · Discard Task…
+- Show Last Turn's Changes · Rewind Last Turn… (structured agents with a turn that changed files; disabled otherwise, and for Agent Terminals)
 - Run Checks Now (the project's `[checks] command`, decision 29)
 - Run Project in Worktree (the project's `[run] command`, decision 29)
 - Merge Conflicts ▸ Next Conflict · Previous Conflict · Accept Ours · Accept Theirs · Accept Both · Finish Merge · Abort Merge (enabled only during a merge)

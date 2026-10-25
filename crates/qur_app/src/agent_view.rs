@@ -101,6 +101,10 @@ pub enum AgentEvent {
     TurnChangedFiles,
     /// Sign-in: run this login command in a terminal in the task's worktree.
     RunInTerminal { label: String, command: String },
+    /// The chat's Rewind on turn N: ask, then `rewind`.
+    Rewind(u32),
+    /// A turn started, ended or was rewound (menus).
+    TurnsChanged,
 }
 
 #[derive(Clone)]
@@ -118,6 +122,8 @@ enum ChatItem {
     Link { uri: String, name: String },
     /// A failed or cut-short turn, or the agent exiting.
     Failure(Failure),
+    /// End of turn N: "3 files · +12 −4 · View · Rewind".
+    Turn(u32),
 }
 
 /// What an error callout shows: a line, the full error (stderr tail…), and
@@ -284,6 +290,16 @@ pub struct AgentTask {
     /// the strip above the prompt. Cleared when the next turn starts.
     turn_tools: Vec<ToolCallId>,
     turn_files: Vec<FileChange>,
+    /// The project folder (Rewind refuses it).
+    project_root: PathBuf,
+    /// The running turn's number (its checkpoint is in `record.turns`).
+    turn_n: Option<u32>,
+    /// Rewind to before this turn once the stopped turn has ended.
+    rewind_after_stop: Option<u32>,
+    /// Told to the agent with the next message after a Rewind.
+    rewind_note: Option<String>,
+    /// A Rewind is restoring files: messages wait.
+    rewinding: bool,
     _events: Option<Task<()>>,
     _subs: Vec<Subscription>,
 }
@@ -293,6 +309,7 @@ impl EventEmitter<AgentEvent> for AgentTask {}
 impl AgentTask {
     #[allow(clippy::too_many_arguments)]
     pub fn new(root: PathBuf, record: TaskRecord, def: AgentDef, accent: Rgba, layout: Layout, wrap: bool, tab: usize, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let project_root = root.clone();
         let changes = cx.new(|cx| ChangesView::new(root, record.worktree.clone(), record.base.clone(), record.branch.clone(), cx));
         let changes_sub = cx.subscribe_in(&changes, window, |this, _, ev: &ChangesEvent, window, cx| match ev {
             ChangesEvent::Merge => cx.emit(AgentEvent::Merge),
@@ -404,6 +421,11 @@ impl AgentTask {
             turn_started: None,
             turn_tools: Vec::new(),
             turn_files: Vec::new(),
+            project_root,
+            turn_n: None,
+            rewind_after_stop: None,
+            rewind_note: None,
+            rewinding: false,
             _events: None,
             _subs: vec![sub, live_sub, monitor_sub, browser_sub, files_sub, changes_sub],
         }
@@ -503,7 +525,7 @@ impl AgentTask {
     /// Error callout: send that message again.
     fn retry(&mut self, out: Outgoing, cx: &mut Context<Self>) {
         self.follow_bottom();
-        if matches!(self.status, Status::Working | Status::NeedsYou | Status::Starting) || self.setting_up || self.sign_in.is_some() {
+        if matches!(self.status, Status::Working | Status::NeedsYou | Status::Starting) || self.setting_up || self.sign_in.is_some() || self.rewinding {
             self.pending.push(out);
             self.save_queue(cx);
             return cx.notify();
@@ -836,7 +858,7 @@ impl AgentTask {
                 out.images.push(png);
             }
         }
-        if matches!(self.status, Status::Working | Status::NeedsYou | Status::Starting) || self.setting_up || self.sign_in.is_some() {
+        if matches!(self.status, Status::Working | Status::NeedsYou | Status::Starting) || self.setting_up || self.sign_in.is_some() || self.rewinding {
             // One turn at a time: queue it and send when the turn ends.
             self.pending.push(out);
             self.save_queue(cx);
@@ -848,7 +870,7 @@ impl AgentTask {
 
     /// Send the next queued message, if any (turn ended).
     fn drain_pending(&mut self, cx: &mut Context<Self>) {
-        if !self.pending.is_empty() && matches!(self.status, Status::Done | Status::Idle) {
+        if !self.pending.is_empty() && matches!(self.status, Status::Done | Status::Idle) && !self.rewinding {
             let out = self.pending.remove(0);
             self.save_queue(cx);
             self.send_out(out, cx);
@@ -965,6 +987,12 @@ impl AgentTask {
     }
 
     fn send_out(&mut self, out: Outgoing, cx: &mut Context<Self>) {
+        // A Rewind is putting files back: this goes out once it's done.
+        if self.rewinding {
+            self.pending.insert(0, out);
+            self.save_queue(cx);
+            return cx.notify();
+        }
         let shown = out.shown();
         let (Some(client), Some(session)) = (self.client.clone(), self.session_id.clone()) else {
             self.queued = Some(out);
@@ -992,12 +1020,25 @@ impl AgentTask {
             let name = m.strip_prefix(&self.record.worktree).unwrap_or(&m).to_string_lossy().into_owned();
             blocks.push(PromptBlock::ResourceLink { uri: format!("file://{}", m.display()), name });
         }
+        // After a Rewind, the agent hears about it with this message.
+        if let Some(note) = self.rewind_note.take() {
+            blocks.push(PromptBlock::Text(note));
+        }
         self.turn_started = Some(Instant::now());
         self.turn_tools.clear();
         self.turn_files.clear();
         self.set_status(Status::Working, cx);
-        let rx = client.prompt(&session, blocks);
+        // Checkpoint the worktree before the agent can touch it, then send.
+        let wt = self.record.worktree.clone();
+        let bg = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
+            let start = bg.spawn(async move { qur_git::snapshot_tree(&wt) }).await;
+            let Ok(rx) = this.update(cx, |t, cx| {
+                t.begin_turn(start, cx);
+                client.prompt(&session, blocks)
+            }) else {
+                return;
+            };
             let r = rx.await;
             this.update(cx, |t, cx| {
                 t.permission = None;
@@ -1032,7 +1073,8 @@ impl AgentTask {
                     }
                     Err(_) => t.set_status(Status::Error("agent exited".into()), cx),
                 }
-                t.drain_pending(cx);
+                // Queued messages go out once the end checkpoint is taken.
+                t.end_turn(cx);
             })
             .ok();
         })
@@ -1407,6 +1449,7 @@ impl AgentTask {
                     .into_any_element()
             }
             ChatItem::Failure(f) => pad(div()).child(self.failure_callout(ix, f, look, cx)).into_any_element(),
+            ChatItem::Turn(n) => pad(div()).child(self.turn_line(ix, *n, look, cx)).into_any_element(),
             ChatItem::Tool(id) => {
                 let Some(t) = self.tools.get(id) else { return div().into_any_element() };
                 let (glyph, color) = match t.status {
@@ -2300,8 +2343,229 @@ impl AgentTask {
     /// Review Changes (Cmd+4 / Agent menu): show the diff, freshly computed.
     pub fn show_changes(&mut self, cx: &mut Context<Self>) {
         Docks::update(cx, Kind::Acp, |d| d.activate(Panel::Changes));
-        self.changes.update(cx, |c, cx| c.refresh(cx));
+        self.changes.update(cx, |c, cx| c.show_all(cx));
         cx.notify();
+    }
+
+    // -- turn checkpoints ------------------------------------------------------
+
+    /// A prompt is about to go out: record the turn with the worktree's tree.
+    fn begin_turn(&mut self, start: Result<String, String>, cx: &mut Context<Self>) {
+        let start = match start {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("TURN {} no checkpoint: {e}", self.record.id);
+                self.turn_n = None;
+                return;
+            }
+        };
+        let n = self.record.next_turn_number();
+        println!("TURN {} {n} start {}", self.record.id, short(&start));
+        self.pin(n, Some(("start", start.clone())), cx);
+        self.record.turns.push(qur_agents::Turn { n, start, ..Default::default() });
+        self.turn_n = Some(n);
+        cx.emit(AgentEvent::Changed);
+        cx.emit(AgentEvent::TurnsChanged);
+    }
+
+    /// Pin a checkpoint under `refs/qur/turns/<task>/<n>/<side>`, or (None)
+    /// drop turn N's refs.
+    fn pin(&self, n: u32, side: Option<(&'static str, String)>, cx: &mut Context<Self>) {
+        let (wt, id) = (self.record.worktree.clone(), self.record.id.clone());
+        cx.background_executor()
+            .spawn(async move {
+                let r = match side {
+                    Some((side, tree)) => qur_git::pin_turn(&wt, &id, n, side, &tree),
+                    None => qur_git::unpin_turn(&wt, &id, n),
+                };
+                if let Err(e) = r {
+                    eprintln!("TURN {id} {n} ref: {e}");
+                }
+            })
+            .detach();
+    }
+
+    /// The turn ended (any way): take the end checkpoint, add the chat's
+    /// turn line, then send what's queued. A turn that changed nothing
+    /// leaves no checkpoint.
+    fn end_turn(&mut self, cx: &mut Context<Self>) {
+        let Some((n, start)) = self.turn_n.take().and_then(|n| self.record.turn(n).map(|t| (n, t.start.clone()))) else {
+            return self.after_turn(cx);
+        };
+        let wt = self.record.worktree.clone();
+        let bg = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let r = bg
+                .spawn(async move {
+                    let end = qur_git::snapshot_tree(&wt)?;
+                    let stats = qur_git::tree_stats(&wt, &start, &end)?;
+                    Ok::<_, String>((end, stats))
+                })
+                .await;
+            this.update(cx, |t, cx| {
+                let id = t.record.id.clone();
+                match r {
+                    Ok((end, (files, added, removed))) if files > 0 => {
+                        println!("TURN {id} {n} end {} files={files} +{added} -{removed}", short(&end));
+                        t.pin(n, Some(("end", end.clone())), cx);
+                        if let Some(turn) = t.record.turns.iter_mut().find(|x| x.n == n) {
+                            turn.end = Some(end);
+                            (turn.files, turn.added, turn.removed) = (files, added, removed);
+                        }
+                        t.push(ChatItem::Turn(n));
+                    }
+                    Ok(_) => {
+                        println!("TURN {id} {n} end no changes");
+                        t.record.turns.retain(|x| x.n != n);
+                        t.pin(n, None, cx);
+                    }
+                    // The start checkpoint stays (Rewind still works).
+                    Err(e) => eprintln!("TURN {id} {n} no end checkpoint: {e}"),
+                }
+                cx.emit(AgentEvent::Changed);
+                cx.emit(AgentEvent::TurnsChanged);
+                t.after_turn(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// After a turn: a Rewind that was waiting for the stop, else the queue.
+    fn after_turn(&mut self, cx: &mut Context<Self>) {
+        if let Some(n) = self.rewind_after_stop.take() {
+            return self.do_rewind(n, cx);
+        }
+        self.drain_pending(cx);
+    }
+
+    /// Is a turn running (Rewind stops it first)?
+    pub fn turn_running(&self) -> bool {
+        matches!(self.status, Status::Working | Status::NeedsYou) || self.turn_n.is_some()
+    }
+
+    /// Rewind to before turn N (asked already): stop the agent if it's
+    /// working, then put the worktree's files back.
+    pub fn rewind(&mut self, n: u32, cx: &mut Context<Self>) {
+        if self.rewinding {
+            return;
+        }
+        if self.turn_running() {
+            self.rewind_after_stop = Some(n);
+            self.notice(format!("Stopping {} to rewind…", self.def.label), cx);
+            if matches!(self.status, Status::Working | Status::NeedsYou) {
+                self.stop(cx);
+            }
+            return;
+        }
+        self.do_rewind(n, cx);
+    }
+
+    fn do_rewind(&mut self, n: u32, cx: &mut Context<Self>) {
+        let Some(start) = self.record.turn(n).map(|t| t.start.clone()) else {
+            self.notice(format!("Nothing to rewind: turn {n} changed no files."), cx);
+            return self.drain_pending(cx);
+        };
+        self.rewinding = true;
+        let (root, wt) = (self.project_root.clone(), self.record.worktree.clone());
+        let bg = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let r = bg
+                .spawn(async move {
+                    let now = qur_git::snapshot_tree(&wt)?;
+                    let undone = qur_git::changed_paths_between(&wt, &start, &now)?;
+                    qur_git::restore_tree(&root, &wt, &start)?;
+                    Ok::<_, String>(undone)
+                })
+                .await;
+            this.update(cx, |t, cx| {
+                t.rewinding = false;
+                match r {
+                    Ok(paths) => {
+                        let undone: Vec<u32> = t.record.turns.iter().filter(|x| x.n >= n && !x.rewound).map(|x| x.n).collect();
+                        for x in t.record.turns.iter_mut().filter(|x| x.n >= n) {
+                            x.rewound = true;
+                        }
+                        println!("REWIND {} turn {n}: {} files restored", t.record.id, paths.len());
+                        let turns = match undone.as_slice() {
+                            [] | [_] => format!("turn {n}"),
+                            more => format!("turns {n}–{}", more[more.len() - 1]),
+                        };
+                        let k = paths.len();
+                        t.push(ChatItem::Notice(format!(
+                            "Rewound {turns}: {k} file{} put back to how they were before it. {} will be told with your next message.",
+                            if k == 1 { "" } else { "s" },
+                            t.def.label
+                        )));
+                        let mut list = paths.iter().take(20).map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
+                        if k > 20 {
+                            list.push_str(&format!(" and {} more", k - 20));
+                        }
+                        t.rewind_note = Some(format!(
+                            "[Note from Qur, the editor: the user rewound your work. The files in your working directory are back to how they were before {turns} of this conversation, so the edits you made since then are gone ({}). Re-read files before you change them.]",
+                            if list.is_empty() { "no files differed".to_string() } else { format!("changed back: {list}") }
+                        ));
+                        // The turn lines now say "rewound".
+                        for ix in 0..t.chat.len() {
+                            if matches!(t.chat[ix], ChatItem::Turn(m) if m >= n) {
+                                t.list.splice(ix..ix + 1, 1);
+                            }
+                        }
+                        t.changes.update(cx, |c, cx| c.refresh(cx));
+                    }
+                    Err(e) => {
+                        eprintln!("REWIND {} turn {n} failed: {e}", t.record.id);
+                        t.push(ChatItem::Notice(format!("Couldn't rewind: {e}")));
+                    }
+                }
+                cx.emit(AgentEvent::Changed);
+                cx.emit(AgentEvent::TurnsChanged);
+                t.drain_pending(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Show what turn N changed in the Changes view (comments work as usual).
+    pub fn show_turn(&mut self, n: u32, cx: &mut Context<Self>) {
+        let Some(t) = self.record.turn(n).cloned() else { return };
+        Docks::update(cx, Kind::Acp, |d| d.activate(Panel::Changes));
+        self.changes.update(cx, |c, cx| c.show_turn(n, t.start, t.end, cx));
+        cx.notify();
+    }
+
+    /// "3 files · +12 −4 · View · Rewind" at the end of a turn.
+    fn turn_line(&self, ix: usize, n: u32, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = &look.theme.ui;
+        let Some(t) = self.record.turn(n) else { return div() };
+        let link = |id: &'static str, label: &'static str| {
+            div().id((id, ix)).cursor_pointer().text_color(look.c(ui.text_secondary)).hover(|d| d.text_color(look.c(ui.text))).child(label)
+        };
+        let dot = || div().child("·");
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(look.z(6.))
+            .text_size(look.text(-1.))
+            .text_color(look.c(ui.text_muted))
+            .child(format!("{} file{}", t.files, if t.files == 1 { "" } else { "s" }))
+            .child(dot())
+            .child(
+                div()
+                    .flex()
+                    .gap(look.z(4.))
+                    .child(div().text_color(look.c(look.theme.diff.added_text)).child(format!("+{}", t.added)))
+                    .child(div().text_color(look.c(look.theme.diff.removed_text)).child(format!("−{}", t.removed))),
+            )
+            .child(dot())
+            .child(link("turn-view", "View").on_click(cx.listener(move |t, _, _, cx| t.show_turn(n, cx))))
+            .child(dot())
+            .when(t.rewound, |d| d.child("rewound"))
+            .when(!t.rewound, |d| d.child(link("turn-rewind", "Rewind").on_click(cx.listener(move |_, _, _, cx| cx.emit(AgentEvent::Rewind(n))))))
     }
 }
 
@@ -2393,4 +2657,9 @@ mod tests {
         assert_eq!(tail_lines("1\n2\n3", 5), "1\n2\n3");
         assert_eq!(tail_lines("1\n2\n3\n4", 2), "… 2 earlier lines\n3\n4");
     }
+}
+
+/// The first 12 characters of an object id (logs).
+fn short(id: &str) -> &str {
+    &id[..id.len().min(12)]
 }
