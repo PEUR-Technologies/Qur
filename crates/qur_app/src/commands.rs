@@ -258,7 +258,8 @@ pub static COMMANDS: &[Cmd] = &[
     // Terminal
     cmd!(qur::NewTerminal, "Terminal", "New Terminal", "cmd-t", W, R),
     cmd!(qur::NewAgentTerminal, "Terminal", "New Agent Terminal", "cmd-shift-t", W, R),
-    cmd!(qur::CloseTerminal, "Terminal", "Close Terminal", "cmd-w", T, R),
+    // In an agent it closes (or discards) the agent, asking first.
+    cmd!(qur::CloseTerminal, "Terminal", "Close Terminal or Agent", "cmd-w", Some("Terminal || AgentView"), R),
     cmd!(qur::ToggleTerminal, "View", "Go to Terminal", "ctrl-`", W, R),
     cmd!(qur::Caffeinate, "View", "Keep Mac Awake (caffeinate)", "", W, R),
     cmd!(qur::ShowKeepAwake, "View", "Show Keep Awake in Sidebar", "", W, R),

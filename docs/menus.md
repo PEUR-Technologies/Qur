@@ -34,7 +34,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Save `Cmd+S` · Save All `Cmd+Opt+S`
 - Revert File
 - ---
-- Close Terminal `Cmd+W` (when a terminal is focused)
+- Close Terminal or Agent `Cmd+W` (in a terminal or an agent; an agent asks first)
 - Close Window `Cmd+Shift+W`
 
 ## Edit
@@ -106,7 +106,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Split Right `Cmd+D` · Split Down `Cmd+Shift+D`
 - Focus Pane Left / Right / Above / Below `Cmd+Opt+Arrows`
 - Clear `Cmd+K` · Find in Terminal `Cmd+F`
-- Close Terminal `Cmd+W`
+- Close Terminal or Agent `Cmd+W`
 
 ## Window
 - Minimize `Cmd+M` · Zoom · (macOS window list, tiling items)

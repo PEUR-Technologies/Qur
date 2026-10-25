@@ -1349,10 +1349,11 @@ impl Workspace {
         }
     }
 
-    fn close_terminal(&mut self, _: &qur::CloseTerminal, _: &mut Window, cx: &mut Context<Self>) {
+    fn close_terminal(&mut self, _: &qur::CloseTerminal, window: &mut Window, cx: &mut Context<Self>) {
         let tid = match &self.selected {
             Some(Selected::Shell(s)) => Some(*s),
             Some(Selected::TermTask(id)) => self.term_task(id).and_then(|t| t.term_id),
+            Some(Selected::Agent(_)) => return self.discard_task(&qur::DiscardTask, window, cx),
             _ => None,
         };
         if let Some(tid) = tid {
