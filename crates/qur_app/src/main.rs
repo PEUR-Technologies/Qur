@@ -144,9 +144,18 @@ pub fn open_project(root: PathBuf, file: Option<PathBuf>, cx: &mut App) {
 }
 
 pub fn prompt_open_folder(cx: &mut App) {
+    // One panel at a time: a second Cmd+N (or Cmd+N reaching us twice from a
+    // terminal) stacked another panel under the first, so Cancel seemed to
+    // leave it open.
+    static OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if OPEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Open".into()) });
     cx.spawn(async move |cx| {
-        if let Ok(Ok(Some(paths))) = rx.await
+        let res = rx.await;
+        OPEN.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(Ok(Some(paths))) = res
             && let Some(p) = paths.into_iter().next()
         {
             cx.update(|cx| open_project(p, None, cx));
