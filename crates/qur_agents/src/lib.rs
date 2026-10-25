@@ -220,8 +220,10 @@ pub struct TaskRecord {
     /// quit or a crash doesn't lose them (sent when the task next starts).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued: Vec<QueuedMessage>,
-    /// ACP turns with their checkpoints (oldest first): what each changed,
-    /// and Rewind. Trees are pinned under `refs/qur/turns/<id>/<n>/…`.
+    /// Turns with their checkpoints (oldest first): what each changed, and
+    /// Rewind. ACP turns run from prompt to turn end; an Agent Terminal's
+    /// from busy to quiet (only those that changed files are kept). Trees are
+    /// pinned under `refs/qur/turns/<id>/<n>/…`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub turns: Vec<Turn>,
     /// A second-opinion reviewer on this task (Review Agent's Work…): a
@@ -251,8 +253,8 @@ pub struct ReviewLink {
     pub created: u64,
 }
 
-/// One ACP turn's checkpoints: the worktree's tree when the prompt was sent
-/// and when the turn ended.
+/// One turn's checkpoints: the worktree's tree when the prompt was sent (an
+/// Agent Terminal: when it went busy) and when the turn ended (went quiet).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Turn {
     /// 1, 2, 3… within the task (never reused, also after a Rewind).

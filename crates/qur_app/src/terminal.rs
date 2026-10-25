@@ -333,6 +333,13 @@ impl Session {
         self.last_output.is_some_and(|t| t.elapsed() < Duration::from_secs(2))
     }
 
+    /// The program asked for bracketed paste: it's at an input line that
+    /// takes pasted text (an agent's prompt, a shell), not a menu where a
+    /// typed letter could pick an answer.
+    pub fn takes_paste(&self) -> bool {
+        self.term.lock().mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
     /// Note the selection just made (see `kept`).
     fn remember_selection(&mut self) {
         let t = self.term.lock();

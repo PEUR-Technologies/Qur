@@ -410,6 +410,7 @@ impl AgentTask {
                 this.submit(cx);
             }
             ChangesEvent::Open(p, line) => cx.emit(AgentEvent::OpenFile(p.clone(), *line)),
+            ChangesEvent::Rewind(n) => cx.emit(AgentEvent::Rewind(*n)),
         });
         let monitor = cx.new(|cx| TaskMonitor::new(record.worktree.clone(), record.base.clone(), accent, record.in_root, cx));
         let label = def.label.clone();

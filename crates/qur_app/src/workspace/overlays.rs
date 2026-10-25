@@ -48,6 +48,12 @@ impl Workspace {
             items.push(("Send Review Findings to Agent", || Box::new(qur::SendReviewFindings), findings, false));
             items.push(("Stop", || Box::new(qur::StopAgent), true, false));
         }
+        if let Some(t) = self.term_task(id) {
+            let turns = t.record.last_turn().is_some();
+            items.push(("Show Last Turn's Changes", || Box::new(qur::ShowLastTurn), turns, false));
+            // Never in the project folder (Rewind would undo your own edits too).
+            items.push(("Rewind Last Turn…", || Box::new(qur::RewindLastTurn), turns && !in_root, false));
+        }
         items.push((if in_root { "Close Agent…" } else { "Delete Agent…" }, || Box::new(qur::DiscardTask), true, true));
         let n = items.len();
         div()

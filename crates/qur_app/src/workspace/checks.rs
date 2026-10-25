@@ -22,7 +22,7 @@ impl Workspace {
 
     /// Run the project's `[checks] command` in a task's worktree (decision 29):
     /// after an ACP turn that changed files, or by hand (Run Checks Now, also
-    /// for Agent Terminals, which have no turn boundaries). A failure goes back
+    /// for Agent Terminals, whose turns are only "busy, then quiet"). A failure goes back
     /// to the agent as text to review: the prompt (ACP) or the terminal's input
     /// line (Agent Terminal), not sent unless `auto_send` is on.
     pub(super) fn run_checks(&mut self, id: &str, manual: bool, window: &mut Window, cx: &mut Context<Self>) {
