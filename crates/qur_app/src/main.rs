@@ -21,6 +21,7 @@ mod monitor;
 mod picker;
 mod prompt;
 mod script;
+mod review;
 mod search_view;
 mod setup_view;
 mod terminal;

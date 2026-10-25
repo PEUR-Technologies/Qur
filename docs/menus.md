@@ -102,6 +102,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - ---
 - Review Changes `Cmd+4` · Merge into My Branch · Keep Working · Discard Task…
 - Show Last Turn's Changes · Rewind Last Turn… (structured agents with a turn that changed files; disabled otherwise, and for Agent Terminals)
+- Review Agent's Work… · Review Agent's Plan… (a read-only second opinion from another agent or model; Plan only when the agent has a plan) · Send Review Findings to Agent (once its reviewer has findings). Disabled otherwise, and for Agent Terminals. Also in the agent's right-click menu.
 - Run Checks Now (the project's `[checks] command`, decision 29)
 - Run Project in Worktree (the project's `[run] command`, decision 29)
 - Merge Conflicts ▸ Next Conflict · Previous Conflict · Accept Ours · Accept Theirs · Accept Both · Finish Merge · Abort Merge (enabled only during a merge)

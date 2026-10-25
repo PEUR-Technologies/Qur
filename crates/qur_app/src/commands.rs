@@ -26,7 +26,7 @@ pub mod qur {
             KeepWorking, DiscardTask, OpenWorktreeInTerminal, RevealWorktree, KeyboardShortcuts,
             RunDoctor, ShowLogs, ReportProblem, ExpandSelection, ShrinkSelection,
             RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge, Caffeinate, ShowKeepAwake, SwitchSession, ZenMode,
-            ShowLastTurn, RewindLastTurn,
+            ShowLastTurn, RewindLastTurn, ReviewWork, ReviewPlan, SendReviewFindings,
         ]
     );
 
@@ -338,6 +338,9 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::ReviewChanges, "Agent", "Review Changes", "", W, R),
     cmd!(qur::ShowLastTurn, "Agent", "Show Last Turn's Changes", "", W, R),
     cmd!(qur::RewindLastTurn, "Agent", "Rewind Last Turn…", "", W, R),
+    cmd!(qur::ReviewWork, "Agent", "Review Agent's Work…", "", W, R),
+    cmd!(qur::ReviewPlan, "Agent", "Review Agent's Plan…", "", W, R),
+    cmd!(qur::SendReviewFindings, "Agent", "Send Review Findings to Agent", "", W, R),
     cmd!(qur::Merge, "Agent", "Merge into My Branch", "", W, R),
     cmd!(qur::KeepWorking, "Agent", "Keep Working", "", W, R),
     cmd!(qur::RenameAgent, "Agent", "Rename Agent…", "", W, R),
@@ -412,6 +415,31 @@ pub fn needs_turn(c: &Cmd) -> bool {
 /// Commands that need a permission request waiting (disabled otherwise).
 pub fn needs_pending(c: &Cmd) -> bool {
     (c.action)().partial_eq(&agent::AllowAllPending)
+}
+
+/// What the selected agent offers for review (disabled, not hidden, without it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReviewState {
+    /// A structured (ACP) agent is selected: Review Agent's Work….
+    pub work: bool,
+    /// …and it has a plan: Review Agent's Plan….
+    pub plan: bool,
+    /// Its reviewer has findings: Send Review Findings to Agent.
+    pub findings: bool,
+}
+
+/// Is a review command available in `s`? Other commands always are.
+pub fn review_available(c: &Cmd, s: ReviewState) -> bool {
+    let a = (c.action)();
+    if a.partial_eq(&qur::ReviewWork) {
+        s.work
+    } else if a.partial_eq(&qur::ReviewPlan) {
+        s.plan
+    } else if a.partial_eq(&qur::SendReviewFindings) {
+        s.findings
+    } else {
+        true
+    }
 }
 
 /// Commands shown in the palette (not the low-level cursor/input ones).
@@ -547,6 +575,8 @@ pub struct MenuState {
     pub turns: bool,
     /// An agent has a permission request waiting (Allow All Pending).
     pub pending: bool,
+    /// Review Agent's Work… / Plan… / Send Review Findings for the selected agent.
+    pub review: ReviewState,
     pub vim: bool,
     pub keep_awake: bool,
     pub zen: bool,
@@ -732,6 +762,9 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::ReviewChanges),
             item(qur::ShowLastTurn).disabled(!s.turns),
             item(qur::RewindLastTurn).disabled(!s.turns),
+            item(qur::ReviewWork).disabled(!s.review.work),
+            item(qur::ReviewPlan).disabled(!s.review.plan),
+            item(qur::SendReviewFindings).disabled(!s.review.findings),
             item(qur::Merge),
             item(qur::KeepWorking),
             item(qur::RunChecks),
