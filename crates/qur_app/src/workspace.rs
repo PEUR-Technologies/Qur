@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, AnyWindowHandle, App, AppContext, Bounds, Context, Entity, FocusHandle, MouseButton, Pixels, PromptLevel,
+    Animation, AnimationExt, AnyElement, AnyWindowHandle, App, AppContext, Bounds, ClipboardItem, Context, Entity, FocusHandle, MouseButton, Pixels, PromptLevel,
     SharedString, Subscription, Task, Window, WindowAppearance, canvas, div, prelude::*, px, svg,
 };
 use qur_acp::PermissionKind;
@@ -497,6 +497,7 @@ impl Workspace {
             recent: qur_config::State::load().recent_projects,
             merging: self.merge.is_some(),
             turns: self.selected_last_turn(cx).is_some(),
+            pending: self.agents.iter().any(|a| a.read(cx).has_permission()),
             vim: self.config.keys.vim,
             keep_awake: self.config.ui.keep_awake,
             zen: self.config.ui.zen,
@@ -883,7 +884,7 @@ impl Workspace {
                 cx.notify();
             }
             AgentEvent::Subagents => cx.notify(),
-            AgentEvent::TurnsChanged => this.sync_menus(cx),
+            AgentEvent::TurnsChanged | AgentEvent::PermissionsChanged => this.sync_menus(cx),
             AgentEvent::Rewind(n) => {
                 let id = a.read(cx).record.id.clone();
                 this.rewind_turn(&id, *n, window, cx);
@@ -2238,6 +2239,42 @@ Commits stay; {label} is told with your next message."));
     fn deny(&mut self, _: &aa::Deny, _: &mut Window, cx: &mut Context<Self>) {
         self.answer(PermissionKind::RejectOnce, cx)
     }
+    /// Allow All Pending: every request the selected agent (else the first
+    /// agent waiting) has queued, each "allow once".
+    fn allow_all_pending(&mut self, _: &aa::AllowAllPending, _: &mut Window, cx: &mut Context<Self>) {
+        let target = self
+            .selected_agent()
+            .filter(|a| a.read(cx).has_permission())
+            .or_else(|| self.agents.iter().find(|a| a.read(cx).has_permission()).cloned());
+        let Some(a) = target else { return self.flash("No permission requests are waiting", cx) };
+        let (n, left) = a.update(cx, |a, cx| (a.allow_all_pending(cx), a.pending_permissions()));
+        let mut msg = format!("Allowed {n} request{} once", if n == 1 { "" } else { "s" });
+        if left > 0 {
+            msg.push_str(&format!("; {left} without an Allow once still need{} an answer", if left == 1 { "s" } else { "" }));
+        }
+        self.flash(msg, cx);
+    }
+    /// Find in Chat (Cmd+F in a chat agent).
+    fn find_in_chat(&mut self, _: &aa::FindInChat, window: &mut Window, cx: &mut Context<Self>) {
+        match self.selected_agent() {
+            Some(a) => a.update(cx, |a, cx| a.open_find(window, cx)),
+            None => self.flash("Find in Chat needs a chat agent: select one first", cx),
+        }
+    }
+    /// Copy Chat as Markdown: the selected chat agent's whole chat.
+    fn copy_chat(&mut self, _: &aa::CopyChatMarkdown, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(a) = self.selected_agent() else {
+            let msg = match &self.selected {
+                Some(Selected::TermTask(_)) => "Agent Terminals have no chat to copy: select the text and press Cmd+C",
+                _ => "Select a chat agent first",
+            };
+            return self.flash(msg, cx);
+        };
+        let md = a.read(cx).chat_markdown();
+        let lines = md.lines().count();
+        cx.write_to_clipboard(ClipboardItem::new_string(md));
+        self.flash(format!("Copied the chat as Markdown ({lines} lines)"), cx);
+    }
     /// Answer the selected agent's request, else the first agent waiting.
     fn answer(&mut self, kind: PermissionKind, cx: &mut Context<Self>) {
         let target = self
@@ -3102,6 +3139,7 @@ Commits stay; {label} is told with your next message."));
         }
         let cmds: Vec<_> = commands::palette_commands().collect();
         let turns = self.selected_last_turn(cx).is_some();
+        let pending = self.agents.iter().any(|a| a.read(cx).has_permission());
         let items = cmds
             .iter()
             .map(|c| {
@@ -3109,7 +3147,7 @@ Commits stay; {label} is told with your next message."));
                     commands::Tier::Ready => commands::display_keys(&c.first_keys()),
                     commands::Tier::Later(m) => format!("coming in {m}"),
                 };
-                let available = turns || !commands::needs_turn(c);
+                let available = (turns || !commands::needs_turn(c)) && (pending || !commands::needs_pending(c));
                 PickItem::new(format!("{}: {}", c.category, c.title)).right(right).enabled(c.ready() && available)
             })
             .collect();
@@ -3403,6 +3441,9 @@ Commits stay; {label} is told with your next message."));
             let turns = self.agent(id).is_some_and(|a| a.read(cx).record.last_turn().is_some());
             items.push(("Show Last Turn's Changes", || Box::new(qur::ShowLastTurn), turns, false));
             items.push(("Rewind Last Turn…", || Box::new(qur::RewindLastTurn), turns, false));
+            let pending = self.agent(id).is_some_and(|a| a.read(cx).has_permission());
+            items.push(("Allow All Pending", || Box::new(aa::AllowAllPending), pending, false));
+            items.push(("Copy Chat as Markdown", || Box::new(aa::CopyChatMarkdown), true, false));
             items.push(("Stop", || Box::new(qur::StopAgent), true, false));
         }
         items.push((if in_root { "Close Agent…" } else { "Delete Agent…" }, || Box::new(qur::DiscardTask), true, true));
@@ -5188,6 +5229,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::allow_once))
             .on_action(cx.listener(Self::allow_always))
             .on_action(cx.listener(Self::deny))
+            .on_action(cx.listener(Self::allow_all_pending))
+            .on_action(cx.listener(Self::find_in_chat))
+            .on_action(cx.listener(Self::copy_chat))
             .on_action(cx.listener(Self::reveal_worktree))
             .on_action(cx.listener(Self::worktree_terminal))
             .on_action(cx.listener(Self::discard_task))

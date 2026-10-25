@@ -124,6 +124,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Esc` (prompt) / `Cmd+.` | Stop the agent's turn (`session/cancel`) | M2 ✅ |
 | `@` / `/` in the prompt | Mention a file / pick an agent slash command | M2 ✅ |
 | `Cmd+Y` / `Cmd+Opt+Y` / `Cmd+Opt+Z` | Permission: Allow Once / Allow for This Task / Deny (Zed's keys), for the selected agent's request, else the first agent waiting; each works only when the agent offers that kind of answer, and its button shows the key. Not while the code modal, a terminal or a picker has focus (Agent menu too) | ✅ |
+| Agent menu / palette / permission bar | Permission: Allow All Pending: when several requests are queued, answer them all "allow once" (never "always"; a request without that option stays). The bar says "1 of N requests waiting" and has an **Allow all N once** button. No default keys; disabled when nothing is waiting | ✅ |
 | `Up` (empty prompt) | Pull the last queued message back into the prompt to edit it (each queued message also has Send now / Edit / ✕) | ✅ |
 | `Cmd+Z` / `Shift+Cmd+Z` (prompt, text fields) | Undo / redo in the prompt and the one-line fields (find, replace, go to line, pickers, address bar); typing groups into one step until a pause or a caret move | ✅ |
 | `Shift+Tab` (chat agent) | Next mode (Default / Accept Edits / Plan…), from the agent's session settings; click the Mode or Model chip above the prompt to choose | ✅ |
@@ -140,6 +141,8 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | Agent menu | Run Checks Now, Run Project in Worktree (no default keys) | ✅ |
 | Agent menu / chat turn line | Show Last Turn's Changes, Rewind Last Turn… (structured agents; no default keys) | ✅ |
 | `Cmd+F` (in a terminal) | Find in Terminal (regex; ↩ older, ⇧↩ newer, Esc closes) | M5 ✅ |
+| `Cmd+F` (in a structured agent's view) | Find in Chat: your messages, the agent's replies, thoughts, tool titles and output (ignores case); ↩ older, ⇧↩ newer, Esc closes. The current match's folded thought, tool call or group opens | ✅ |
+| Agent menu / palette / right-click an agent | Copy Chat as Markdown (no default keys) | ✅ |
 | `Cmd`-click (in a terminal) | Open a URL, or `path:line:col` in the code modal | M5 ✅ |
 | Agent menu / double-click a button | Rename Agent… | M5 ✅ |
 | `Cmd+Shift+F` / `Cmd+Shift+H` | Find / Replace in Project (Search view; ⌥C case, ⌥W word, ⌥R regex) | M6 ✅ |

@@ -2,15 +2,16 @@
 //! pending permission and status, plus the stage view that shows it:
 //! header, To-do strip, Chat, permission bar and prompt bar.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use gpui::{
-    App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, ListAlignment, ListState, SharedString,
-    Subscription, Task, Window, div, img, list, prelude::*, px,
+    App, ClipboardItem, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, HighlightStyle, ListAlignment, ListState,
+    SharedString, StyledText, Subscription, Task, Window, div, img, list, prelude::*, px,
 };
 use qur_acp::{
     AcpError, AgentCommand, AuthMethod, Client, ConfigOption, Event, Media, PermissionKind, PermissionOption, PermissionOutcome,
@@ -24,8 +25,10 @@ use crate::browser_view::{Attachment, BrowserPane, BrowserPaneEvent, base64};
 use crate::commands::agent as aa;
 use crate::changes_view::{ChangesEvent, ChangesView};
 use crate::dock::{self, Docks, Kind, Panel};
+use crate::input::{InputEvent, TextInput};
 use crate::live::{LiveEvent, LivePane};
 use crate::look::Look;
+use crate::markdown::{FindHl, find_all};
 use crate::monitor::{TaskMonitor, heat_kind, heat_status};
 use crate::prompt::{PromptEvent, PromptInput};
 
@@ -105,6 +108,8 @@ pub enum AgentEvent {
     Rewind(u32),
     /// A turn started, ended or was rewound (menus).
     TurnsChanged,
+    /// A permission request came or was answered (Allow All Pending's menu item).
+    PermissionsChanged,
 }
 
 #[derive(Clone)]
@@ -153,6 +158,19 @@ struct Permission {
     id: RequestId,
     tool: ToolCallUpdate,
     options: Vec<PermissionOption>,
+}
+
+/// Find in Chat (Cmd+F): the query field and every match.
+struct ChatFind {
+    input: Entity<TextInput>,
+    query: String,
+    /// Every match as (chat row, its number within the row), oldest first.
+    matches: Vec<(usize, usize)>,
+    /// Index into `matches`.
+    current: Option<usize>,
+    /// The chat changed since `matches` was computed.
+    dirty: bool,
+    _sub: Subscription,
 }
 
 /// Stage layout (decision 25).
@@ -257,7 +275,9 @@ pub struct AgentTask {
     /// row heights, so a change re-measures them.
     measured_at: (f32, f32, f32),
     plan: Vec<PlanEntry>,
-    permission: Option<Permission>,
+    /// Permission requests waiting for an answer, oldest (the one shown) first.
+    permissions: VecDeque<Permission>,
+    find: Option<ChatFind>,
     pub prompt: Entity<PromptInput>,
     /// Prompt to send once the session is ready.
     queued: Option<Outgoing>,
@@ -405,7 +425,8 @@ impl AgentTask {
             list,
             measured_at: (0., 0., 0.),
             plan: Vec::new(),
-            permission: None,
+            permissions: VecDeque::new(),
+            find: None,
             prompt,
             queued: None,
             // Saved by an earlier run (see `save_queue`).
@@ -451,6 +472,28 @@ impl AgentTask {
         let n = self.chat.len();
         self.chat.push(item);
         self.list.splice(n..n, 1);
+        self.chat_changed();
+        // A tool call joining a run: the group's summary (on its first row)
+        // and the row before it change.
+        if let Some(run) = tool_run(&self.chat, n).filter(|r| r.len() >= 2) {
+            self.list.remeasure_items(run.start..n);
+        }
+    }
+
+    /// Find in Chat counts matches again before it next draws.
+    fn chat_changed(&mut self) {
+        if let Some(f) = &mut self.find {
+            f.dirty = true;
+        }
+    }
+
+    /// Re-measure a tool call's row and, in a group, the whole group (its
+    /// summary and which rows show depend on every call's status).
+    fn remeasure_tool_rows(&mut self, ix: usize) {
+        match tool_run(&self.chat, ix) {
+            Some(run) => self.list.remeasure_items(run),
+            None => self.list.remeasure_items(ix..ix + 1),
+        }
     }
 
     /// Back to the newest message, following it again as it streams.
@@ -480,6 +523,7 @@ impl AgentTask {
             }
         }
         self.list.splice(last..last + 1, 1);
+        self.chat_changed();
     }
 
     /// An image or link block from a message: its own chat row.
@@ -547,7 +591,8 @@ impl AgentTask {
 
     fn refresh_tool(&mut self, id: &ToolCallId) {
         if let Some(ix) = self.chat.iter().rposition(|c| matches!(c, ChatItem::Tool(t) if t == id)) {
-            self.list.splice(ix..ix + 1, 1);
+            self.remeasure_tool_rows(ix);
+            self.chat_changed();
         }
     }
 
@@ -714,13 +759,14 @@ impl AgentTask {
             self.tools.clear();
             self.toggled.clear();
             self.list.reset(0);
+            self.chat_changed();
         }
         if let Some(c) = self.client.take() {
             std::thread::spawn(move || c.shutdown(Duration::from_secs(2)));
         }
         self._events = None;
         self.session_id = None;
-        self.permission = None;
+        self.permissions.clear();
         self.start(cx);
         cx.notify();
     }
@@ -1045,7 +1091,10 @@ impl AgentTask {
             };
             let r = rx.await;
             this.update(cx, |t, cx| {
-                t.permission = None;
+                if !t.permissions.is_empty() {
+                    t.permissions.clear();
+                    cx.emit(AgentEvent::PermissionsChanged);
+                }
                 match r {
                     Ok(Ok(StopReason::EndTurn)) => t.set_status(Status::Done, cx),
                     Ok(Ok(StopReason::Cancelled)) => {
@@ -1091,9 +1140,10 @@ impl AgentTask {
             && matches!(self.status, Status::Working | Status::NeedsYou)
         {
             c.cancel(s);
-            if let Some(p) = self.permission.take() {
+            for p in std::mem::take(&mut self.permissions) {
                 c.respond_permission(p.id, PermissionOutcome::Cancelled);
             }
+            cx.emit(AgentEvent::PermissionsChanged);
         }
         cx.notify();
     }
@@ -1108,7 +1158,7 @@ impl AgentTask {
             std::thread::spawn(move || c.shutdown(Duration::from_secs(2)))
         });
         self.session_id = None;
-        self.permission = None;
+        self.permissions.clear();
         self._events = None;
         if !matches!(self.status, Status::Error(_)) {
             self.set_status(Status::Stopped, cx);
@@ -1121,7 +1171,7 @@ impl AgentTask {
     /// request without "always" mustn't cancel it); Deny without a reject
     /// option cancels the request.
     pub fn answer_permission(&mut self, kind: PermissionKind, cx: &mut Context<Self>) {
-        let Some(p) = &self.permission else { return };
+        let Some(p) = self.permissions.front() else { return };
         let id = p.options.iter().find(|o| o.kind == kind).map(|o| o.id.clone());
         if id.is_none() && kind != PermissionKind::RejectOnce {
             return;
@@ -1134,10 +1184,21 @@ impl AgentTask {
         self.answer_with(Some(option_id.to_string()), cx);
     }
 
+    /// Answer the request shown (the oldest); the next one shows after it.
     fn answer_with(&mut self, option_id: Option<String>, cx: &mut Context<Self>) {
-        let Some(p) = self.permission.take() else { return };
+        let Some(p) = self.permissions.pop_front() else { return };
+        self.respond(p, option_id, cx);
+        if self.permissions.is_empty() {
+            self.set_status(Status::Working, cx);
+        }
+        cx.emit(AgentEvent::PermissionsChanged);
+        cx.notify();
+    }
+
+    fn respond(&mut self, p: Permission, option_id: Option<String>, cx: &mut Context<Self>) {
         let paths: Vec<PathBuf> = p.tool.locations.iter().flatten().map(|l| l.path.clone()).collect();
         self.monitor.update(cx, |m, cx| m.on_permission(&paths, false, cx));
+        println!("PERMISSION {} {} {}", self.record.id, p.tool.id, option_id.as_deref().unwrap_or("cancelled"));
         let outcome = match option_id {
             Some(id) => PermissionOutcome::Selected(id),
             None => PermissionOutcome::Cancelled,
@@ -1145,7 +1206,35 @@ impl AgentTask {
         if let Some(c) = &self.client {
             c.respond_permission(p.id, outcome);
         }
-        self.set_status(Status::Working, cx);
+        self.refresh_tool(&p.tool.id);
+    }
+
+    /// Requests waiting for an answer.
+    pub fn pending_permissions(&self) -> usize {
+        self.permissions.len()
+    }
+
+    /// Allow All Pending: answer every waiting request with its "allow
+    /// once" option (never "always"). A request without one stays. Returns
+    /// how many were allowed.
+    pub fn allow_all_pending(&mut self, cx: &mut Context<Self>) -> usize {
+        let mut allowed = 0;
+        for p in std::mem::take(&mut self.permissions) {
+            match p.options.iter().find(|o| o.kind == PermissionKind::AllowOnce).map(|o| o.id.clone()) {
+                Some(id) => {
+                    self.respond(p, Some(id), cx);
+                    allowed += 1;
+                }
+                None => self.permissions.push_back(p),
+            }
+        }
+        println!("PERMISSION {} allow all pending: {allowed} allowed, {} left", self.record.id, self.permissions.len());
+        if allowed > 0 && self.permissions.is_empty() {
+            self.set_status(Status::Working, cx);
+        }
+        cx.emit(AgentEvent::PermissionsChanged);
+        cx.notify();
+        allowed
     }
 
     /// The agent's full new set of settings. A mode kept the old way
@@ -1196,7 +1285,7 @@ impl AgentTask {
     }
 
     pub fn has_permission(&self) -> bool {
-        self.permission.is_some()
+        !self.permissions.is_empty()
     }
 
     fn on_event(&mut self, ev: Event, cx: &mut Context<Self>) {
@@ -1314,13 +1403,21 @@ impl AgentTask {
             Event::Permission { id, tool_call, options, .. } => {
                 let paths: Vec<PathBuf> = tool_call.locations.iter().flatten().map(|l| l.path.clone()).collect();
                 self.monitor.update(cx, |m, cx| m.on_permission(&paths, true, cx));
-                self.permission = Some(Permission { id, tool: tool_call, options });
+                let tool = tool_call.id.clone();
+                println!("PERMISSION {} {tool} asked ({} waiting)", self.record.id, self.permissions.len() + 1);
+                self.permissions.push_back(Permission { id, tool: tool_call, options });
+                // Its tool row shows (even in a folded group) while it waits.
+                self.refresh_tool(&tool);
                 self.set_status(Status::NeedsYou, cx);
+                cx.emit(AgentEvent::PermissionsChanged);
             }
             Event::Exited { code, stderr_tail } => {
                 self.client = None;
                 self.session_id = None;
-                self.permission = None;
+                if !self.permissions.is_empty() {
+                    self.permissions.clear();
+                    cx.emit(AgentEvent::PermissionsChanged);
+                }
                 if !matches!(self.status, Status::Stopped) {
                     // The status line gets the last stderr line; the callout the
                     // whole tail (the real error is often a few lines up).
@@ -1348,6 +1445,10 @@ impl AgentTask {
     fn render_item(&self, ix: usize, look: &Look, cx: &mut Context<Self>) -> gpui::AnyElement {
         let ui = &look.theme.ui;
         let pad = |d: gpui::Div| d.px(look.z(16.)).py(look.z(6.)).w_full();
+        // Find in Chat: this row's matches marked, the current one stronger.
+        let hl = self.row_hl(ix, look);
+        let hl = hl.as_ref();
+        let current_here = self.find_current().is_some_and(|(row, _)| row == ix);
         match &self.chat[ix] {
             ChatItem::User(t) => pad(div())
                 .child(
@@ -1358,14 +1459,14 @@ impl AgentTask {
                         .rounded(look.z(6.))
                         .bg(look.c(ui.active_bg))
                         .text_color(look.c(ui.text))
-                        .child(t.clone()),
+                        .child(marked(hl, t.clone())),
                 )
                 .into_any_element(),
             // Hover shows "Copy" (the raw Markdown).
             ChatItem::Agent(t) => pad(div())
                 .relative()
                 .group("agent-msg")
-                .child(self.markdown(t, format!("md-{}-{ix}", cx.entity_id()), look, cx))
+                .child(self.markdown_find(t, format!("md-{}-{ix}", cx.entity_id()), look, hl, cx))
                 .child(
                     div()
                         .absolute()
@@ -1379,10 +1480,11 @@ impl AgentTask {
                 )
                 .into_any_element(),
             // Open while it streams (the last item of a working turn), then
-            // folded to its first line; click to toggle (as in Zed).
+            // folded to its first line; click to toggle (as in Zed). Find's
+            // current match opens it too.
             ChatItem::Thought(t) => {
                 let streaming = ix + 1 == self.chat.len() && matches!(self.status, Status::Working);
-                let open = streaming != self.toggled.contains(&format!("thought-{ix}"));
+                let open = (streaming != self.toggled.contains(&format!("thought-{ix}"))) || current_here;
                 let t = t.trim();
                 let first = t.lines().next().unwrap_or("").to_string();
                 pad(div())
@@ -1399,10 +1501,10 @@ impl AgentTask {
                             .when(!open, |d| d.child(div().min_w(px(0.)).truncate().italic().child(first)))
                             .on_click(cx.listener(move |t, _, _, cx| t.toggle(format!("thought-{ix}"), ix, cx))),
                     )
-                    .when(open, |d| d.child(div().pl(look.z(14.)).pt(look.z(2.)).italic().child(t.to_string())))
+                    .when(open, |d| d.child(div().pl(look.z(14.)).pt(look.z(2.)).italic().child(marked(hl, t.to_string()))))
                     .into_any_element()
             }
-            ChatItem::Notice(t) => pad(div()).text_size(look.text(0.)).text_color(look.c(ui.text_muted)).child(t.clone()).into_any_element(),
+            ChatItem::Notice(t) => pad(div()).text_size(look.text(0.)).text_color(look.c(ui.text_muted)).child(marked(hl, t.clone())).into_any_element(),
             ChatItem::Output(t) => pad(div())
                 .child(
                     div()
@@ -1415,7 +1517,7 @@ impl AgentTask {
                         .font_family(look.code_font.clone())
                         .text_size(look.text(0.))
                         .text_color(look.c(ui.text_secondary))
-                        .child(t.clone()),
+                        .child(marked(hl, t.clone())),
                 )
                 .into_any_element(),
             // At its own size, at most 480 high and never wider than the
@@ -1448,86 +1550,165 @@ impl AgentTask {
                             .text_color(look.c(ui.text_secondary))
                             .hover(|d| d.text_color(look.c(ui.text)).border_color(look.c(ui.border_strong)))
                             .child(div().flex_none().text_color(look.c(ui.text_muted)).child(if uri.starts_with("file://") { "▤" } else { "↗" }))
-                            .child(div().min_w(px(0.)).truncate().child(name.clone()))
+                            .child(div().min_w(px(0.)).truncate().child(marked(hl, name.clone())))
                             .on_click(cx.listener(move |t, _, _, cx| t.open_link(&target, cx))),
                     )
                     .into_any_element()
             }
-            ChatItem::Failure(f) => pad(div()).child(self.failure_callout(ix, f, look, cx)).into_any_element(),
+            ChatItem::Failure(f) => pad(div()).child(self.failure_callout(ix, f, look, hl, cx)).into_any_element(),
             ChatItem::Turn(n) => pad(div()).child(self.turn_line(ix, *n, look, cx)).into_any_element(),
+            // Two or more calls in a row are one group: a summary line
+            // ("Read 4 files, ran 2 commands ▸") that unfolds to the calls.
+            // Folded, a call still shows while it runs, failed, waits for
+            // permission or holds Find's current match.
             ChatItem::Tool(id) => {
-                let Some(t) = self.tools.get(id) else { return div().into_any_element() };
-                let (glyph, color) = match t.status {
-                    ToolStatus::Pending | ToolStatus::InProgress => ("…", ui.text_muted),
-                    ToolStatus::Completed => ("✓", ui.success),
-                    ToolStatus::Failed => ("✕", ui.error),
+                let Some(run) = tool_run(&self.chat, ix).filter(|r| r.len() >= 2) else {
+                    return self.tool_row(ix, id, look, hl, current_here, cx).into_any_element();
                 };
-                let kind = match t.kind {
-                    ToolKind::Read => "read",
-                    ToolKind::Edit => "edit",
-                    ToolKind::Delete => "delete",
-                    ToolKind::Move => "move",
-                    ToolKind::Search => "search",
-                    ToolKind::Execute => "run",
-                    ToolKind::Think => "think",
-                    ToolKind::Fetch => "fetch",
-                    ToolKind::SwitchMode => "mode",
-                    ToolKind::Other => "tool",
-                };
-                // Real line counts (every line of old and new counted before).
-                let diffs: Vec<(&PathBuf, Vec<(char, &str)>)> = t
-                    .content
-                    .iter()
-                    .filter_map(|c| match c {
-                        ToolContent::Diff { path, old_text, new_text } => Some((path, line_diff(old_text.as_deref().unwrap_or(""), new_text))),
-                        _ => None,
-                    })
-                    .collect();
-                let add = diffs.iter().flat_map(|(_, d)| d).filter(|(k, _)| *k == '+').count();
-                let del = diffs.iter().flat_map(|(_, d)| d).filter(|(k, _)| *k == '-').count();
-                let loc = t.locations.first().cloned();
-                let title = if t.title.is_empty() { kind.to_string() } else { t.title.clone() };
-                let body = self.tool_body(t, &diffs, look, cx);
-                // Edits and failures start open; the rest folded (click toggles).
-                // A command stays open while it runs, so its output shows as it
-                // streams (`terminal_output_delta`), then folds.
-                let running_cmd = t.content.iter().any(|c| matches!(c, ToolContent::Terminal(_))) && t.exit.is_none() && matches!(t.status, ToolStatus::Pending | ToolStatus::InProgress);
-                let default_open = matches!(t.kind, ToolKind::Edit | ToolKind::Delete | ToolKind::Move) || t.status == ToolStatus::Failed || running_cmd;
-                let open = body.is_some() && default_open != self.toggled.contains(id.as_str());
-                let expandable = body.is_some();
-                let tid = id.clone();
-                pad(div())
-                    .py(look.z(2.))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("tool-{id}")))
-                            .flex()
-                            .items_center()
-                            .gap(look.z(8.))
-                            .text_size(look.text(0.))
-                            .text_color(look.c(ui.text_secondary))
-                            .when(expandable || loc.is_some(), |d| d.cursor_pointer().hover(|d| d.text_color(look.c(ui.text))))
-                            .child(div().w(look.z(40.)).flex_none().text_color(look.c(ui.text_muted)).child(kind))
-                            .child(div().min_w(px(0.)).truncate().child(title))
-                            .when(add + del > 0, |d| {
-                                d.child(div().flex_none().text_color(look.c(look.theme.diff.added_text)).child(format!("+{add}")))
-                                    .child(div().flex_none().text_color(look.c(look.theme.diff.removed_text)).child(format!("−{del}")))
-                            })
-                            .when_some(t.exit.flatten().filter(|c| *c != 0), |d, c| d.child(div().flex_none().text_color(look.c(ui.error)).child(format!("exit {c}"))))
-                            .child(div().flex_none().text_color(look.c(color)).child(glyph))
-                            .when(expandable, |d| d.child(div().flex_none().text_color(look.c(ui.text_muted)).child(if open { "▾" } else { "▸" })))
-                            .on_click(cx.listener(move |t, _, _, cx| {
-                                if expandable {
-                                    t.toggle(tid.to_string(), ix, cx);
-                                } else if let Some(l) = &loc {
-                                    cx.emit(AgentEvent::OpenFile(l.path.clone(), l.line));
-                                }
-                            })),
-                    )
-                    .when_some(body.filter(|_| open), |d, b| d.child(div().pl(look.z(48.)).pt(look.z(4.)).child(b)))
-                    .into_any_element()
+                let open = self.group_open(&run);
+                let row = (open || self.tool_needs_eye(ix, id)).then(|| self.tool_row(ix, id, look, hl, current_here, cx).pl(look.z(30.)));
+                if ix != run.start {
+                    return row.map(|r| r.into_any_element()).unwrap_or_else(|| div().into_any_element());
+                }
+                div().w_full().flex().flex_col().child(self.group_header(run, open, look, cx)).children(row).into_any_element()
             }
         }
+    }
+
+    /// One tool call's row: kind, title, counts, status, and its body when
+    /// unfolded.
+    fn tool_row(&self, ix: usize, id: &ToolCallId, look: &Look, hl: Option<&FindHl>, current_here: bool, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = &look.theme.ui;
+        let Some(t) = self.tools.get(id) else { return div() };
+        let (glyph, color) = match t.status {
+            ToolStatus::Pending | ToolStatus::InProgress => ("…", ui.text_muted),
+            ToolStatus::Completed => ("✓", ui.success),
+            ToolStatus::Failed => ("✕", ui.error),
+        };
+        let asking = self.permissions.iter().any(|p| p.tool.id == *id);
+        let kind = kind_word(t.kind);
+        // Real line counts (every line of old and new counted before).
+        let diffs = tool_diffs(t);
+        let add = diffs.iter().flat_map(|(_, d)| d).filter(|(k, _)| *k == '+').count();
+        let del = diffs.iter().flat_map(|(_, d)| d).filter(|(k, _)| *k == '-').count();
+        let loc = t.locations.first().cloned();
+        let title = tool_title(t);
+        let body = self.tool_body(t, &diffs, look, hl, cx);
+        // Edits and failures start open; the rest folded (click toggles).
+        // A command stays open while it runs, so its output shows as it
+        // streams (`terminal_output_delta`), then folds.
+        let running_cmd = t.content.iter().any(|c| matches!(c, ToolContent::Terminal(_))) && t.exit.is_none() && matches!(t.status, ToolStatus::Pending | ToolStatus::InProgress);
+        let default_open = matches!(t.kind, ToolKind::Edit | ToolKind::Delete | ToolKind::Move) || t.status == ToolStatus::Failed || running_cmd;
+        let open = body.is_some() && (default_open != self.toggled.contains(id.as_str()) || current_here);
+        let expandable = body.is_some();
+        let tid = id.clone();
+        div()
+            .px(look.z(16.))
+            .py(look.z(2.))
+            .w_full()
+            .child(
+                div()
+                    .id(SharedString::from(format!("tool-{id}")))
+                    .flex()
+                    .items_center()
+                    .gap(look.z(8.))
+                    .text_size(look.text(0.))
+                    .text_color(look.c(ui.text_secondary))
+                    .when(expandable || loc.is_some(), |d| d.cursor_pointer().hover(|d| d.text_color(look.c(ui.text))))
+                    .child(div().w(look.z(40.)).flex_none().text_color(look.c(ui.text_muted)).child(kind))
+                    .child(div().min_w(px(0.)).truncate().child(marked(hl, title)))
+                    .when(add + del > 0, |d| {
+                        d.child(div().flex_none().text_color(look.c(look.theme.diff.added_text)).child(format!("+{add}")))
+                            .child(div().flex_none().text_color(look.c(look.theme.diff.removed_text)).child(format!("−{del}")))
+                    })
+                    .when_some(t.exit.flatten().filter(|c| *c != 0), |d, c| d.child(div().flex_none().text_color(look.c(ui.error)).child(format!("exit {c}"))))
+                    .when(asking, |d| d.child(div().flex_none().text_color(look.c(self.accent)).child("needs you")))
+                    .child(div().flex_none().text_color(look.c(color)).child(glyph))
+                    .when(expandable, |d| d.child(div().flex_none().text_color(look.c(ui.text_muted)).child(if open { "▾" } else { "▸" })))
+                    .on_click(cx.listener(move |t, _, _, cx| {
+                        if expandable {
+                            t.toggle(tid.to_string(), ix, cx);
+                        } else if let Some(l) = &loc {
+                            cx.emit(AgentEvent::OpenFile(l.path.clone(), l.line));
+                        }
+                    })),
+            )
+            .when_some(body.filter(|_| open), |d, b| d.child(div().pl(look.z(48.)).pt(look.z(4.)).child(b)))
+    }
+
+    /// The tool calls of a group (`run` of chat rows).
+    fn run_tools(&self, run: &Range<usize>) -> Vec<&ToolCall> {
+        self.chat[run.clone()]
+            .iter()
+            .filter_map(|c| match c {
+                ChatItem::Tool(id) => self.tools.get(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A group's fold key: its first call's id.
+    fn group_key(&self, run: &Range<usize>) -> String {
+        match &self.chat[run.start] {
+            ChatItem::Tool(id) => format!("group-{id}"),
+            _ => String::new(),
+        }
+    }
+
+    /// Groups start folded; a click on the summary unfolds them.
+    fn group_open(&self, run: &Range<usize>) -> bool {
+        self.toggled.contains(&self.group_key(run))
+    }
+
+    /// A call that shows even in a folded group.
+    fn tool_needs_eye(&self, ix: usize, id: &ToolCallId) -> bool {
+        let status = self.tools.get(id).map(|t| t.status);
+        matches!(status, Some(ToolStatus::Pending | ToolStatus::InProgress | ToolStatus::Failed))
+            || self.permissions.iter().any(|p| p.tool.id == *id)
+            || self.find_current().is_some_and(|(row, _)| row == ix)
+    }
+
+    fn toggle_group(&mut self, run: Range<usize>, cx: &mut Context<Self>) {
+        let key = self.group_key(&run);
+        if !self.toggled.remove(&key) {
+            self.toggled.insert(key);
+        }
+        self.list.remeasure_items(run);
+        cx.notify();
+    }
+
+    /// "Read 4 files, ran 2 commands  ✓ ▸".
+    fn group_header(&self, run: Range<usize>, open: bool, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = &look.theme.ui;
+        let tools = self.run_tools(&run);
+        let failed = tools.iter().filter(|t| t.status == ToolStatus::Failed).count();
+        let running = tools.iter().any(|t| matches!(t.status, ToolStatus::Pending | ToolStatus::InProgress));
+        let (glyph, color) = if running {
+            ("…", ui.text_muted)
+        } else if failed > 0 {
+            ("✕", ui.error)
+        } else {
+            ("✓", ui.success)
+        };
+        let summary = group_summary(&tools);
+        let n = tools.len();
+        div().px(look.z(16.)).py(look.z(2.)).w_full().child(
+            div()
+                .id(("tool-group", run.start))
+                .flex()
+                .items_center()
+                .gap(look.z(8.))
+                .text_size(look.text(0.))
+                .text_color(look.c(ui.text_secondary))
+                .cursor_pointer()
+                .hover(|d| d.text_color(look.c(ui.text)))
+                .child(div().w(look.z(40.)).flex_none().text_color(look.c(ui.text_muted)).child(format!("{n} ×")))
+                .child(div().min_w(px(0.)).truncate().child(summary))
+                .when(failed > 0, |d| d.child(div().flex_none().text_color(look.c(ui.error)).child(format!("{failed} failed"))))
+                .child(div().flex_none().text_color(look.c(color)).child(glyph))
+                .child(div().flex_none().text_color(look.c(ui.text_muted)).child(if open { "▾" } else { "▸" }))
+                .on_click(cx.listener(move |t, _, _, cx| t.toggle_group(run.clone(), cx))),
+        )
     }
 
     /// Fold or unfold a chat item (tool call `key` = its id, thought
@@ -1543,7 +1724,7 @@ impl AgentTask {
     /// An error-coloured callout: what went wrong, the full error (bounded,
     /// scrolls), then Retry / Edit & resend when a message can be sent
     /// again, and Copy error.
-    fn failure_callout(&self, ix: usize, f: &Failure, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+    fn failure_callout(&self, ix: usize, f: &Failure, look: &Look, hl: Option<&FindHl>, cx: &mut Context<Self>) -> gpui::Div {
         let ui = &look.theme.ui;
         let button = |id: &'static str, label: &'static str| {
             div()
@@ -1570,15 +1751,15 @@ impl AgentTask {
             .flex_col()
             .gap(look.z(6.))
             .text_size(look.text(0.))
-            .child(div().text_color(look.c(ui.error)).child(f.title.clone()))
-            .children(f.summary.clone().map(|t| div().text_color(look.c(ui.text)).child(t)))
+            .child(div().text_color(look.c(ui.error)).child(marked(hl, f.title.clone())))
+            .children(f.summary.clone().map(|t| div().text_color(look.c(ui.text)).child(marked(hl, t))))
             // The raw error, small and scrollable, for when the summary isn't enough.
             .children(f.detail.clone().map(|d| {
                 div()
                     .id(("failure-detail", ix))
                     .max_h(look.z(if f.summary.is_some() { 90. } else { 180. }))
                     .overflow_y_scroll()
-                    .child(code_block(&d, look))
+                    .child(code_block_find(&d, look, hl))
             }))
             .child(
                 div()
@@ -1594,12 +1775,12 @@ impl AgentTask {
     /// What an unfolded tool call shows: its text (code blocks in the code
     /// font), each file's diff, a command's output and exit, or else its raw
     /// input/output. None when there's nothing to show.
-    fn tool_body(&self, t: &ToolCall, diffs: &[(&PathBuf, Vec<(char, &str)>)], look: &Look, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    fn tool_body(&self, t: &ToolCall, diffs: &[(&PathBuf, Vec<(char, &str)>)], look: &Look, hl: Option<&FindHl>, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let ui = &look.theme.ui;
         let mut parts: Vec<gpui::AnyElement> = Vec::new();
         for c in &t.content {
             match c {
-                ToolContent::Text(s) if !s.trim().is_empty() => parts.push(self.markdown(s, format!("md-{}-{}-{}", cx.entity_id(), t.id, parts.len()), look, cx).into_any_element()),
+                ToolContent::Text(s) if !s.trim().is_empty() => parts.push(self.markdown_find(s, format!("md-{}-{}-{}", cx.entity_id(), t.id, parts.len()), look, hl, cx).into_any_element()),
                 ToolContent::Terminal(_) => {
                     let out = t.output.as_deref().unwrap_or("").trim_end();
                     let status = match t.exit {
@@ -1611,7 +1792,7 @@ impl AgentTask {
                     let failed = matches!(t.exit, Some(Some(c)) if c != 0);
                     // Still running with nothing yet: just "running…" (the
                     // Claude adapter sends the output when the command ends).
-                    let block = (!out.is_empty() || t.exit.is_some()).then(|| code_block(&tail_lines(out, MAX_TOOL_LINES), look).when(out.is_empty(), |d| d.child("(no output)")));
+                    let block = (!out.is_empty() || t.exit.is_some()).then(|| code_block_find(&tail_lines(out, MAX_TOOL_LINES), look, hl).when(out.is_empty(), |d| d.child("(no output)")));
                     parts.push(
                         div()
                             .flex()
@@ -1798,7 +1979,8 @@ impl AgentTask {
     }
 
     fn permission_bar(&self, look: &Look, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let p = self.permission.as_ref()?;
+        let p = self.permissions.front()?;
+        let waiting = self.permissions.len();
         let ui = &look.theme.ui;
         let what = p.tool.title.clone().unwrap_or_else(|| "use a tool".into());
         let file = p.tool.locations.as_ref().and_then(|l| l.first()).map(|l| self.rel(&l.path));
@@ -1808,15 +1990,8 @@ impl AgentTask {
             t
         });
         let tool = tool.unwrap_or_else(|| p.tool.to_tool_call());
-        let diffs: Vec<(&PathBuf, Vec<(char, &str)>)> = tool
-            .content
-            .iter()
-            .filter_map(|c| match c {
-                ToolContent::Diff { path, old_text, new_text } => Some((path, line_diff(old_text.as_deref().unwrap_or(""), new_text))),
-                _ => None,
-            })
-            .collect();
-        let detail = self.tool_body(&tool, &diffs, look, cx);
+        let diffs = tool_diffs(&tool);
+        let detail = self.tool_body(&tool, &diffs, look, None, cx);
         // Every option the agent offers, in its words ("Yes, and auto-accept
         // edits", "No, keep planning"…); the first allow is the primary one.
         let primary = p.options.iter().position(|o| o.kind == PermissionKind::AllowOnce).or_else(|| p.options.iter().position(|o| matches!(o.kind, PermissionKind::AllowAlways)));
@@ -1869,6 +2044,24 @@ impl AgentTask {
                     .on_click(cx.listener(move |t, _, _, cx| t.answer_option(&id, cx)))
             })
             .collect();
+        // More waiting: allow them all at once (each "allow once").
+        let allow_all = (waiting > 1).then(|| {
+            div()
+                .id("perm-allow-all")
+                .px(look.z(10.))
+                .py(look.z(3.))
+                .rounded(look.z(4.))
+                .cursor_pointer()
+                .text_size(look.text(0.))
+                .border_1()
+                .border_color(look.c(ui.border_strong))
+                .text_color(look.c(ui.text))
+                .hover(|d| d.bg(look.c(ui.hover_bg)))
+                .child(format!("Allow all {waiting} once"))
+                .on_click(cx.listener(|t, _, _, cx| {
+                    t.allow_all_pending(cx);
+                }))
+        });
         Some(
             div()
                 .flex_none()
@@ -1893,9 +2086,10 @@ impl AgentTask {
                         .max_h(look.z(90.))
                         .overflow_y_scroll()
                         .text_color(look.c(ui.text))
-                        .child(format!("{} wants to {what}", self.def.label)),
+                        .child(format!("{} wants to {what}", self.def.label))
+                        .when(waiting > 1, |d| d.child(div().text_size(look.text(-1.)).text_color(look.c(ui.text_muted)).child(format!("1 of {waiting} requests waiting")))),
                 )
-                .child(div().flex().flex_wrap().gap(look.z(6.)).children(buttons))
+                .child(div().flex().flex_wrap().gap(look.z(6.)).children(buttons).children(allow_all))
                 .when(file.is_some() || detail.is_some(), |d| {
                     d.child(
                         div()
@@ -1978,7 +2172,178 @@ fn change_totals(files: &[FileChange]) -> (usize, usize) {
     files.iter().fold((0, 0), |(a, d), f| (a + f.add, d + f.del))
 }
 
+/// A tool kind in a word (the chat's left column, Copy Chat as Markdown).
+fn kind_word(k: ToolKind) -> &'static str {
+    match k {
+        ToolKind::Read => "read",
+        ToolKind::Edit => "edit",
+        ToolKind::Delete => "delete",
+        ToolKind::Move => "move",
+        ToolKind::Search => "search",
+        ToolKind::Execute => "run",
+        ToolKind::Think => "think",
+        ToolKind::Fetch => "fetch",
+        ToolKind::SwitchMode => "mode",
+        ToolKind::Other => "tool",
+    }
+}
+
+/// A tool call's title, or its kind when it has none.
+fn tool_title(t: &ToolCall) -> String {
+    if t.title.is_empty() { kind_word(t.kind).to_string() } else { t.title.clone() }
+}
+
+/// Each file diff a tool call carries, as changed lines.
+fn tool_diffs(t: &ToolCall) -> Vec<(&PathBuf, Vec<(char, &str)>)> {
+    t.content
+        .iter()
+        .filter_map(|c| match c {
+            ToolContent::Diff { path, old_text, new_text } => Some((path, line_diff(old_text.as_deref().unwrap_or(""), new_text))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The run of consecutive tool calls chat row `ix` belongs to (None when
+/// it isn't a tool call). Two or more make a group.
+fn tool_run(chat: &[ChatItem], ix: usize) -> Option<Range<usize>> {
+    let is_tool = |i: usize| matches!(chat.get(i), Some(ChatItem::Tool(_)));
+    if !is_tool(ix) {
+        return None;
+    }
+    let start = (0..ix).rev().take_while(|&i| is_tool(i)).last().unwrap_or(ix);
+    let end = (ix + 1..chat.len()).take_while(|&i| is_tool(i)).last().map_or(ix + 1, |e| e + 1);
+    Some(start..end)
+}
+
+/// A group's summary: "Read 4 files, ran 2 commands", kinds in the order
+/// they first came.
+fn group_summary(tools: &[&ToolCall]) -> String {
+    // Kinds that read the same are counted together.
+    let key = |k: ToolKind| match k {
+        ToolKind::Read => 0,
+        ToolKind::Edit => 1,
+        ToolKind::Delete => 2,
+        ToolKind::Move => 3,
+        ToolKind::Search => 4,
+        ToolKind::Execute => 5,
+        ToolKind::Fetch => 6,
+        ToolKind::Think | ToolKind::SwitchMode | ToolKind::Other => 7,
+    };
+    let mut counts: Vec<(u8, usize)> = Vec::new();
+    for t in tools {
+        let k = key(t.kind);
+        match counts.iter_mut().find(|(x, _)| *x == k) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((k, 1)),
+        }
+    }
+    let only = counts.len() == 1;
+    let n = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let parts: Vec<String> = counts
+        .iter()
+        .map(|&(k, c)| match k {
+            0 => format!("read {}", n(c, "file", "files")),
+            1 => format!("edited {}", n(c, "file", "files")),
+            2 => format!("deleted {}", n(c, "file", "files")),
+            3 => format!("moved {}", n(c, "file", "files")),
+            4 => format!("ran {}", n(c, "search", "searches")),
+            5 => format!("ran {}", n(c, "command", "commands")),
+            6 => format!("fetched {}", n(c, "page", "pages")),
+            _ if only => format!("used {}", n(c, "tool", "tools")),
+            _ => format!("used {}", n(c, "other tool", "other tools")),
+        })
+        .collect();
+    let text = parts.join(", ");
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => text,
+    }
+}
+
+/// Copy Chat as Markdown: the chat for pasting elsewhere. Your messages
+/// are quoted under "## You", the agent's Markdown is kept as it is, tool
+/// calls become one line each with their status, and thoughts are left out.
+fn chat_markdown(title: &str, agent: &str, chat: &[ChatItem], tools: &HashMap<ToolCallId, ToolCall>, turns: &[qur_agents::Turn]) -> String {
+    // Blocks are separated by a blank line; tool lines in a row form one list.
+    fn add(out: &mut String, text: &str, tool_line: bool, prev_tool: &mut bool) {
+        out.push_str(if tool_line && *prev_tool { "\n" } else { "\n\n" });
+        out.push_str(text);
+        *prev_tool = tool_line;
+    }
+    let quote = |t: &str| t.trim_end().lines().map(|l| if l.is_empty() { ">".to_string() } else { format!("> {l}") }).collect::<Vec<_>>().join("\n");
+    let mut out = format!("# {}", title.trim());
+    let mut prev_tool = false;
+    // The agent's heading goes once after each of your messages.
+    let mut spoke = false;
+    for item in chat {
+        let agent_side = matches!(item, ChatItem::Agent(_) | ChatItem::Tool(_) | ChatItem::Image(..) | ChatItem::Link { .. });
+        if agent_side && !spoke {
+            add(&mut out, &format!("## {agent}"), false, &mut prev_tool);
+            spoke = true;
+        }
+        match item {
+            ChatItem::User(t) => {
+                add(&mut out, "## You", false, &mut prev_tool);
+                add(&mut out, &quote(t), false, &mut prev_tool);
+                spoke = false;
+            }
+            ChatItem::Agent(t) if !t.trim().is_empty() => add(&mut out, t.trim(), false, &mut prev_tool),
+            ChatItem::Agent(_) | ChatItem::Thought(_) => {}
+            ChatItem::Tool(id) => {
+                let Some(t) = tools.get(id) else { continue };
+                let glyph = match t.status {
+                    ToolStatus::Completed => "✓",
+                    ToolStatus::Failed => "✕",
+                    ToolStatus::Pending | ToolStatus::InProgress => "…",
+                };
+                let mut line = format!("- {glyph} {}: {}", kind_word(t.kind), tool_title(t).split_whitespace().collect::<Vec<_>>().join(" "));
+                let diffs = tool_diffs(t);
+                let add_n = diffs.iter().flat_map(|(_, d)| d).filter(|(k, _)| *k == '+').count();
+                let del_n = diffs.iter().flat_map(|(_, d)| d).filter(|(k, _)| *k == '-').count();
+                if add_n + del_n > 0 {
+                    line.push_str(&format!(" (+{add_n} −{del_n})"));
+                }
+                if let Some(Some(c)) = t.exit
+                    && c != 0
+                {
+                    line.push_str(&format!(" (exit {c})"));
+                }
+                add(&mut out, &line, true, &mut prev_tool);
+            }
+            ChatItem::Notice(t) => add(&mut out, &format!("*{}*", t.trim()), false, &mut prev_tool),
+            ChatItem::Output(t) => {
+                let fence = if t.contains("```") { "````" } else { "```" };
+                add(&mut out, &format!("{fence}\n{}\n{fence}", t.trim_end()), false, &mut prev_tool);
+            }
+            ChatItem::Image(_, (w, h)) => add(&mut out, &format!("*[image {w}×{h}]*"), false, &mut prev_tool),
+            ChatItem::Link { uri, name } => add(&mut out, &format!("[{name}]({uri})"), false, &mut prev_tool),
+            ChatItem::Failure(f) => {
+                let text = match &f.summary {
+                    Some(s) => format!("**{}**\n{s}", f.title),
+                    None => format!("**{}**", f.title),
+                };
+                add(&mut out, &quote(&text), false, &mut prev_tool);
+            }
+            ChatItem::Turn(n) => {
+                let Some(t) = turns.iter().find(|x| x.n == *n) else { continue };
+                let rewound = if t.rewound { ", rewound" } else { "" };
+                let text = format!("*Turn {n}: {} file{} changed, +{} −{}{rewound}*", t.files, if t.files == 1 { "" } else { "s" }, t.added, t.removed);
+                add(&mut out, &text, false, &mut prev_tool);
+            }
+        }
+    }
+    out.push('\n');
+    out
+}
+
 fn code_block(text: &str, look: &Look) -> gpui::Div {
+    code_block_find(text, look, None)
+}
+
+/// `code_block` with Find in Chat's matches marked.
+fn code_block_find(text: &str, look: &Look, hl: Option<&FindHl>) -> gpui::Div {
     let ui = &look.theme.ui;
     div()
         .px(look.z(10.))
@@ -1990,7 +2355,15 @@ fn code_block(text: &str, look: &Look) -> gpui::Div {
         .font_family(look.code_font.clone())
         .text_size(look.text(0.))
         .text_color(look.c(ui.text_secondary))
-        .when(!text.is_empty(), |d| d.child(text.to_string()))
+        .when(!text.is_empty(), |d| d.child(marked(hl, text.to_string())))
+}
+
+/// `text`, with Find in Chat's matches marked when it's open.
+fn marked(hl: Option<&FindHl>, text: String) -> StyledText {
+    match hl {
+        Some(h) => h.text(text),
+        None => StyledText::new(text),
+    }
 }
 
 /// Line diff of `old` to `new`: ('-', line) removed, ('+', line) added,
@@ -2035,14 +2408,238 @@ fn line_diff<'a>(old: &'a str, new: &'a str) -> Vec<(char, &'a str)> {
 }
 
 impl AgentTask {
+    // -- find in chat ------------------------------------------------------------
+
+    /// Find in Chat (Cmd+F): open the query field above the chat, or focus it.
+    pub fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_subagent = None;
+        Docks::update(cx, Kind::Acp, |d| d.activate(Panel::Session));
+        if let Some(f) = &self.find {
+            let input = f.input.clone();
+            input.update(cx, |i, cx| i.select_text(cx));
+            let focus = input.read(cx).focus.clone();
+            window.focus(&focus, cx);
+            return cx.notify();
+        }
+        let input = cx.new(|cx| TextInput::new("Find in chat · ↩ older · ⇧↩ newer · esc", cx));
+        let sub = cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, window, cx| match ev {
+            InputEvent::Changed => {
+                let q = input.read(cx).text.clone();
+                this.set_query(q, cx);
+            }
+            InputEvent::Confirm { alt, .. } => this.find_step(!*alt, cx),
+            InputEvent::Cancel => this.close_find(window, cx),
+            _ => {}
+        });
+        let focus = input.read(cx).focus.clone();
+        self.find = Some(ChatFind { input: input.clone(), query: String::new(), matches: Vec::new(), current: None, dirty: false, _sub: sub });
+        window.focus(&focus, cx);
+        // Dev/test: QUR_DEBUG_FIND="text" searches for it at once.
+        if let Ok(q) = std::env::var("QUR_DEBUG_FIND") {
+            input.update(cx, |i, cx| i.set_text(&q, cx));
+        }
+        cx.notify();
+    }
+
+    /// Esc: close Find; the prompt gets the keyboard back.
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let row = self.find_current().map(|c| c.0);
+        self.find = None;
+        // A folded item opened for the current match folds again.
+        if let Some(r) = row.filter(|r| *r < self.chat.len()) {
+            self.list.remeasure_items(r..r + 1);
+        }
+        let f = self.prompt.read(cx).focus.clone();
+        window.focus(&f, cx);
+        cx.notify();
+    }
+
+    /// (row, number within the row) of Find's current match.
+    fn find_current(&self) -> Option<(usize, usize)> {
+        let f = self.find.as_ref()?;
+        f.matches.get(f.current?).copied()
+    }
+
+    /// Find's marks for row `ix`, when it has matches.
+    fn row_hl(&self, ix: usize, look: &Look) -> Option<FindHl> {
+        let f = self.find.as_ref().filter(|f| !f.query.is_empty())?;
+        let at = f.matches.partition_point(|m| m.0 < ix);
+        if !matches!(f.matches.get(at), Some(m) if m.0 == ix) {
+            return None;
+        }
+        let current = self.find_current().filter(|c| c.0 == ix).map(|c| c.1);
+        let ed = &look.theme.editor;
+        let bg = |c: Rgba| HighlightStyle { background_color: Some(look.c(c)), ..Default::default() };
+        Some(FindHl::new(f.query.clone(), current, bg(ed.search_match), bg(ed.search_match_active)))
+    }
+
+    /// How many matches row `ix` has, counted in the order `render_item`
+    /// draws them (a tool call: its title, then its text and output).
+    fn row_matches(&self, ix: usize, q: &str, eid: EntityId) -> usize {
+        let n = |s: &str| find_all(s, q).len();
+        let root = Some(self.record.worktree.as_path());
+        match &self.chat[ix] {
+            ChatItem::User(t) | ChatItem::Notice(t) | ChatItem::Output(t) => n(t),
+            ChatItem::Agent(t) => crate::markdown::count_matches(t, format!("md-{eid}-{ix}"), root, q),
+            ChatItem::Thought(t) => n(t.trim()),
+            ChatItem::Link { name, .. } => n(name),
+            ChatItem::Failure(f) => n(&f.title) + f.summary.as_deref().map_or(0, n) + f.detail.as_deref().map_or(0, n),
+            ChatItem::Tool(id) => {
+                let Some(t) = self.tools.get(id) else { return 0 };
+                let mut count = n(&tool_title(t));
+                // As `tool_body` numbers its parts.
+                let mut parts = 0;
+                for c in &t.content {
+                    match c {
+                        ToolContent::Text(s) if !s.trim().is_empty() => {
+                            count += crate::markdown::count_matches(s, format!("md-{eid}-{}-{parts}", t.id), root, q);
+                            parts += 1;
+                        }
+                        ToolContent::Terminal(_) => {
+                            let out = t.output.as_deref().unwrap_or("").trim_end();
+                            if !out.is_empty() || t.exit.is_some() {
+                                count += n(&tail_lines(out, MAX_TOOL_LINES));
+                            }
+                            parts += 1;
+                        }
+                        _ => {}
+                    }
+                }
+                count
+            }
+            ChatItem::Image(..) | ChatItem::Turn(_) => 0,
+        }
+    }
+
+    /// Count every match again (the query or the chat changed), keeping
+    /// the current one when it's still there.
+    fn refind(&mut self, eid: EntityId) {
+        let Some(q) = self.find.as_ref().map(|f| f.query.clone()) else { return };
+        let mut matches = Vec::new();
+        if !q.is_empty() {
+            for ix in 0..self.chat.len() {
+                matches.extend((0..self.row_matches(ix, &q, eid)).map(|k| (ix, k)));
+            }
+        }
+        let Some(f) = self.find.as_mut() else { return };
+        let was = f.current.and_then(|c| f.matches.get(c).copied());
+        f.current = was.and_then(|c| matches.iter().position(|m| *m == c));
+        f.matches = matches;
+        f.dirty = false;
+        if let Some((row, _)) = was.filter(|_| f.current.is_none())
+            && row < self.chat.len()
+        {
+            self.list.remeasure_items(row..row + 1);
+        }
+    }
+
+    /// The query changed: find it, the newest match first.
+    fn set_query(&mut self, q: String, cx: &mut Context<Self>) {
+        let old = self.find_current().map(|c| c.0);
+        let Some(f) = self.find.as_mut() else { return };
+        f.query = q;
+        f.current = None;
+        self.refind(cx.entity_id());
+        let Some(f) = self.find.as_mut() else { return };
+        f.current = f.matches.len().checked_sub(1);
+        println!("FIND {} {:?}: {} matches", self.record.id, f.query, f.matches.len());
+        self.moved_to(old, cx);
+    }
+
+    /// Enter (older) / Shift+Enter (newer): the next match, round the ends.
+    fn find_step(&mut self, older: bool, cx: &mut Context<Self>) {
+        if self.find.as_ref().is_some_and(|f| f.dirty) {
+            self.refind(cx.entity_id());
+        }
+        let old = self.find_current().map(|c| c.0);
+        let Some(f) = self.find.as_mut() else { return };
+        let n = f.matches.len();
+        if n == 0 {
+            return cx.notify();
+        }
+        f.current = Some(match f.current {
+            None if older => n - 1,
+            None => 0,
+            Some(c) if older => (c + n - 1) % n,
+            Some(c) => (c + 1) % n,
+        });
+        self.moved_to(old, cx);
+    }
+
+    /// Find's current match moved off row `old`: re-measure both rows (a
+    /// folded thought, tool call or group opens to show it) and scroll to it.
+    fn moved_to(&mut self, old: Option<usize>, cx: &mut Context<Self>) {
+        let new = self.find_current();
+        for row in [old, new.map(|c| c.0)].into_iter().flatten().filter(|r| *r < self.chat.len()) {
+            self.list.remeasure_items(row..row + 1);
+        }
+        if let Some((row, k)) = new {
+            self.list.set_follow_mode(gpui::FollowMode::Normal);
+            self.list.scroll_to_reveal_item(row);
+            let total = self.find.as_ref().map_or(0, |f| f.matches.len());
+            let at = self.find.as_ref().and_then(|f| f.current).map_or(0, |c| c + 1);
+            println!("FIND {} match {at} of {total}: row {row} #{k}", self.record.id);
+        }
+        cx.notify();
+    }
+
+    /// The query field, the match count, ↑ ↓ and ✕ (above the chat).
+    fn find_bar(&self, look: &Look, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let f = self.find.as_ref()?;
+        let ui = &look.theme.ui;
+        let n = f.matches.len();
+        let none = !f.query.is_empty() && n == 0;
+        let count = match (f.query.is_empty(), f.current) {
+            (true, _) => String::new(),
+            (false, _) if n == 0 => "no match".to_string(),
+            (false, Some(c)) => format!("{} of {n}", c + 1),
+            (false, None) => format!("{n} match{}", if n == 1 { "" } else { "es" }),
+        };
+        let button = |id: &'static str, label: &'static str| {
+            div().id(id).flex_none().px(look.z(4.)).rounded(look.z(4.)).cursor_pointer().text_color(look.c(ui.text_muted)).hover(|d| d.bg(look.c(ui.hover_bg)).text_color(look.c(ui.text))).child(label)
+        };
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(look.z(6.))
+                .mx(look.z(12.))
+                .mt(look.z(6.))
+                .mb(look.z(2.))
+                .px(look.z(8.))
+                .py(look.z(3.))
+                .rounded(look.z(4.))
+                .border_1()
+                .border_color(look.c(if none { ui.error } else { ui.border }))
+                .bg(look.c(ui.overlay_bg))
+                .text_size(look.text(-1.))
+                .child(div().flex_1().min_w(px(0.)).child(f.input.clone()))
+                .child(div().flex_none().text_color(look.c(ui.text_muted)).child(count))
+                .child(button("find-older", "↑").on_click(cx.listener(|t, _, _, cx| t.find_step(true, cx))))
+                .child(button("find-newer", "↓").on_click(cx.listener(|t, _, _, cx| t.find_step(false, cx))))
+                .child(button("find-close", "✕").on_click(cx.listener(|t, _, window, cx| t.close_find(window, cx)))),
+        )
+    }
+
+    /// Copy Chat as Markdown (Agent menu, palette, the sidebar's right-click menu).
+    pub fn chat_markdown(&self) -> String {
+        chat_markdown(&self.record.title, &self.def.label, &self.chat, &self.tools, &self.record.turns)
+    }
+
     /// `text` as Markdown; file links open in the code modal. `id`: unique
     /// and stable per chat item (see `markdown::render`).
     fn markdown(&self, text: &str, id: String, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        self.markdown_find(text, id, look, None, cx)
+    }
+
+    /// `markdown`, with Find in Chat's matches marked.
+    fn markdown_find(&self, text: &str, id: String, look: &Look, hl: Option<&FindHl>, cx: &mut Context<Self>) -> gpui::Div {
         let me = cx.entity().downgrade();
         let open: crate::markdown::OnFile = std::rc::Rc::new(move |path, line, _, cx| {
             me.update(cx, |_, cx| cx.emit(AgentEvent::OpenFile(path, line))).ok();
         });
-        crate::markdown::render(text, id, Some(&self.record.worktree), look, open)
+        crate::markdown::render(text, id, Some(&self.record.worktree), look, open, hl)
     }
 }
 
@@ -2197,6 +2794,7 @@ impl AgentTask {
             .flex()
             .flex_col()
             .when(show_plan, |d| d.children(self.plan_strip(look)))
+            .children(self.find_bar(look, cx))
             .when(empty, |d| {
                 d.child(
                     div()
@@ -2578,6 +3176,10 @@ impl AgentTask {
 impl Render for AgentTask {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
+        // Find in Chat: the chat changed since its matches were counted.
+        if self.find.as_ref().is_some_and(|f| f.dirty) {
+            self.refind(cx.entity_id());
+        }
         let sizes = (look.ui_size, look.code_size, look.zoom);
         if sizes != self.measured_at {
             self.measured_at = sizes;
@@ -2666,6 +3268,105 @@ mod tests {
         assert_eq!(shell_quote("a b"), "'a b'");
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
         assert_eq!(shell_quote(""), "''");
+    }
+
+    fn tool(id: &str, kind: ToolKind, status: ToolStatus, title: &str) -> ToolCall {
+        ToolCall { id: id.into(), kind, status, title: title.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn tool_runs_are_consecutive_calls() {
+        let t = |id: &str| ChatItem::Tool(id.into());
+        let chat = vec![ChatItem::User("hi".into()), t("a"), t("b"), t("c"), ChatItem::Agent("ok".into()), t("d"), ChatItem::Thought("hm".into()), t("e"), t("f")];
+        assert_eq!(tool_run(&chat, 0), None);
+        for ix in 1..=3 {
+            assert_eq!(tool_run(&chat, ix), Some(1..4));
+        }
+        assert_eq!(tool_run(&chat, 4), None);
+        assert_eq!(tool_run(&chat, 5), Some(5..6), "one call alone isn't a group");
+        assert_eq!(tool_run(&chat, 7), Some(7..9));
+        assert_eq!(tool_run(&chat, 8), Some(7..9));
+        assert_eq!(tool_run(&chat, 99), None);
+    }
+
+    #[test]
+    fn group_summary_counts_by_kind() {
+        let r = |id| tool(id, ToolKind::Read, ToolStatus::Completed, "");
+        let (a, b, c, d) = (r("a"), r("b"), r("c"), r("d"));
+        let run1 = tool("e", ToolKind::Execute, ToolStatus::Completed, "");
+        let run2 = tool("f", ToolKind::Execute, ToolStatus::Failed, "");
+        let think = tool("g", ToolKind::Think, ToolStatus::Completed, "");
+        let other = tool("h", ToolKind::Other, ToolStatus::Completed, "");
+        let edit = tool("i", ToolKind::Edit, ToolStatus::Completed, "");
+        assert_eq!(group_summary(&[&a, &run1, &b, &c, &run2, &d]), "Read 4 files, ran 2 commands");
+        assert_eq!(group_summary(&[&edit, &a]), "Edited 1 file, read 1 file");
+        assert_eq!(group_summary(&[&think, &other]), "Used 2 tools");
+        assert_eq!(group_summary(&[&a, &think, &other]), "Read 1 file, used 2 other tools");
+        assert_eq!(group_summary(&[]), "");
+    }
+
+    #[test]
+    fn chat_as_markdown() {
+        let mut tools = HashMap::new();
+        let mut edit = tool("t1", ToolKind::Edit, ToolStatus::Completed, "Edit src/a.rs");
+        edit.content = vec![ToolContent::Diff { path: "/w/src/a.rs".into(), old_text: Some("x\ny".into()), new_text: "x\nY".into() }];
+        let mut cmd = tool("t2", ToolKind::Execute, ToolStatus::Failed, "cargo   test\n--release");
+        cmd.exit = Some(Some(101));
+        tools.insert(edit.id.clone(), edit);
+        tools.insert(cmd.id.clone(), cmd);
+        let turns = vec![qur_agents::Turn { n: 1, files: 1, added: 1, removed: 1, ..Default::default() }];
+        let chat = vec![
+            ChatItem::User("Fix it\n\nplease".into()),
+            ChatItem::Thought("secret thinking".into()),
+            ChatItem::Agent("Sure. **On it.**".into()),
+            ChatItem::Tool("t1".into()),
+            ChatItem::Tool("t2".into()),
+            ChatItem::Notice("Stopped.".into()),
+            ChatItem::Output("$ make\n```\nok".into()),
+            ChatItem::Failure(Failure { title: "Claude couldn't finish.".into(), summary: Some("Rate limited".into()), detail: Some("raw".into()), resend: None }),
+            ChatItem::Turn(1),
+            ChatItem::User("Thanks".into()),
+            ChatItem::Agent("You're welcome.".into()),
+        ];
+        let md = chat_markdown("My task", "Claude", &chat, &tools, &turns);
+        let want = "# My task
+
+## You
+
+> Fix it
+>
+> please
+
+## Claude
+
+Sure. **On it.**
+
+- ✓ edit: Edit src/a.rs (+1 −1)
+- ✕ run: cargo test --release (exit 101)
+
+*Stopped.*
+
+````
+$ make
+```
+ok
+````
+
+> **Claude couldn't finish.**
+> Rate limited
+
+*Turn 1: 1 file changed, +1 −1*
+
+## You
+
+> Thanks
+
+## Claude
+
+You're welcome.
+";
+        assert_eq!(md, want);
+        assert!(!md.contains("secret"), "thoughts are left out");
     }
 
     #[test]

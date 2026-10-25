@@ -60,7 +60,10 @@ One window is one project. There's no permanent editor area: the window is for a
 - **Agents name their own work.** A button shows what the agent says it's doing (Claude Code's terminal title), unless you rename it (Agent > Rename Agent…, or double-click).
 - **Terminal comforts:** Find (`Cmd+F`, regex, through the scrollback) and `Cmd`-click to open URLs and `file:line` paths.
 - **Structured sessions** over the [Agent Client Protocol](https://agentclientprotocol.com):
-  - Streaming tool calls, the agent's to-do plan, and a permission bar (Allow once / Allow for this task / Deny).
+  - Streaming tool calls, the agent's to-do plan, and a permission bar (Allow once / Allow for this task / Deny). When the agent asks several things at once, the bar shows them one at a time ("1 of 3 requests waiting") and **Allow all 3 once** (also Agent > Permission: Allow All Pending) answers them all "allow once", never "always".
+  - Tool calls in a row fold into one line, like "Read 4 files, ran 2 commands ▸"; click it to see each call. A call that's running, failed or waiting for your permission stays in view.
+  - **Find in Chat** (`Cmd+F` in the agent's view) searches your messages, the agent's replies, thoughts, and tool titles and output, ignoring case. `↩` goes to the older match, `⇧↩` the newer one, `Esc` closes; a folded thought, tool call or group opens to show the match.
+  - **Copy Chat as Markdown** (Agent menu, the palette, or right-click the agent): the whole chat on the clipboard, with your messages quoted, the agent's Markdown as it wrote it, one line per tool call with ✓ / ✕, and thoughts left out.
   - Stop at any time. Messages sent mid-turn are queued; `@` mentions a file and `/` runs agent commands.
 - **Unread markers** on agents that finished or need you while you were elsewhere.
 - **Turn-end checks.** Set `[checks] command` per project, and Qur runs it in the worktree after each agent turn that changed files. A failure marks the agent's button `✕ checks` and lands in the prompt (or the Agent Terminal's input line) for you to send back. Agent > Run Checks Now runs it any time.
