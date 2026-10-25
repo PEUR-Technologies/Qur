@@ -336,7 +336,7 @@ impl Render for SearchPanel {
             .size_full()
             .flex()
             .flex_col()
-            .bg(look.bg(ui.editor_bg))
+            .bg(look.region_bg(ui.editor_bg))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                 let k = &ev.keystroke;
                 if k.modifiers.alt && !k.modifiers.platform && !k.modifiers.control {

@@ -140,7 +140,32 @@ check_panels() {  # About and Accent Color open (and a click outside closes them
   ok "Run Doctor showed its sheet" grep -qE '^PROMPT (Doctor|.*doctor|.*good|.*problem|.*warning)' "$LOG"
 }
 
-ALL=(vim find_terminal rename rename_click dock cmd_click git_commit git_stage panels)
+check_gaps() {  # window gaps: toggle, a dock divider and the sidebar gap still drag, the popover saves.
+  setup gaps
+  drive "wait:1500,qur::ToggleGaps,wait:300,state,qur::NewAgentTerminal,wait:1500,click:@add:Terminal:Live,wait:300,drag:@tab:Terminal:Live,@pane:Terminal:root~0.92~0.5,wait:300,state,drag:@split:Terminal:root,700,300,wait:500,state,drag:@sidebar-gap,320,300,wait:300,state,qur::Gaps,wait:300,state,click:@gaps:slider0~0.999~0.5,wait:200,click:@gaps:rounded,wait:200,key:escape,wait:300,state,qur::ToggleGaps,wait:300,state,qur::Quit"
+  ok "View > Toggle Gaps turned them on" grep -qF 'FLASH Gaps on' "$LOG"
+  ok "gaps on in the state" grep -qF 'gaps={on=true gap=8' "$LOG"
+  ok "a tab dragged to the edge split the dock with gaps on" grep -qF 'terminal=h0.500(session|live)}' "$LOG"
+  local after; after=$(grep '^STATE' "$LOG" | sed -nE 's/.*terminal=(h0\.[0-9]+\(session\|live\))}.*/\1/p' | tail -1)
+  ok "dragging the divider in the gap moved it (${after:-?})" test -n "$after" -a "$after" != "h0.500(session|live)"
+  ok "the sidebar gap resized the sidebar" grep -qE 'sidebar_w=(29[1-9]|3[0-9][0-9])' "$LOG"
+  ok "Qur > Appearance > Gaps… opened the popover" grep -qF 'overlay=gaps' "$LOG"
+  ok "the slider and Rounded corners changed it live" grep -qF 'gaps={on=true gap=24 rounded=false' "$LOG"
+  ok "Esc saved the popover's gap to config.toml" grep -qE '^gap = 24' "$QUR_HOME/config.toml"
+  ok "and its Rounded corners" grep -qE '^rounded = false' "$QUR_HOME/config.toml"
+  ok "Toggle Gaps turned them off and saved that" grep -qF 'gaps = false' "$QUR_HOME/config.toml"
+}
+
+check_gaps_terminal() {  # with gaps on, split shells are tiles and their divider still drags.
+  setup gaps_terminal
+  printf '[ui]\ngaps = true\n' >> "$QUR_HOME/config.toml"
+  drive "wait:1500,qur::NewTerminal,wait:1500,key:cmd-d,wait:800,state,drag:@term-split:root,500,300,wait:300,state,qur::Quit"
+  ok "Cmd+D split the shell" grep -qF 'sessions=2 active=1 find=none selection="" split=0.500' "$LOG"
+  local after; after=$(last_state | sed -nE 's/.* split=([0-9.]+).*/\1/p')
+  ok "dragging the gap between them moved the divider (${after:-?})" test -n "$after" -a "$after" != "0.500"
+}
+
+ALL=(vim find_terminal rename rename_click dock cmd_click git_commit git_stage panels gaps gaps_terminal)
 [ "${1:-}" = "-l" ] && { printf '%s\n' "${ALL[@]}"; exit 0; }
 for c in "${@:-${ALL[@]}}"; do
   echo "$c"

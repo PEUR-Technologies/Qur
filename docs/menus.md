@@ -14,6 +14,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
   - ---
   - Accent Color… (hue and brightness sliders, live)
   - Transparency… (opacity slider + blur, live)
+  - Gaps… (window gaps on/off, gap and corner-radius sliders, rounded corners, tile border; live, saved on close)
 - Vim Mode (checkmark)
 - ---
 - Settings ▸
@@ -79,6 +80,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Zoom In `Cmd+=` · Zoom Out `Cmd+-` · Reset Zoom `Cmd+0`
 - ---
 - Zen Mode `Ctrl+Cmd+Z` (checkmark)
+- Toggle Gaps (checkmark; Hyprland-style window gaps)
 - Enter Full Screen `Ctrl+Cmd+F`
 
 ## Go
@@ -134,4 +136,4 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - No toolbar, no gear icon, no settings screen. Theme, transparency, Vim and config live under the **Qur** menu.
 - Peek header keeps only the Follow toggle and Live/To-do/Chat/Changes segments (layout B). Layout switching moves to the **View** menu and shortcut.
 - Merge/Discard keep their buttons only in the Changes view (handoff section 10), since they are the action of that view; they are also in the **Agent** menu.
-- The "Transparency…" popover is the only settings surface outside the first-run and theme pickers.
+- The "Transparency…" and "Gaps…" popovers are the only settings surfaces outside the first-run and theme pickers.

@@ -515,6 +515,10 @@ pub struct TerminalPanel {
     split_bounds: Rc<RefCell<HashMap<Vec<bool>, Bounds<Pixels>>>>,
     /// A divider being dragged: its split's path and bounds.
     resizing: Option<(Vec<bool>, Bounds<Pixels>)>,
+    /// Shown as the whole stage (a shell row), not inside an Agent
+    /// Terminal's dock pane: with window gaps on, its panes are the tiles.
+    /// Set by the workspace as it lays the stage out.
+    pub standalone: std::cell::Cell<bool>,
 }
 
 impl EventEmitter<PanelEvent> for TerminalPanel {}
@@ -522,6 +526,7 @@ impl EventEmitter<PanelEvent> for TerminalPanel {}
 impl TerminalPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
         TerminalPanel {
+            standalone: std::cell::Cell::new(false),
             focus: cx.focus_handle(),
             sessions: Vec::new(),
             active: 0,
@@ -1106,7 +1111,12 @@ impl TerminalPanel {
             Some(f) => format!("find={:?} found={}", f.input.read(cx).text, !f.error && f.last.is_some()),
             None => "find=none".into(),
         };
-        format!("sessions={} active={} {find} selection={sel:?}", self.sessions.len(), self.active)
+        // The split's first share, for checking a dragged divider.
+        let split = match self.active_group().map(|g| &g.tile) {
+            Some(Tile::Split { ratio, .. }) => format!(" split={ratio:.3}"),
+            _ => String::new(),
+        };
+        format!("sessions={} active={} {find} selection={sel:?}{split}", self.sessions.len(), self.active)
     }
 
     fn find(&mut self, _: &ta::Find, window: &mut Window, cx: &mut Context<Self>) {
@@ -1580,8 +1590,10 @@ impl Render for TerminalPanel {
             Some(t) => Some(self.tile(&t, Vec::new(), true, &look, cx)),
             None => self.active_session().map(|s| s.id).map(|id| self.tile(&Tile::Term(id), Vec::new(), false, &look, cx)),
         };
+        let tiled = look.tiles.is_some() && self.standalone.get();
         let message = self.message.clone().map(|m| {
-            div().flex_none().px(look.z(8.)).py(look.z(4.)).text_size(look.text(-1.)).text_color(look.c(ui.text_muted)).child(m)
+            let d = if tiled { look.tile(div(), ui.panel_bg) } else { div() };
+            d.flex_none().px(look.z(8.)).py(look.z(4.)).text_size(look.text(-1.)).text_color(look.c(ui.text_muted)).child(m)
         });
         div()
             .key_context("Terminal")
@@ -1589,6 +1601,7 @@ impl Render for TerminalPanel {
             .size_full()
             .flex()
             .flex_col()
+            .when(tiled, |d| d.gap(look.gap()))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_action(cx.listener(Self::clear))
             .on_action(cx.listener(Self::line_start))
@@ -1611,8 +1624,7 @@ impl Render for TerminalPanel {
                     .flex()
                     .items_center()
                     .gap(look.z(8.))
-                    .mx(look.z(8.))
-                    .mt(look.z(4.))
+                    .when(!tiled, |d| d.mx(look.z(8.)).mt(look.z(4.)))
                     .px(look.z(8.))
                     .py(look.z(3.))
                     .rounded(look.z(4.))
@@ -1629,7 +1641,8 @@ impl Render for TerminalPanel {
                     .min_h(px(0.))
                     .flex()
                     // Split panes float as tiles with a gap all round (Hyprland).
-                    .when(split, |d| d.p(look.z(6.)))
+                    // (With window gaps the stage's own gaps do that.)
+                    .when(split && !tiled, |d| d.p(look.z(6.)))
                     // Files dragged in from Finder become their paths, as in Terminal.
                     .drag_over::<gpui::ExternalPaths>(|s, _, window, cx| {
                         let l = Look::of(window, cx);
@@ -1657,13 +1670,23 @@ impl TerminalPanel {
         match t {
             Tile::Term(id) => {
                 let on = split && self.active_session().is_some_and(|s| s.id == *id);
-                div()
-                    .size_full()
+                let tiled = look.tiles.is_some() && self.standalone.get();
+                // With window gaps every pane is a tile with its own background.
+                let d = if tiled { look.tile(div(), ui.panel_bg) } else { div() };
+                let edge = if on {
+                    look.c(look.theme.accents[0].base)
+                } else if !tiled || look.tiles.is_some_and(|t| t.border) {
+                    look.c(ui.border)
+                } else {
+                    gpui::transparent_black()
+                };
+                d.size_full()
                     .px(look.z(8.))
                     .py(look.z(4.))
                     // Tiling-WM look: each pane its own rounded box, the
                     // focused one outlined in the accent.
-                    .when(split, |d| d.rounded(look.z(6.)).border_1().border_color(look.c(if on { look.theme.accents[0].base } else { ui.border })))
+                    .when(split && !tiled, |d| d.rounded(look.z(6.)))
+                    .when(split || tiled && look.tiles.is_some_and(|t| t.border), |d| d.border_1().border_color(edge))
                     .child(GridElement { panel: cx.entity(), id: *id })
                     .into_any_element()
             }
@@ -1678,23 +1701,25 @@ impl TerminalPanel {
                     let (sb, path) = (sb.clone(), path.clone());
                     gpui::canvas(move |b, _, _| { sb.borrow_mut().insert(path.clone(), b); }, |_, _, _, _| {}).absolute().size_full()
                 };
+                let w = if look.tiles.is_some() && self.standalone.get() { look.gap() } else { look.z(6.) };
                 let handle = div()
                     .id(SharedString::from(format!("term-split-{path:?}")))
                     .group(SharedString::from(format!("term-split-{path:?}")))
                     .flex_none()
                     .relative()
                     // The gap between tiles; the accent shows while hovered.
-                    .when(*vertical, |d| d.h(look.z(6.)).w_full().cursor_row_resize())
-                    .when(!*vertical, |d| d.w(look.z(6.)).h_full().cursor_col_resize())
+                    .when(*vertical, |d| d.h(w).w_full().cursor_row_resize())
+                    .when(!*vertical, |d| d.w(w).h_full().cursor_col_resize())
                     .child(
                         div()
                             .absolute()
-                            .when(*vertical, |d| d.left_0().right_0().top(look.z(2.5)).h(px(1.)))
-                            .when(!*vertical, |d| d.top_0().bottom_0().left(look.z(2.5)).w(px(1.)))
+                            .when(*vertical, |d| d.left_0().right_0().top((w - px(1.)) / 2.).h(px(1.)))
+                            .when(!*vertical, |d| d.top_0().bottom_0().left((w - px(1.)) / 2.).w(px(1.)))
                             .group_hover(SharedString::from(format!("term-split-{path:?}")), |d| d.bg(look.c(look.theme.accents[0].base))),
                     )
                     // A wider grab area than the gap.
                     .child(div().absolute().when(*vertical, |d| d.left_0().right_0().top(px(-3.)).h(px(7.))).when(!*vertical, |d| d.top_0().bottom_0().left(px(-3.)).w(px(7.))))
+                    .children(crate::script::mark(|| format!("term-split:{}", if path.is_empty() { "root".to_string() } else { path.iter().map(|&b| if b { 'b' } else { 'a' }).collect() })))
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                         if let Some(b) = sb.borrow().get(&p2).copied() {
                             this.resizing = Some((p2.clone(), b));

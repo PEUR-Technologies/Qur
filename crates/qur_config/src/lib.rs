@@ -118,7 +118,27 @@ pub struct UiConfig {
     pub accent_hue: f32,
     /// Makes every accent lighter (toward 1) or darker (toward -1).
     pub accent_brightness: f32,
+    /// Window gaps (Hyprland's look): every region floats as its own tile
+    /// with `gap` pixels of desktop around it.
+    pub gaps: bool,
+    /// The space between tiles and around the window's edge, in points
+    /// before zoom (`MIN_GAP..=MAX_GAP`).
+    pub gap: f32,
+    /// Round the tiles' corners (only while gaps are on).
+    pub rounded: bool,
+    /// The tiles' corner radius in points before zoom (`0..=MAX_RADIUS`).
+    pub radius: f32,
+    /// A hairline border around each tile.
+    pub tile_border: bool,
 }
+
+/// Window gaps' slider range (`[ui] gap`).
+pub const MIN_GAP: f32 = 2.0;
+pub const MAX_GAP: f32 = 24.0;
+pub const DEFAULT_GAP: f32 = 8.0;
+/// The tiles' corner radius range (`[ui] radius`).
+pub const MAX_RADIUS: f32 = 16.0;
+pub const DEFAULT_RADIUS: f32 = 8.0;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default)]
@@ -164,7 +184,21 @@ impl Default for EditorConfig {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        UiConfig { font_size: 13.0, zoom: 1.0, accent: 0, keep_awake: true, zen: true, traffic_lights: "auto".into(), accent_hue: 0.0, accent_brightness: 0.0 }
+        UiConfig {
+            font_size: 13.0,
+            zoom: 1.0,
+            accent: 0,
+            keep_awake: true,
+            zen: true,
+            traffic_lights: "auto".into(),
+            accent_hue: 0.0,
+            accent_brightness: 0.0,
+            gaps: false,
+            gap: DEFAULT_GAP,
+            rounded: true,
+            radius: DEFAULT_RADIUS,
+            tile_border: false,
+        }
     }
 }
 
@@ -195,6 +229,8 @@ impl Config {
     fn sanitized(mut self) -> Config {
         self.ui.zoom = self.ui.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
         self.ui.accent %= 6;
+        self.ui.gap = if self.ui.gap.is_finite() { self.ui.gap.clamp(MIN_GAP, MAX_GAP) } else { DEFAULT_GAP };
+        self.ui.radius = if self.ui.radius.is_finite() { self.ui.radius.clamp(0.0, MAX_RADIUS) } else { DEFAULT_RADIUS };
         self.editor.font_size = self.editor.font_size.clamp(6.0, 72.0);
         self.editor.line_height = self.editor.line_height.clamp(1.0, 3.0);
         self.editor.tab_width = self.editor.tab_width.clamp(1, 16);
@@ -654,6 +690,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn gaps_round_trip_and_clamp() {
+        let d = tmp("gaps");
+        let p = d.join("config.toml");
+        let (c, _) = Config::load_from(&p);
+        assert!(!c.ui.gaps && c.ui.rounded && !c.ui.tile_border);
+        assert_eq!((c.ui.gap, c.ui.radius), (DEFAULT_GAP, DEFAULT_RADIUS));
+        write_key(&p, "ui.gaps", Some(true.into())).unwrap();
+        write_key(&p, "ui.gap", Some(12.0f32.into())).unwrap();
+        write_key(&p, "ui.rounded", Some(false.into())).unwrap();
+        write_key(&p, "ui.radius", Some(4.0f32.into())).unwrap();
+        write_key(&p, "ui.tile_border", Some(true.into())).unwrap();
+        let (c, err) = Config::load_from(&p);
+        assert!(err.is_none(), "{err:?}");
+        assert!(c.ui.gaps && !c.ui.rounded && c.ui.tile_border);
+        assert_eq!((c.ui.gap, c.ui.radius), (12.0, 4.0));
+        std::fs::write(&p, "[ui]\ngaps = true\ngap = 500\nradius = -3\n").unwrap();
+        let (c, _) = Config::load_from(&p);
+        assert_eq!((c.ui.gap, c.ui.radius), (MAX_GAP, 0.0));
+        std::fs::write(&p, "[ui]\ngap = 0\n").unwrap();
+        assert_eq!(Config::load_from(&p).0.ui.gap, MIN_GAP);
     }
 
     #[test]

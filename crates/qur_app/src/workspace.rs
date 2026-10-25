@@ -147,6 +147,8 @@ enum Overlay {
     /// About Qur (M7).
     About,
     Transparency { project_scope: bool },
+    /// Qur > Appearance > Gaps…: window gaps, live while you drag.
+    Gaps,
     NewTask { input: Entity<PromptInput>, agent: usize },
     /// Review Agent's Work… / Plan…: the reviewer (agent and model) for
     /// task `task`, and an optional instruction line.
@@ -221,6 +223,13 @@ pub struct Workspace {
     merge: Option<MergeState>,
     slider: Rc<Cell<Bounds<Pixels>>>,
     sliding: bool,
+    /// The Gaps popover's sliders (gap, corner radius) and which one is dragged.
+    gap_sliders: Rc<[Cell<Bounds<Pixels>>; 2]>,
+    gap_sliding: Option<usize>,
+    /// Setup's Gaps row, previewed before Done saves it: (on, gap).
+    preview_gaps: Option<(bool, f32)>,
+    /// Where the traffic lights were last moved to (in from the corner, for window gaps).
+    lights_inset: f32,
     title_drag: bool,
     /// Full screen hides the traffic lights, so the title bar starts at the edge.
     fullscreen: bool,
@@ -342,6 +351,10 @@ impl Workspace {
             merge: None,
             slider: Rc::new(Cell::new(Bounds::default())),
             sliding: false,
+            gap_sliders: Rc::new([Cell::new(Bounds::default()), Cell::new(Bounds::default())]),
+            gap_sliding: None,
+            preview_gaps: None,
+            lights_inset: 0.0,
             title_drag: false,
             fullscreen: false,
             zen_shown: false,
@@ -404,6 +417,14 @@ impl Workspace {
             code_size: self.config.editor.font_size,
             line_height: self.config.editor.line_height,
             theme: theme.clone(),
+            tiles: {
+                // Setup previews gaps before they're saved.
+                let mut u = self.config.ui.clone();
+                if let Some((on, gap)) = self.preview_gaps {
+                    (u.gaps, u.gap) = (on, gap);
+                }
+                crate::look::Tiles::from_config(&u)
+            },
         };
         window.set_background_appearance(look.background_appearance());
         Look::set(window, look, cx);
@@ -510,6 +531,7 @@ impl Workspace {
             vim: self.config.keys.vim,
             keep_awake: self.config.ui.keep_awake,
             zen: self.config.ui.zen,
+            gaps: self.config.ui.gaps,
             keymap: commands::keymap_generation(),
         }
     }
@@ -1914,6 +1936,7 @@ impl Workspace {
             Some(Overlay::Layouts) => "layouts".into(),
             Some(Overlay::About) => "about".into(),
             Some(Overlay::Transparency { .. }) => "transparency".into(),
+            Some(Overlay::Gaps) => "gaps".into(),
             Some(Overlay::NewTask { .. }) => "new_task".into(),
             Some(Overlay::Review { input, .. }) => format!("review:{:?}", input.read(cx).text),
         };
@@ -1939,8 +1962,10 @@ impl Workspace {
         };
         let vc = self.git.as_ref().map(|g| g.read(cx).debug_state(cx)).unwrap_or_else(|| "none".into());
         let docks = format!("acp={} terminal={}", Docks::get(cx, dock::Kind::Acp).serialize(), Docks::get(cx, dock::Kind::Terminal).serialize());
+        let u = &self.config.ui;
+        let gaps = format!("on={} gap={} rounded={} radius={} border={} sidebar_w={}", u.gaps, u.gap, u.rounded, u.radius, u.tile_border, self.sidebar_w);
         format!(
-            "overlay={overlay} selected={selected} code={code} term={{{}}} git={{{vc}}} docks={{{docks}}}",
+            "overlay={overlay} selected={selected} code={code} term={{{}}} git={{{vc}}} docks={{{docks}}} gaps={{{gaps}}}",
             self.terms.read(cx).debug_state(cx)
         )
     }
@@ -3951,11 +3976,12 @@ Commits stay; {label} is told with your next message."));
         if !self.config.ui.zen {
             return;
         }
-        let zoom = Look::of(window, cx).zoom;
+        let look = Look::of(window, cx);
+        let (zoom, gap) = (look.zoom, look.gap());
         let show = if self.zen_shown {
-            self.title_drag || y <= px((TITLEBAR_H + ZEN_SLACK) * zoom)
+            self.title_drag || y <= px((TITLEBAR_H + ZEN_SLACK) * zoom) + gap
         } else {
-            y <= px(ZEN_EDGE * zoom)
+            y <= px(ZEN_EDGE * zoom) + gap
         };
         if show != self.zen_shown {
             self.zen_shown = show;
@@ -4008,6 +4034,10 @@ Commits stay; {label} is told with your next message."));
                 this.preview_accent = Some(*k);
                 this.apply_look(window, cx);
             }
+            SetupEvent::PreviewGaps(on, gap) => {
+                this.preview_gaps = Some((*on, *gap));
+                this.apply_look(window, cx);
+            }
             SetupEvent::Cancel => {
                 this.parked_setup = None;
                 this.close_overlays(window, cx);
@@ -4024,6 +4054,9 @@ Commits stay; {label} is told with your next message."));
                 this.write_setting(false, "ui.zen", Some(Value::Bool(c.zen)), cx);
                 this.write_setting(false, "ui.traffic_lights", Some(c.traffic_lights.as_str().into()), cx);
                 this.write_setting(false, "ui.accent", Some(Value::Int(c.accent as i64)), cx);
+                this.write_setting(false, "ui.gaps", Some(Value::Bool(c.gaps)), cx);
+                this.write_setting(false, "ui.gap", Some(c.gap.into()), cx);
+                this.preview_gaps = None;
                 this.preview_accent = None;
                 if !c.agents.is_empty() {
                     // Keep agents added by hand; replace the ones the picker knows.
@@ -4117,6 +4150,74 @@ Commits stay; {label} is told with your next message."));
         cx.notify();
     }
 
+    /// Qur > Appearance > Gaps…: the popover; changes show as you make
+    /// them and are saved when it closes.
+    fn gaps(&mut self, _: &qur::Gaps, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_overlays(window, cx);
+        self.prev_focus = window.focused(cx);
+        self.overlay = Some(Overlay::Gaps);
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// View > Toggle Gaps, saved as `[ui] gaps`.
+    fn toggle_gaps(&mut self, _: &qur::ToggleGaps, window: &mut Window, cx: &mut Context<Self>) {
+        let on = !self.config.ui.gaps;
+        self.config.ui.gaps = on;
+        self.write_setting(false, "ui.gaps", Some(Value::Bool(on)), cx);
+        self.apply_look(window, cx);
+        self.broadcast_reload(cx);
+        self.sync_menus(cx);
+        self.flash(if on { "Gaps on (Qur > Appearance > Gaps… to adjust)" } else { "Gaps off" }, cx);
+    }
+
+    /// A Gaps popover change, shown at once (saved on close).
+    fn set_gaps(&mut self, f: impl FnOnce(&mut qur_config::UiConfig), window: &mut Window, cx: &mut Context<Self>) {
+        f(&mut self.config.ui);
+        let u = &mut self.config.ui;
+        u.gap = u.gap.round().clamp(qur_config::MIN_GAP, qur_config::MAX_GAP);
+        u.radius = u.radius.round().clamp(0., qur_config::MAX_RADIUS);
+        self.apply_look(window, cx);
+    }
+
+    fn save_gaps(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.overlay, Some(Overlay::Gaps)) {
+            return;
+        }
+        self.gap_sliding = None;
+        let u = self.config.ui.clone();
+        self.write_setting(false, "ui.gaps", Some(u.gaps.into()), cx);
+        self.write_setting(false, "ui.gap", Some(u.gap.into()), cx);
+        self.write_setting(false, "ui.rounded", Some(u.rounded.into()), cx);
+        self.write_setting(false, "ui.radius", Some(u.radius.into()), cx);
+        self.write_setting(false, "ui.tile_border", Some(u.tile_border.into()), cx);
+        self.broadcast_reload(cx);
+        self.sync_menus(cx);
+    }
+
+    /// Drag on a Gaps slider (0 gap, 1 corner radius). Moving the gap
+    /// slider turns gaps on, and the radius slider rounded corners.
+    fn gap_slide_to(&mut self, which: usize, x: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+        let b = self.gap_sliders[which].get();
+        if b.size.width <= px(0.) {
+            return;
+        }
+        let t = ((x - b.left()) / b.size.width).clamp(0., 1.);
+        self.set_gaps(
+            |u| {
+                if which == 0 {
+                    u.gaps = true;
+                    u.gap = qur_config::MIN_GAP + (qur_config::MAX_GAP - qur_config::MIN_GAP) * t;
+                } else {
+                    u.rounded = true;
+                    u.radius = qur_config::MAX_RADIUS * t;
+                }
+            },
+            window,
+            cx,
+        );
+    }
+
     fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.prev_focus.take() {
             Some(f) => window.focus(&f, cx),
@@ -4127,7 +4228,7 @@ Commits stay; {label} is told with your next message."));
 
     fn close_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.tuning = None;
-        if self.preview_accent.take().is_some() | self.preview_tune.take().is_some() {
+        if self.preview_accent.take().is_some() | self.preview_tune.take().is_some() | self.preview_gaps.take().is_some() {
             self.apply_look(window, cx);
         }
         if matches!(&self.overlay, Some(Overlay::Picker(_, PickKind::Themes { .. })) | Some(Overlay::Setup(_)))
@@ -4274,8 +4375,11 @@ Commits stay; {label} is told with your next message."));
     fn title_bar(&self, look: &Look, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = &look.theme.ui;
         let message = self.message.as_ref().map(|(m, _)| m.clone());
-        div()
-            .id("titlebar")
+        // With window gaps the bar is a tile like the rest; else a region
+        // with a hairline below.
+        let bar = div();
+        let bar = if look.tiles.is_some() { look.tile(bar, ui.top_bar_bg) } else { bar.bg(look.bg(ui.top_bar_bg)).border_b_1().border_color(look.c(ui.border)) };
+        bar.id("titlebar")
             .window_control_area(gpui::WindowControlArea::Drag)
             .h(look.z(TITLEBAR_H))
             .w_full()
@@ -4285,9 +4389,6 @@ Commits stay; {label} is told with your next message."));
             .gap(look.z(8.))
             .pl(self.title_lead(look))
             .pr(look.z(12.))
-            .bg(look.bg(ui.top_bar_bg))
-            .border_b_1()
-            .border_color(look.c(ui.border))
             .text_size(look.text(0.))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.title_drag = true))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.title_drag = false))
@@ -4377,15 +4478,17 @@ Commits stay; {label} is told with your next message."));
         }
         let full = f32::from(look.z(TITLEBAR_H));
         let shown = self.zen_shown;
+        // With window gaps it slides in to a gap below the window's edge.
+        let gap = f32::from(look.gap());
         div()
             .absolute()
-            .left_0()
-            .w_full()
+            .left(px(gap))
+            .right(px(gap))
             .child(bar)
             .with_animation(
                 if shown { "zen-in" } else { "zen-out" },
                 Animation::new(ZEN_SLIDE).with_easing(gpui::ease_out_quint()),
-                move |d, t| d.top(px(-full * if shown { 1. - t } else { t })),
+                move |d, t| d.top(px(gap - (full + gap) * if shown { 1. - t } else { t })),
             )
             .into_any_element()
     }
@@ -4722,17 +4825,16 @@ Commits stay; {label} is told with your next message."));
         // Scrolls on its own once there are many agents and subagents, so
         // Source Control and the file tree stay on screen below it.
         let agents = div().id("sidebar-agents").pt(look.z(2.)).flex().flex_col().flex_shrink_0().max_h(gpui::relative(0.6)).overflow_y_scroll().children(agents);
-        div()
-            .relative()
+        let tiled = look.tiles.is_some();
+        let side = div();
+        let side = if tiled { look.tile(side, ui.sidebar_bg) } else { side.bg(look.bg(ui.sidebar_bg)).border_r_1().border_color(look.c(ui.border)) };
+        side.relative()
             .w(look.z(self.sidebar_w))
             .flex_none()
             .h_full()
             .flex()
             .flex_col()
             .overflow_hidden()
-            .bg(look.bg(ui.sidebar_bg))
-            .border_r_1()
-            .border_color(look.c(ui.border))
             .when(self.config.ui.keep_awake, |d| d.child({
                 // Keep Awake toggle, above the agents (View > Show Keep Awake in Sidebar).
                 let on = self.caffeinate.is_some();
@@ -4825,8 +4927,8 @@ Commits stay; {label} is told with your next message."));
                     })),
             )
             .when(self.files_open, |d| d.children(tree.map(|t| div().flex_1().min_h(px(0.)).flex().flex_col().child(t))))
-            // Drag handle on the right edge.
-            .child(
+            // Drag handle on the right edge (with window gaps, the gap is the handle).
+            .when(!tiled, |d| d.child(
                 div()
                     .id("sidebar-resize")
                     .absolute()
@@ -4839,7 +4941,24 @@ Commits stay; {label} is told with your next message."));
                         this.resizing = true;
                         cx.stop_propagation();
                     })),
-            )
+            ))
+    }
+
+    /// With window gaps: the gap between the sidebar and the stage, which
+    /// resizes the sidebar.
+    fn sidebar_gap(&self, look: &Look, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("sidebar-resize")
+            .flex_none()
+            .w(look.gap())
+            .h_full()
+            .cursor_col_resize()
+            .relative()
+            .children(crate::script::mark(|| "sidebar-gap".to_string()))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                this.resizing = true;
+                cx.stop_propagation();
+            }))
     }
 
     fn stage(&self, look: &Look, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -4865,21 +4984,30 @@ Commits stay; {label} is told with your next message."));
                         dock::Panel::Browser => div().size_full().child(t.browser.clone()).into_any_element(),
                         dock::Panel::Todo => todo_panel(&t.todos.todos, t.accent, look).into_any_element(),
                     });
-                    // The stage region's one translucent layer.
-                    return div().size_full().bg(look.bg(ui.panel_bg)).child(dock).into_any_element();
+                    // The stage region's one translucent layer (with window
+                    // gaps, each dock pane paints its own instead).
+                    self.terms.read(cx).standalone.set(false);
+                    return div().size_full().bg(look.region_bg(ui.panel_bg)).child(dock).into_any_element();
                 }
             }
             Some(Selected::Shell(_)) => {
-                return div().size_full().bg(look.bg(ui.panel_bg)).pt(look.z(6.)).child(self.terms.clone()).into_any_element();
+                // With window gaps the terminal's panes are the tiles.
+                self.terms.read(cx).standalone.set(true);
+                return div()
+                    .size_full()
+                    .bg(look.region_bg(ui.panel_bg))
+                    .when(look.tiles.is_none(), |d| d.pt(look.z(6.)))
+                    .child(self.terms.clone())
+                    .into_any_element();
             }
             Some(Selected::Git) => {
                 if let Some(g) = &self.git {
-                    return g.clone().into_any_element();
+                    return Self::stage_tile(look, ui.editor_bg, g.clone().into_any_element());
                 }
             }
             Some(Selected::Search) => {
                 if let Some(s) = &self.search {
-                    return s.clone().into_any_element();
+                    return Self::stage_tile(look, ui.editor_bg, s.clone().into_any_element());
                 }
             }
             None => {}
@@ -4892,12 +5020,11 @@ Commits stay; {label} is told with your next message."));
                 .child(div().text_color(look.c(ui.text_secondary)).child(label))
                 .child(div().text_color(look.c(ui.text_muted)).child(commands::display_keys(keys)))
         };
-        div()
+        look.tile(div(), ui.editor_bg)
             .size_full()
             .flex()
             .items_center()
             .justify_center()
-            .bg(look.bg(ui.editor_bg))
             .text_size(look.text(0.))
             .child(
                 div()
@@ -4911,6 +5038,15 @@ Commits stay; {label} is told with your next message."));
                     .child(hint("Command Palette", "cmd-shift-p")),
             )
             .into_any_element()
+    }
+
+    /// A view that paints its own region background (`Look::region_bg`),
+    /// wrapped as one tile when window gaps are on.
+    fn stage_tile(look: &Look, fill: Rgba, view: gpui::AnyElement) -> gpui::AnyElement {
+        if look.tiles.is_none() {
+            return view;
+        }
+        look.tile(div(), fill).size_full().child(view).into_any_element()
     }
 
     fn code_modal(&self, look: &Look, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -5034,6 +5170,7 @@ Commits stay; {label} is told with your next message."));
                     .into_any_element(),
             )),
             Overlay::Transparency { project_scope } => Some(self.transparency_popover(*project_scope, look, cx)),
+            Overlay::Gaps => Some(self.gaps_popover(look, cx)),
             Overlay::NewTask { input, agent } => {
                 let agents = self.roster.agents.clone();
                 let chosen = *agent;
@@ -5276,6 +5413,102 @@ Commits stay; {label} is told with your next message."));
     }
 }
 
+impl Workspace {
+    /// Qur > Appearance > Gaps…, modelled on Transparency….
+    fn gaps_popover(&self, look: &Look, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let ui = &look.theme.ui;
+        let u = &self.config.ui;
+        let check = |on: bool| {
+            div()
+                .size(look.z(12.))
+                .flex_none()
+                .rounded(look.z(3.))
+                .border_1()
+                .border_color(look.c(ui.text_secondary))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(on, |d| d.child(svg().path(icon::CHECK).size(look.z(10.)).text_color(look.c(ui.text))))
+        };
+        let toggle = |id: &'static str, label: &'static str, on: bool, f: fn(&mut qur_config::UiConfig)| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap(look.z(8.))
+                .cursor_pointer()
+                .relative()
+                .child(check(on))
+                .child(label)
+                .children(crate::script::mark(|| format!("gaps:{id}")))
+                .on_click(cx.listener(move |this, _, window, cx| this.set_gaps(f, window, cx)))
+        };
+        let track_w = look.z(200.);
+        let slider = |which: usize, label: &'static str, value: f32, t: f32, dim: bool| {
+            let bounds = self.gap_sliders.clone();
+            div()
+                .flex()
+                .flex_col()
+                .gap(look.z(4.))
+                .when(dim, |d| d.opacity(0.5))
+                .child(div().flex().justify_between().child(label).child(div().text_color(look.c(ui.text_muted)).child(format!("{} px", value.round() as i32))))
+                .child(
+                    div()
+                        .id(("gap-slider", which))
+                        .relative()
+                        .w(track_w)
+                        .h(look.z(16.))
+                        .cursor_pointer()
+                        .children(crate::script::mark(move || format!("gaps:slider{which}")))
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &gpui::MouseDownEvent, window, cx| {
+                            this.gap_sliding = Some(which);
+                            this.gap_slide_to(which, ev.position.x, window, cx);
+                        }))
+                        .child(canvas(move |b, _, _| bounds[which].set(b), |_, _, _, _| {}).absolute().size_full())
+                        .child(div().absolute().top(look.z(7.)).left_0().w(track_w).h(look.z(2.)).bg(look.c(ui.border_strong)))
+                        .child(div().absolute().top(look.z(7.)).left_0().w(track_w * t).h(look.z(2.)).bg(look.c(ui.text)))
+                        .child(div().absolute().top(look.z(2.)).left(track_w * t - look.z(6.)).size(look.z(12.)).rounded(look.z(3.)).bg(look.c(ui.text))),
+                )
+        };
+        let (min, max) = (qur_config::MIN_GAP, qur_config::MAX_GAP);
+        div()
+            .absolute()
+            .top(look.z(TITLEBAR_H + 4.) + look.gap())
+            .left(self.title_lead(look) + look.gap())
+            .occlude()
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.gap_sliding = None))
+            .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, window, cx| {
+                match this.gap_sliding {
+                    Some(which) if ev.pressed_button == Some(MouseButton::Left) => this.gap_slide_to(which, ev.position.x, window, cx),
+                    _ => this.gap_sliding = None,
+                }
+            }))
+            .w(look.z(248.))
+            .p(look.z(12.))
+            .flex()
+            .flex_col()
+            .gap(look.z(10.))
+            .bg(look.c(ui.overlay_bg))
+            .border_1()
+            .border_color(look.c(ui.border_strong))
+            .rounded(look.z(6.))
+            .text_size(look.text(-1.))
+            .text_color(look.c(ui.text))
+            .child(toggle("gaps", "Window gaps", u.gaps, |u| u.gaps = !u.gaps))
+            .child(slider(0, "Gap", u.gap, (u.gap - min) / (max - min), !u.gaps))
+            .child(toggle("rounded", "Rounded corners", u.rounded, |u| u.rounded = !u.rounded))
+            .child(slider(1, "Corner radius", u.radius, u.radius / qur_config::MAX_RADIUS, !u.rounded))
+            .child(toggle("border", "Tile border", u.tile_border, |u| u.tile_border = !u.tile_border))
+            .child(
+                div()
+                    .text_size(look.text(-2.))
+                    .text_color(look.c(ui.text_muted))
+                    .child("The gaps show your desktop. Below 100% opacity with blur on, they're blurred too."),
+            )
+            .into_any_element()
+    }
+}
+
 thread_local! {
     /// Task id per agent entity (lets render paths find agents by id without
     /// borrowing the App).
@@ -5357,6 +5590,10 @@ const CONFIG_TEMPLATE: &str = r#"# Qur settings. Saved changes apply right away.
 # font_size = 13
 # zoom = 1.0
 # traffic_lights = "auto"   # full screen: auto (grey in dark themes), color, mono
+# gaps = false              # window gaps (Hyprland look): every region its own tile
+# gap = 8                   # 2 to 24
+# rounded = true            # rounded tiles; radius = 8 (0 to 16)
+# tile_border = false
 
 [panels]
 # terminal = true
@@ -5438,12 +5675,30 @@ impl Render for Workspace {
             let show = term_wants && !covered && self.selected == Some(Selected::TermTask(id));
             browser.update(cx, |b, cx| b.set_shown(show, window, cx));
         }
+        // Window gaps: the traffic lights move in with the top bar's tile.
+        let lights = f32::from(look.gap()).round();
+        if lights != self.lights_inset {
+            self.lights_inset = lights;
+            window.set_traffic_light_position(gpui::point(px(9. + lights), px(9. + lights)));
+        }
+        let tiled = look.tiles.is_some();
         let body = div()
             .flex_1()
             .min_h(px(0.))
             .flex()
             .when(self.sidebar, |d| d.child(self.sidebar(&look, cx)))
+            .when(self.sidebar && tiled, |d| d.child(self.sidebar_gap(&look, cx)))
             .child(div().flex_1().min_w(px(0.)).h_full().child(self.stage(&look, cx)));
+        let zen = self.config.ui.zen;
+        // With window gaps the regions sit a gap apart and in from the edges.
+        let frame = div()
+            .flex_1()
+            .min_h(px(0.))
+            .flex()
+            .flex_col()
+            .when(tiled, |d| d.p(look.gap()).gap(look.gap()))
+            .when(!zen, |d| d.child(self.top(&look, cx)))
+            .child(body);
         let any_overlay = self.overlay.is_some();
         div()
             .key_context("Workspace")
@@ -5459,8 +5714,9 @@ impl Render for Workspace {
             // The base for any text that doesn't set its own size (it follows Text Size and zoom).
             .text_size(look.text(0.))
             .text_color(look.c(ui.text))
-            // Regions paint their own (translucent) backgrounds.
-            .bg(look.surface(ui.window_bg))
+            // Regions paint their own (translucent) backgrounds; with window
+            // gaps the root is all but clear (Look::root_bg).
+            .bg(look.root_bg(ui.window_bg))
             .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(Self::hide))
             .on_action(cx.listener(Self::hide_others))
@@ -5504,6 +5760,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::shrink_selection))
             .on_action(cx.listener(Self::open_keymap))
             .on_action(cx.listener(Self::transparency))
+            .on_action(cx.listener(Self::gaps))
+            .on_action(cx.listener(Self::toggle_gaps))
             .on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::new_agent_terminal))
             .on_action(cx.listener(Self::new_agent_task))
@@ -5585,8 +5843,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::follow_agent))
             .on_action(cx.listener(Self::take_over))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
-                if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::Transparency { .. })) {
+                if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::Transparency { .. } | Overlay::Gaps)) {
                     this.save_transparency(cx);
+                    this.save_gaps(cx);
                     this.close_overlays(window, cx);
                 }
             }))
@@ -5609,8 +5868,8 @@ impl Render for Workspace {
                 }
                 if this.resizing {
                     if ev.pressed_button == Some(MouseButton::Left) {
-                        let zoom = Look::of(window, cx).zoom;
-                        this.sidebar_w = (f32::from(ev.position.x) / zoom).clamp(SIDEBAR_MIN_W, SIDEBAR_MAX_W);
+                        let look = Look::of(window, cx);
+                        this.sidebar_w = (f32::from(ev.position.x - look.gap()) / look.zoom).clamp(SIDEBAR_MIN_W, SIDEBAR_MAX_W);
                         cx.notify();
                     } else {
                         this.resizing = false;
@@ -5625,15 +5884,15 @@ impl Render for Workspace {
                     this.save_tune(tune, window, cx);
                 }
             }))
-            .when(!self.config.ui.zen, |d| d.child(self.top(&look, cx)))
-            .child(body)
-            .when(self.config.ui.zen, |d| d.child(self.top(&look, cx)))
+            .child(frame)
+            .when(zen, |d| d.child(self.top(&look, cx)))
             .children(self.code_modal(&look, cx))
             .when(any_overlay, |d| {
                 d.child(div().absolute().size_full().on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, window, cx| {
                         this.save_transparency(cx);
+                        this.save_gaps(cx);
                         this.close_overlays(window, cx);
                     }),
                 ))

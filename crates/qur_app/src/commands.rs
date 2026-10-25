@@ -26,6 +26,7 @@ pub mod qur {
             KeepWorking, DiscardTask, OpenWorktreeInTerminal, RevealWorktree, KeyboardShortcuts,
             RunDoctor, ShowLogs, ReportProblem, ExpandSelection, ShrinkSelection,
             RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge, Caffeinate, ShowKeepAwake, SwitchSession, ZenMode,
+            Gaps, ToggleGaps,
             ShowLastTurn, RewindLastTurn, ReviewWork, ReviewPlan, SendReviewFindings,
         ]
     );
@@ -187,6 +188,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::AccentColor, "Qur", "Accent Color…", "", W, R),
     cmd!(qur::UseDefaultTheme, "Qur", "Use Default Theme for This Project", "", W, R),
     cmd!(qur::Transparency, "Qur", "Transparency…", "", W, R),
+    cmd!(qur::Gaps, "Qur", "Gaps…", "", W, R),
     cmd!(qur::VimMode, "Qur", "Vim Mode", "", W, R),
     cmd!(qur::NewWindow, "File", "New Window", "cmd-n", W, R),
     cmd!(qur::NewAgentTask, "Agent", "New Agent Task…", "cmd-shift-n", W, R),
@@ -294,6 +296,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::Caffeinate, "View", "Keep Mac Awake (caffeinate)", "", W, R),
     cmd!(qur::ShowKeepAwake, "View", "Show Keep Awake in Sidebar", "", W, R),
     cmd!(qur::ZenMode, "View", "Zen Mode", "ctrl-cmd-z", W, R),
+    cmd!(qur::ToggleGaps, "View", "Toggle Gaps", "", W, R),
     cmd!(terminal::Clear, "Terminal", "Clear", "cmd-k", T, R),
     cmd!(terminal::Find, "Terminal", "Find in Terminal", "cmd-f", T, R),
     cmd!(terminal::Tile, "Terminal", "New Tiled Terminal (Grid)", "cmd-enter", W, R),
@@ -580,6 +583,8 @@ pub struct MenuState {
     pub vim: bool,
     pub keep_awake: bool,
     pub zen: bool,
+    /// Window gaps are on (`[ui] gaps`).
+    pub gaps: bool,
     /// `keymap_generation()`: new shortcuts rebuild the menus.
     pub keymap: u64,
 }
@@ -620,6 +625,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
                 sep(),
                 item(qur::AccentColor),
                 item(qur::Transparency),
+                item(qur::Gaps),
             ])),
             item(qur::VimMode).checked(s.vim),
             sep(),
@@ -727,6 +733,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::ZoomReset),
             sep(),
             item(qur::ZenMode).checked(s.zen),
+            item(qur::ToggleGaps).checked(s.gaps),
             item(qur::ToggleFullScreen),
         ]),
         Menu::new("Go").items([

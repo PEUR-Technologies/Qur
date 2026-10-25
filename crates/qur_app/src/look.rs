@@ -21,6 +21,32 @@ pub struct Look {
     pub ui_size: f32,
     pub code_size: f32,
     pub line_height: f32,
+    /// Window gaps (`[ui] gaps`): every region floats as its own tile.
+    pub tiles: Option<Tiles>,
+}
+
+/// Hyprland-style window gaps: the window paints nothing between regions,
+/// and each region (top bar, sidebar, dock pane, terminal pane) is a tile
+/// with its own background. Lengths are in points before zoom.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tiles {
+    pub gap: f32,
+    /// 0 = square corners.
+    pub radius: f32,
+    pub border: bool,
+}
+
+impl Tiles {
+    pub fn from_config(ui: &qur_config::UiConfig) -> Option<Tiles> {
+        ui.gaps.then_some(Tiles { gap: ui.gap, radius: if ui.rounded { ui.radius } else { 0.0 }, border: ui.tile_border })
+    }
+
+    /// How far a tile's content stays in from its edges so the rounded
+    /// corners aren't painted over (GPUI clips children to rectangles): the
+    /// corner arc is farthest from the edges on the diagonal, r(1 - 1/√2).
+    pub fn inset(&self) -> f32 {
+        (self.radius * (1.0 - std::f32::consts::FRAC_1_SQRT_2)).ceil()
+    }
 }
 
 #[derive(Default)]
@@ -56,6 +82,7 @@ impl Look {
             ui_size: 13.0,
             code_size: 13.0,
             line_height: 1.5,
+            tiles: None,
         }
     }
 
@@ -98,8 +125,49 @@ impl Look {
         if self.opacity < 1.0 { gpui::transparent_black() } else { hsla(c) }
     }
 
+    /// The space between tiles (zoomed); 0 without gaps.
+    pub fn gap(&self) -> Pixels {
+        self.tiles.map(|t| self.z(t.gap)).unwrap_or(px(0.))
+    }
+
+    /// A region's background where, with gaps on, an enclosing tile already
+    /// paints it (the one-translucent-layer rule): nothing then.
+    pub fn region_bg(&self, c: Rgba) -> Hsla {
+        if self.tiles.is_some() { gpui::transparent_black() } else { self.bg(c) }
+    }
+
+    /// The window root's fill. With gaps on it is all but invisible: alpha
+    /// 1/255 keeps the gaps clickable (AppKit lets clicks on fully clear
+    /// pixels of a non-opaque window fall through to the window behind),
+    /// so dividers in the gaps drag and the window stays focusable.
+    pub fn root_bg(&self, c: Rgba) -> Hsla {
+        if self.tiles.is_some() {
+            let mut h = hsla(c);
+            h.a = 1.0 / 255.0;
+            h
+        } else {
+            self.surface(c)
+        }
+    }
+
+    /// Make `el` a tile: its own translucent background, rounded corners,
+    /// an optional hairline, and its content inset from the corners. Without
+    /// gaps it is just the region background.
+    pub fn tile<E: gpui::Styled>(&self, el: E, c: Rgba) -> E {
+        let el = el.bg(self.bg(c));
+        let Some(t) = self.tiles else { return el };
+        let el = el.rounded(self.z(t.radius)).p(self.z(t.inset()));
+        if t.border { el.border_1().border_color(self.c(self.theme.ui.border)) } else { el }
+    }
+
     pub fn background_appearance(&self) -> WindowBackgroundAppearance {
-        if self.opacity >= 1.0 {
+        // With gaps on the window is never opaque: the gaps show the desktop
+        // even at 100%. Blur is window-wide in macOS, so it follows the
+        // Transparency popover: below 100% with blur on, the gaps are
+        // blurred too; at 100% (or blur off) they're crisp.
+        if self.tiles.is_some() && self.opacity >= 1.0 {
+            WindowBackgroundAppearance::Transparent
+        } else if self.opacity >= 1.0 {
             WindowBackgroundAppearance::Opaque
         } else if self.blur {
             WindowBackgroundAppearance::Blurred
@@ -122,4 +190,29 @@ pub fn hsla(c: Rgba) -> Hsla {
         a: c.a() as f32 / 255.0,
     }
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tiles_follow_config_and_inset_clears_corners() {
+        let mut ui = qur_config::UiConfig::default();
+        assert_eq!(Tiles::from_config(&ui), None, "gaps are off by default");
+        ui.gaps = true;
+        let t = Tiles::from_config(&ui).unwrap();
+        assert_eq!((t.gap, t.radius, t.border), (8.0, 8.0, false));
+        // The corner arc's deepest point is r(1 - 1/√2) ≈ 2.34 in from both edges.
+        assert_eq!(t.inset(), 3.0);
+        ui.rounded = false;
+        let t = Tiles::from_config(&ui).unwrap();
+        assert_eq!((t.radius, t.inset()), (0.0, 0.0));
+        for r in [1.0f32, 4.0, 12.0, 16.0] {
+            let t = Tiles { gap: 8.0, radius: r, border: false };
+            let d = t.inset();
+            // A child's corner at (d, d) is inside the arc centred at (r, r).
+            assert!(((r - d).powi(2) * 2.0).sqrt() <= r + 1e-3, "r={r} d={d}");
+        }
+    }
 }
