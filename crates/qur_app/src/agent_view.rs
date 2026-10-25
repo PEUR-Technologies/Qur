@@ -2281,15 +2281,16 @@ impl AgentTask {
         let ui = look.theme.ui.clone();
         let working = matches!(self.status, Status::Working | Status::NeedsYou);
         let elapsed = self.turn_started.filter(|_| working).map(|t| format!("  {}s", t.elapsed().as_secs())).unwrap_or_default();
-        div()
-            .flex_none()
+        // With window gaps the header is a tile of its own above the dock's.
+        let tiled = look.tiles.is_some();
+        let d = div();
+        let d = if tiled { look.tile(d, ui.editor_bg) } else { d.border_b_1().border_color(look.c(ui.border)) };
+        d.flex_none()
             .h(look.z(36.))
             .px(look.z(16.))
             .flex()
             .items_center()
             .gap(look.z(10.))
-            .border_b_1()
-            .border_color(look.c(ui.border))
             .child(div().flex_none().size(look.z(10.)).rounded(look.z(2.5)).bg(look.c(self.accent)))
             .child(div().min_w(px(0.)).truncate().font_weight(gpui::FontWeight::MEDIUM).child(self.record.title.clone()))
             .child(
@@ -2607,7 +2608,10 @@ impl Render for AgentTask {
             .size_full()
             .flex()
             .flex_col()
-            .bg(look.bg(ui.editor_bg))
+            // Without gaps the stage is one region; with them the header and
+            // each dock pane paint their own tile.
+            .bg(look.region_bg(ui.editor_bg))
+            .gap(look.gap())
             .child(header)
             .child(body)
     }

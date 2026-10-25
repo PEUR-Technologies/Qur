@@ -85,6 +85,9 @@ pub struct Choices {
     pub traffic_lights: String,
     pub theme: String,
     pub accent: usize,
+    /// Window gaps (`[ui] gaps`) and their size (`[ui] gap`).
+    pub gaps: bool,
+    pub gap: f32,
 }
 
 pub enum SetupEvent {
@@ -95,6 +98,8 @@ pub enum SetupEvent {
     /// Live preview while choosing.
     PreviewTheme(String),
     PreviewAccent(usize),
+    /// Window gaps on or off, and the gap.
+    PreviewGaps(bool, f32),
     Done(Choices),
     Cancel,
 }
@@ -108,6 +113,8 @@ pub struct SetupView {
     traffic_lights: String,
     theme: String,
     accent: usize,
+    gaps: bool,
+    gap: f32,
     /// Each service's sign-in; `None` while checking.
     logins: [Option<Login>; 2],
     npm: bool,
@@ -157,6 +164,8 @@ impl SetupView {
             traffic_lights: config.ui.traffic_lights.clone(),
             theme: config.theme.clone(),
             accent: config.ui.accent % 6,
+            gaps: config.ui.gaps,
+            gap: config.ui.gap,
             logins: [None, None],
             npm: false,
             waiting: None,
@@ -321,12 +330,53 @@ impl SetupView {
 
     pub fn done(&mut self, cx: &mut Context<Self>) {
         let agents = self.agents.iter().filter(|f| f.enabled).map(|f| f.def.clone()).collect();
-        cx.emit(SetupEvent::Done(Choices { agents, layout: self.layout.clone(), vim: self.vim, zen: self.zen, traffic_lights: self.traffic_lights.clone(), theme: self.theme.clone(), accent: self.accent }));
+        cx.emit(SetupEvent::Done(Choices { agents, layout: self.layout.clone(), vim: self.vim, zen: self.zen, traffic_lights: self.traffic_lights.clone(), theme: self.theme.clone(), accent: self.accent, gaps: self.gaps, gap: self.gap }));
     }
 }
 
 /// A small live sample of a theme: a sidebar with two agents, highlighted
 /// code, and one glowing file row (handoff section 12a).
+impl SetupView {
+    /// The Appearance section's **Gaps** row: off, or a gap size (fine-tuned,
+    /// with corners and borders, in Qur > Appearance > Gaps…). Previewed live.
+    fn gaps_row(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = &look.theme.ui;
+        const SIZES: [(&str, f32); 3] = [("Small", 4.0), ("Medium", 8.0), ("Large", 16.0)];
+        let custom = self.gaps && !SIZES.iter().any(|(_, v)| *v == self.gap);
+        let pill = |i: usize, label: String, on: bool, gaps: bool, gap: f32| {
+            div()
+                .id(("gaps", i))
+                .relative()
+                .px(look.z(10.))
+                .py(look.z(4.))
+                .rounded(look.z(5.))
+                .border_1()
+                .cursor_pointer()
+                .text_size(look.text(-1.))
+                .border_color(look.c(if on { ui.focus_ring } else { ui.border }))
+                .when(on, |d| d.bg(look.c(ui.active_bg)))
+                .hover(|d| d.bg(look.c(ui.hover_bg)))
+                .text_color(look.c(if on { ui.text } else { ui.text_secondary }))
+                .child(label)
+                .children(crate::script::mark(move || format!("setup-gaps:{i}")))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.gaps = gaps;
+                    this.gap = gap;
+                    cx.emit(SetupEvent::PreviewGaps(gaps, gap));
+                    cx.notify();
+                }))
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(look.z(8.))
+            .child(pill(0, "Off".into(), !self.gaps, false, self.gap))
+            .children(SIZES.iter().enumerate().map(|(i, (label, v))| pill(i + 1, (*label).into(), self.gaps && self.gap == *v, true, *v)))
+            .when(custom, |d| d.child(pill(4, format!("{} px", self.gap.round() as i32), true, true, self.gap)))
+            .child(div().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child("More in Qur > Appearance > Gaps…"))
+    }
+}
+
 fn preview(t: &Theme, look: &Look) -> gpui::Div {
     let c = |rgba| look.c(rgba);
     let syn = |name: &str| c(t.syntax_style(name).color.unwrap_or(t.editor.text));
@@ -693,6 +743,8 @@ impl Render for SetupView {
             .child(top_row)
             .child(heading("Traffic lights in full screen"))
             .child(lights_row)
+            .child(heading("Gaps"))
+            .child(self.gaps_row(&look, cx))
             .child(heading("Accent color"))
             .child(accent_row)
             .child(heading("Theme"))

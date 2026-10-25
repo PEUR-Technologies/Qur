@@ -424,6 +424,6 @@ impl Render for GitPanel {
             .into_any_element()
         };
         let _ = Row::Draft;
-        div().size_full().flex().bg(look.bg(ui.editor_bg)).child(left).child(div().flex_1().min_w(px(0.)).flex().flex_col().child(right))
+        div().size_full().flex().bg(look.region_bg(ui.editor_bg)).child(left).child(div().flex_1().min_w(px(0.)).flex().flex_col().child(right))
     }
 }

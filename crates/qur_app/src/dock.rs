@@ -74,6 +74,15 @@ impl Kind {
         }
     }
 
+    /// A pane tile's background with window gaps on: what the stage region
+    /// paints without them (the chat's editor colour, the terminal's panel).
+    pub fn fill(self, look: &Look) -> qur_theme::Rgba {
+        match self {
+            Kind::Acp => look.theme.ui.editor_bg,
+            Kind::Terminal => look.theme.ui.panel_bg,
+        }
+    }
+
     pub fn config_key(self) -> &'static str {
         match self {
             Kind::Acp => "layout.acp",
@@ -548,13 +557,33 @@ fn node<V: 'static>(kind: Kind, n: &Node, path: Path, look: &Look, cx: &mut Cont
             let first = node(kind, a, pa, look, cx, content, bounds);
             let second = node(kind, b, pb, look, cx, content, bounds);
             let (bounds2, path2) = (bounds.clone(), path.clone());
+            // Without gaps a 1 px line; with them the divider is the gap
+            // itself (clear, the accent line showing while hovered).
+            let gap = look.gap();
+            let group = SharedString::from(format!("split-{kind:?}-{path:?}"));
             let handle = div()
-                .id(SharedString::from(format!("split-{kind:?}-{path:?}")))
+                .id(group.clone())
+                .group(group.clone())
                 .flex_none()
-                .bg(look.c(ui.border))
-                .hover(|d| d.bg(look.c(ui.focus_ring)))
-                .when(*vertical, |d| d.h(px(1.)).w_full().cursor_row_resize())
-                .when(!*vertical, |d| d.w(px(1.)).h_full().cursor_col_resize())
+                .when(look.tiles.is_none(), |d| {
+                    d.bg(look.c(ui.border))
+                        .hover(|d| d.bg(look.c(ui.focus_ring)))
+                        .when(*vertical, |d| d.h(px(1.)).w_full())
+                        .when(!*vertical, |d| d.w(px(1.)).h_full())
+                })
+                .when(look.tiles.is_some(), |d| {
+                    d.when(*vertical, |d| d.h(gap).w_full())
+                        .when(!*vertical, |d| d.w(gap).h_full())
+                        .child(
+                            div()
+                                .absolute()
+                                .when(*vertical, |d| d.left(gap * 2.).right(gap * 2.).top((gap - px(1.)) / 2.).h(px(1.)))
+                                .when(!*vertical, |d| d.top(gap * 2.).bottom(gap * 2.).left((gap - px(1.)) / 2.).w(px(1.)))
+                                .group_hover(group.clone(), |d| d.bg(look.c(ui.focus_ring))),
+                        )
+                })
+                .when(*vertical, |d| d.cursor_row_resize())
+                .when(!*vertical, |d| d.cursor_col_resize())
                 // A wider grab area than the 1 px line.
                 .child(div().absolute().when(*vertical, |d| d.left_0().right_0().top(px(-3.)).h(px(7.))).when(!*vertical, |d| d.top_0().bottom_0().left(px(-3.)).w(px(7.))))
                 .relative()
@@ -659,7 +688,11 @@ fn node<V: 'static>(kind: Kind, n: &Node, path: Path, look: &Look, cx: &mut Cont
                 .children(current.map(|p| content(p, cx)))
                 .children(crate::script::mark(|| format!("pane:{kind:?}:{}", path_name(&path))));
             let zones = drop_zones(kind, path.clone(), look);
-            div().size_full().flex().flex_col().relative().child(strip).child(body.child(zones)).into_any_element()
+            // With window gaps each pane is a tile (its own background); without
+            // them the stage region behind the dock paints one.
+            let pane = div().size_full().flex().flex_col().relative();
+            let pane = if look.tiles.is_some() { look.tile(pane, kind.fill(look)) } else { pane };
+            pane.child(strip).child(body.child(zones)).into_any_element()
         }
     }
 }

@@ -50,6 +50,7 @@ One window is one project. There's no permanent editor area: the window is for a
   - A structured (ACP) agent shows Live, Browser and Changes next to its Chat (with the permission bar and the prompt) and To-do.
   - Drag a tab onto a pane's edge to split, onto its middle to join; drag the dividers to resize; × tucks a tab away. Your arrangement is saved.
 - **Code modal**: opening a file shows it in a modal with full editing. `Esc` closes it.
+- **Window gaps** (View > Toggle Gaps, or Qur > Appearance > Gaps… to adjust; also a row in Setup): like Hyprland, the top bar, the sidebar, every dock pane and every split terminal float as their own tiles with clear gaps between them and around the window's edge, so Qur looks like a stack of separate windows. The popover sets the gap (2–24 pt), rounded corners and their radius (0–16 pt), and a hairline border per tile; it previews as you drag and saves when it closes. Drag a gap between panes (or between the sidebar and the stage) to resize. The gaps show your desktop even at 100% opacity; below 100% with blur on they're blurred too, because macOS blurs the whole window.
 
 ## Features
 
@@ -126,7 +127,7 @@ Everything lives in `~/Library/Application Support/Qur/`. Qur never writes into 
 
 | File | What |
 |---|---|
-| `config.toml` | Theme, window opacity/blur, editor font, soft wrap, peek layout, `[keys] vim`, `[alerts]`. Qur > Settings opens it; saved changes apply right away. |
+| `config.toml` | Theme, window opacity/blur, editor font, soft wrap, peek layout, `[keys] vim`, `[alerts]`, and window gaps: `[ui] gaps = true`, `gap = 8`, `rounded = true`, `radius = 8`, `tile_border = false`. Qur > Settings opens it; saved changes apply right away. |
 | `agents.toml` | Which agents Qur can start (ACP or terminal mode). Written on first launch. |
 | `keymap.toml` | Your own key bindings (see below). Qur > Settings > Open keymap.toml; saved changes apply right away. |
 | `projects/<id>.toml` | Per-project theme, opacity, `[worktree] setup = "pnpm install"` (runs in each new worktree before the agent starts), `[checks] command = "cargo check"` (runs after each agent turn that changed files), and `[run] command` / `url` with `$PORT` (Run Project). |
@@ -218,7 +219,7 @@ CI (`.github/workflows/ci.yml`, one macOS job) runs clippy with `-D warnings`, t
 
 `<at>` is `x,y` in window points, or a marked element: `@tab:Terminal:Live` (its middle) or `@pane:Terminal:root~0.9~0.5` (fractions of its size). Marks: `agent:<button id>` (e.g. `agent:tt-root-1`), `menu:<item>`, `tab:` / `close:` / `add:<Kind>:<Panel>`, `pane:` / `split:<Kind>:<path>` (`root`, then `a`/`b` per split), `term:<session>`, `term-cell:<session>` (one cell, so `@term-cell:1~4.5~0.5` is column 4 of the top row), `git-row:` / `git-act:<staged|unstaged>:<path>`. Marks exist only in scripted runs. Each input step draws the window first, so it works while the window is covered; check `STATE`, `FLASH` and files on disk rather than screenshots.
 
-`scripts/handcheck.sh` runs the hand checks this way (Vim keys, Find in Terminal, Rename, the agent menu, dock tabs and dividers, Cmd-click, the Git panel's stage, diff and typed commit, About, Accent Color, Run Doctor) and prints ✓/✕ per assertion. It needs a logged-in session but no agent: a plain shell stands in for Claude Code.
+`scripts/handcheck.sh` runs the hand checks this way (Vim keys, Find in Terminal, Rename, the agent menu, dock tabs and dividers, Cmd-click, the Git panel's stage, diff and typed commit, About, Accent Color, Run Doctor, window gaps with a dock divider and the sidebar dragged in the gaps) and prints ✓/✕ per assertion. It needs a logged-in session but no agent: a plain shell stands in for Claude Code.
 
 House rules:
 - Lightness is the product: measure with `scripts/budget.sh`, don't estimate.
