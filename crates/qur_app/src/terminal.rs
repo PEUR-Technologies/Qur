@@ -474,6 +474,9 @@ struct Group {
     tile: Tile,
     /// The pane last focused, focused again when the row is selected.
     last: usize,
+    /// Laid out as a grid (Cmd+Enter): closing a pane lays it out again.
+    /// Off once a pane is split by hand (Cmd+D, Cmd+Shift+D).
+    grid: bool,
 }
 
 pub struct TerminalPanel {
@@ -646,8 +649,10 @@ impl TerminalPanel {
                 };
                 next = Some(if rest.contains(&group.last) { group.last } else { rest[0] });
                 if rest.len() > 1 {
-                    self.groups.push(Group { owner, tile, last: next.unwrap_or(owner) });
-                    self.regrid(owner);
+                    self.groups.push(Group { owner, tile, last: next.unwrap_or(owner), grid: group.grid });
+                    if group.grid {
+                        self.regrid(owner);
+                    }
                 }
             }
         }
@@ -689,8 +694,8 @@ impl TerminalPanel {
     }
 
     /// Open a shell in `cwd` beside the focused terminal (below it when
-    /// `vertical`) and focus it.
-    pub fn split_active(&mut self, cwd: &Path, vertical: bool, cx: &mut Context<Self>) -> Option<usize> {
+    /// `vertical`) and focus it; with `grid`, lay the group out as a grid.
+    pub fn split_active(&mut self, cwd: &Path, vertical: bool, grid: bool, cx: &mut Context<Self>) -> Option<usize> {
         let target = self.active_session()?.id;
         let label = self.label_for(&Kind::Shell);
         let new = self.open(cwd, Kind::Shell, label, cx)?;
@@ -698,16 +703,25 @@ impl TerminalPanel {
             Some(g) => {
                 g.tile.split_at(target, new, vertical);
                 g.last = new;
+                g.grid = grid;
             }
             None => {
                 let mut tile = Tile::Term(target);
                 tile.split_at(target, new, vertical);
-                self.groups.push(Group { owner: target, tile, last: new });
+                self.groups.push(Group { owner: target, tile, last: new, grid });
             }
         }
-        self.regrid(new);
+        if grid {
+            self.regrid(new);
+        }
         cx.notify();
         Some(new)
+    }
+
+    /// Cmd+Enter: another shell, and the group laid out as a grid of
+    /// near-square panes.
+    pub fn grid_active(&mut self, cwd: &Path, cx: &mut Context<Self>) -> Option<usize> {
+        self.split_active(cwd, false, true, cx)
     }
 
     /// Lay the group holding `id` out again as a grid of near-square panes,
@@ -723,9 +737,9 @@ impl TerminalPanel {
         g.tile = Tile::grid(&ids, w, h);
     }
 
-    /// Tiling-WM style (dwindle, like Hyprland or bspwm): split the focused
-    /// pane along its longer side, so new terminals keep filling the view.
-    pub fn tile_active(&mut self, cwd: &Path, cx: &mut Context<Self>) -> Option<usize> {
+    /// Cmd+D, tiling-WM style (dwindle, like Hyprland or bspwm): halve the
+    /// focused pane along its longer side, so new terminals keep filling the view.
+    pub fn dwindle_active(&mut self, cwd: &Path, cx: &mut Context<Self>) -> Option<usize> {
         let target = self.active_session()?.id;
         // A pane not drawn yet (just made, or the window is covered) has no
         // size: turn the other way from the split that made it.
@@ -733,7 +747,7 @@ impl TerminalPanel {
             Some(b) => b.size.height > b.size.width,
             None => self.groups.iter().find_map(|g| g.tile.parent_vertical(target)).is_some_and(|v| !v),
         };
-        self.split_active(cwd, vertical, cx)
+        self.split_active(cwd, vertical, false, cx)
     }
 
     /// The group the focused session is in.
