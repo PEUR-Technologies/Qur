@@ -4,13 +4,20 @@
 //! (shell commands, formatters, codegen). It is a pure state machine: time only enters
 //! through the `now` parameters, so the UI decides when to re-render (`next_deadline`)
 //! and tests are deterministic. The blocking git helpers live in [`git`].
+//!
+//! A project-folder agent shares its folder with you ([`Heatmap::set_shared`]): there
+//! only files the agent touched glow, and a write counts as the agent's only while it
+//! plausibly made it. Writes Qur itself made (editor saves, Replace All) are never the
+//! agent's anywhere: see [`OwnWrites`].
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 mod git;
+mod own;
 pub use git::{diff_stats, full_scan};
+pub use own::{OWN_WINDOW, OwnWrites, own_writes};
 
 /// How long Reading glows after its tool completes, and Editing after the last write.
 pub const FADE: Duration = Duration::from_millis(1500);
@@ -18,6 +25,9 @@ pub const FADE: Duration = Duration::from_millis(1500);
 pub const RECOMPUTE: Duration = Duration::from_millis(150);
 /// Heat level cap.
 pub const MAX_LEVEL: u8 = 4;
+/// Shared folders: a write during a turn is the agent's while one of its tools is running
+/// or finished at most this long ago.
+pub const TOOL_GRACE: Duration = Duration::from_secs(3);
 
 /// Per-file state, in priority order (lowest first, so `max` picks the strongest).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -131,11 +141,46 @@ pub struct Heatmap {
     focus: Option<Focus>,
     /// tool id -> rel path -> line (from ACP locations).
     lines: HashMap<String, HashMap<PathBuf, u32>>,
+    /// The worktree is the project folder, shared with you (see `set_shared`).
+    shared: bool,
 }
 
 impl Heatmap {
     pub fn new(worktree: PathBuf, base: String) -> Self {
-        Heatmap { worktree, base, tools: HashMap::new(), files: HashMap::new(), focus: None, lines: HashMap::new() }
+        Heatmap {
+            worktree,
+            base,
+            tools: HashMap::new(),
+            files: HashMap::new(),
+            focus: None,
+            lines: HashMap::new(),
+            shared: false,
+        }
+    }
+
+    /// The agent works in the project folder, alongside you (and maybe your other
+    /// editors). Then only files the agent touched (named by its tools, or written while
+    /// it was plausibly the writer) show heat and diff stats: your own uncommitted
+    /// changes stay quiet. A write during a turn counts as the agent's only while it has
+    /// no tool calls at all (Agent Terminals: the caller's `turn_active` is the signal)
+    /// or one of them is running or finished within [`TOOL_GRACE`].
+    pub fn set_shared(&mut self, on: bool) {
+        self.shared = on;
+    }
+
+    pub fn shared(&self) -> bool {
+        self.shared
+    }
+
+    /// Shared folders: could a write right now be the agent's?
+    fn agent_plausible(&self, now: Instant) -> bool {
+        self.tools.is_empty()
+            || self.tools.values().any(|t| !t.status.done() || t.completed_at.is_some_and(|c| now < c + TOOL_GRACE))
+    }
+
+    /// Steady states (diff stats) show for this file.
+    fn owned(&self, f: &File) -> bool {
+        !self.shared || f.touches > 0
     }
 
     pub fn worktree(&self) -> &Path {
@@ -257,7 +302,10 @@ impl Heatmap {
     /// as Editing for 1.5 s after the last write, and count as touches. Every path gets a
     /// diff-stat recompute 150 ms after its last write. `.git/` paths are ignored. Existing
     /// directories only get the recompute (git expands them); they don't glow or take focus.
+    /// Pass Qur's own writes (see [`OwnWrites`]) with `turn_active = false`. In a shared
+    /// folder a turn write also needs the agent to be plausibly writing (`set_shared`).
     pub fn on_fs_change(&mut self, abs_paths: &[PathBuf], turn_active: bool, now: Instant) {
+        let turn_active = turn_active && (!self.shared || self.agent_plausible(now));
         for abs in abs_paths {
             let Some(rel) = self.rel(abs) else { continue };
             if rel.starts_with(".git") {
@@ -314,7 +362,7 @@ impl Heatmap {
 
     pub fn cell(&self, rel: &Path, now: Instant) -> Cell {
         match self.files.get(rel) {
-            Some(f) => file_cell(f, now),
+            Some(f) => file_cell(f, self.owned(f), now),
             None => Cell { state: HeatState::Idle, level: 0, stat: None, fade: 0.0 },
         }
     }
@@ -325,15 +373,34 @@ impl Heatmap {
         self.files
             .iter()
             .filter(|(r, _)| r.starts_with(rel_dir))
-            .map(|(_, f)| file_cell(f, now).state)
+            .map(|(_, f)| file_cell(f, self.owned(f), now).state)
             .max()
             .filter(|s| *s != HeatState::Idle)
     }
 
-    /// Files (relative) that differ from base, sorted.
+    /// Files (relative) that differ from base, sorted. In a shared folder, only the ones
+    /// the agent touched.
     pub fn changed(&self) -> Vec<PathBuf> {
-        let mut v: Vec<PathBuf> =
-            self.files.iter().filter(|(_, f)| f.stat.is_some()).map(|(r, _)| r.clone()).collect();
+        let mut v: Vec<PathBuf> = self
+            .files
+            .iter()
+            .filter(|(_, f)| f.stat.is_some() && self.owned(f))
+            .map(|(r, _)| r.clone())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Files (relative) deleted since base, sorted: the tree shows them as struck-through
+    /// rows until they come back, or the task is merged or discarded. In a shared folder,
+    /// only the ones the agent touched.
+    pub fn deleted(&self) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = self
+            .files
+            .iter()
+            .filter(|(_, f)| f.stat.is_some_and(|s| s.deleted) && self.owned(f))
+            .map(|(r, _)| r.clone())
+            .collect();
         v.sort();
         v
     }
@@ -365,7 +432,9 @@ impl Heatmap {
     }
 }
 
-fn file_cell(f: &File, now: Instant) -> Cell {
+/// `owned` = steady states (diff stats) show; false for files in a shared folder that
+/// the agent never touched.
+fn file_cell(f: &File, owned: bool, now: Instant) -> Cell {
     let remaining = |t: Option<Instant>| -> f32 {
         t.map_or(0.0, |t| {
             let left = (t + FADE).saturating_duration_since(now);
@@ -383,14 +452,15 @@ fn file_cell(f: &File, now: Instant) -> Cell {
     } else if remaining(f.read_done) > 0.0 {
         (HeatState::Reading, remaining(f.read_done))
     } else {
-        match f.stat {
+        match f.stat.filter(|_| owned) {
             Some(s) if s.deleted => (HeatState::Deleted, 1.0),
             Some(s) if s.created => (HeatState::Created, 1.0),
             Some(_) => (HeatState::Changed, 1.0),
             None => (HeatState::Idle, 0.0),
         }
     };
-    Cell { state, level: f.touches.min(MAX_LEVEL as u32) as u8, stat: f.stat, fade }
+    let stat = f.stat.filter(|_| owned);
+    Cell { state, level: f.touches.min(MAX_LEVEL as u32) as u8, stat, fade }
 }
 
 #[cfg(test)]

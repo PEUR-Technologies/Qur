@@ -364,5 +364,137 @@ fn diff_stats_and_full_scan_against_real_repo() {
     assert_eq!(state(&h, "new name.txt", now), HeatState::Created);
     assert_eq!(state(&h, "mod.txt", now), HeatState::Changed);
     assert!(h.changed().contains(&p("old name.txt")));
+    assert_eq!(h.deleted(), vec![p("del.txt"), p("dir/in.txt"), p("old name.txt")]);
     let _ = std::fs::remove_dir_all(&d);
+}
+
+// ---- deletions, shared folders, Qur's own writes ----
+
+const DELETED: DiffStat = DiffStat { added: 0, removed: 4, created: false, deleted: true, binary: false };
+
+#[test]
+fn deleted_files_are_listed_until_they_come_back() {
+    let c = clock();
+    let mut h = hm();
+    h.on_fs_change(&[abs("src/old.rs"), abs("src/gone/a.rs")], true, c.at(0));
+    h.set_stat(Path::new("src/old.rs"), Some(DELETED));
+    h.set_stat(Path::new("src/gone/a.rs"), Some(DELETED));
+    h.set_stat(Path::new("src/kept.rs"), Some(CHANGED));
+    assert_eq!(h.deleted(), vec![p("src/gone/a.rs"), p("src/old.rs")]);
+    // Glowing while the delete is fresh, then the steady Deleted state with its level.
+    assert_eq!(state(&h, "src/old.rs", c.at(100)), HeatState::Editing);
+    let cell = h.cell(Path::new("src/old.rs"), c.at(2000));
+    assert_eq!((cell.state, cell.level), (HeatState::Deleted, 1));
+    assert_eq!(h.folder_state(Path::new("src/gone"), c.at(2000)), Some(HeatState::Deleted));
+    // Re-created with the base's content: no longer deleted.
+    h.set_stat(Path::new("src/old.rs"), None);
+    assert_eq!(h.deleted(), vec![p("src/gone/a.rs")]);
+    // Re-created with new content: changed, not deleted.
+    h.set_stat(Path::new("src/gone/a.rs"), Some(CHANGED));
+    assert!(h.deleted().is_empty());
+}
+
+#[test]
+fn shared_folder_shows_only_what_the_agent_touched() {
+    let c = clock();
+    let mut h = hm();
+    h.set_shared(true);
+    // Your uncommitted work, found by the first full scan.
+    h.set_stat(Path::new("mine.rs"), Some(CHANGED));
+    h.set_stat(Path::new("mine_gone.rs"), Some(DELETED));
+    // The agent edits one file through a tool and deletes another from the shell.
+    h.on_tool("e", Some(ToolKind::Edit), Some(ToolStatus::Completed), &[abs("theirs.rs")], c.at(0));
+    h.on_tool("x", Some(ToolKind::Execute), Some(ToolStatus::InProgress), &[], c.at(0));
+    h.on_fs_change(&[abs("theirs_gone.rs")], true, c.at(100));
+    h.set_stat(Path::new("theirs.rs"), Some(CHANGED));
+    h.set_stat(Path::new("theirs_gone.rs"), Some(DELETED));
+
+    let now = c.at(5000);
+    assert_eq!(state(&h, "mine.rs", now), HeatState::Idle);
+    assert_eq!(h.cell(Path::new("mine.rs"), now).stat, None, "no +n -m on your own work");
+    assert_eq!(state(&h, "theirs.rs", now), HeatState::Changed);
+    assert_eq!(state(&h, "theirs_gone.rs", now), HeatState::Deleted);
+    assert_eq!(h.changed(), vec![p("theirs.rs"), p("theirs_gone.rs")]);
+    assert_eq!(h.deleted(), vec![p("theirs_gone.rs")]);
+    assert_eq!(h.folder_state(Path::new(""), now), Some(HeatState::Deleted));
+
+    // A separate checkout (not shared) shows everything that differs from base.
+    h.set_shared(false);
+    assert_eq!(state(&h, "mine.rs", now), HeatState::Changed);
+    assert_eq!(h.deleted(), vec![p("mine_gone.rs"), p("theirs_gone.rs")]);
+}
+
+#[test]
+fn shared_folder_attributes_writes_only_while_the_agent_works() {
+    let c = clock();
+    let mut h = hm();
+    h.set_shared(true);
+    // An Agent Terminal (no tool calls): the turn flag alone decides.
+    h.on_fs_change(&[abs("a.rs")], true, c.at(0));
+    assert_eq!(state(&h, "a.rs", c.at(10)), HeatState::Editing);
+    h.on_fs_change(&[abs("b.rs")], false, c.at(0));
+    assert_eq!(state(&h, "b.rs", c.at(10)), HeatState::Idle);
+    assert_eq!(h.cell(Path::new("b.rs"), c.at(10)).level, 0);
+
+    // An ACP agent mid-turn: writes count while a tool runs and shortly after.
+    h.on_tool("r", Some(ToolKind::Read), Some(ToolStatus::InProgress), &[abs("a.rs")], c.at(1000));
+    h.on_fs_change(&[abs("c.rs")], true, c.at(1100));
+    assert_eq!(state(&h, "c.rs", c.at(1200)), HeatState::Editing);
+    h.on_tool("r", None, Some(ToolStatus::Completed), &[], c.at(2000));
+    h.on_fs_change(&[abs("d.rs")], true, c.at(2000 + TOOL_GRACE.as_millis() as u64 - 1));
+    assert_eq!(h.cell(Path::new("d.rs"), c.at(4000)).level, 1, "within the grace");
+    // Thinking for a while with no tool running: that write was yours (another editor).
+    let later = 2000 + TOOL_GRACE.as_millis() as u64 + 1;
+    h.on_fs_change(&[abs("e.rs")], true, c.at(later));
+    let cell = h.cell(Path::new("e.rs"), c.at(later + 10));
+    assert_eq!((cell.state, cell.level), (HeatState::Idle, 0));
+    h.set_stat(Path::new("e.rs"), Some(CHANGED));
+    assert_eq!(state(&h, "e.rs", c.at(later + 500)), HeatState::Idle);
+    assert!(!h.changed().contains(&p("e.rs")));
+    // Every write still gets its diff stat recomputed.
+    assert!(h.take_due(c.at(later + 200)).contains(&p("e.rs")));
+
+    // The same write in a task worktree (not shared) would be the agent's.
+    let mut w = hm();
+    w.on_tool("r", Some(ToolKind::Read), Some(ToolStatus::Completed), &[], c.at(0));
+    w.on_fs_change(&[abs("e.rs")], true, c.at(later));
+    assert_eq!(state(&w, "e.rs", c.at(later + 10)), HeatState::Editing);
+}
+
+#[test]
+fn own_writes_are_split_out_of_watcher_batches() {
+    let dir = std::env::temp_dir().join(format!("qur-heat-own-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("saved.rs"), "x").unwrap();
+    let c = clock();
+    let mut own = OwnWrites::default();
+    assert_eq!(own.split(vec![dir.join("a")], c.at(0)), (vec![], vec![dir.join("a")]));
+    own.note(&dir.join("saved.rs"), c.at(0));
+    let batch = vec![dir.join("saved.rs"), dir.join("agent.rs")];
+    let (mine, rest) = own.split(batch.clone(), c.at(500));
+    assert_eq!((mine, rest), (vec![dir.join("saved.rs")], vec![dir.join("agent.rs")]));
+    // The watcher may report the canonical path (/private/var/... vs /var/...).
+    let canon = dir.join("saved.rs").canonicalize().unwrap();
+    assert!(own.is_own(&canon, c.at(500)));
+    // After the window, a write to the same file is someone else's again.
+    let late = c.at(OWN_WINDOW.as_millis() as u64);
+    assert!(!own.is_own(&dir.join("saved.rs"), late));
+    // Noting prunes stale entries.
+    own.note(&dir.join("other.rs"), late);
+    assert!(own.is_own(&dir.join("other.rs"), late) && !own.is_own(&canon, late));
+
+    // Fed to the heatmap as non-turn writes: a recompute, but no glow and no touch.
+    let mut h = Heatmap::new(dir.clone(), "base".into());
+    h.set_shared(true);
+    let mut own = OwnWrites::default();
+    own.note(&dir.join("saved.rs"), c.at(0));
+    let (mine, rest) = own.split(batch, c.at(100));
+    h.on_fs_change(&mine, false, c.at(100));
+    h.on_fs_change(&rest, true, c.at(100));
+    assert_eq!(state(&h, "saved.rs", c.at(150)), HeatState::Idle);
+    assert_eq!(state(&h, "agent.rs", c.at(150)), HeatState::Editing);
+    assert_eq!(h.take_due(c.at(250)), vec![p("agent.rs"), p("saved.rs")]);
+    h.set_stat(Path::new("saved.rs"), Some(CHANGED));
+    assert!(h.changed().is_empty(), "your save never shows as the agent's change");
+    let _ = std::fs::remove_dir_all(&dir);
 }

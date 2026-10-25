@@ -309,7 +309,7 @@ impl AgentTask {
             ChangesEvent::Open(p, line) => cx.emit(AgentEvent::OpenFile(p.clone(), *line)),
         });
         let wt = record.worktree.clone();
-        let monitor = cx.new(|cx| TaskMonitor::new(record.worktree.clone(), record.base.clone(), accent, cx));
+        let monitor = cx.new(|cx| TaskMonitor::new(record.worktree.clone(), record.base.clone(), accent, record.in_root, cx));
         let label = def.label.clone();
         let live = cx.new(|cx| LivePane::new(monitor.clone(), label, wrap, tab, window, cx));
         let live_sub = cx.subscribe_in(&live, window, |this, _, ev: &LiveEvent, _, cx| match ev {

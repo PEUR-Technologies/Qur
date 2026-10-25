@@ -639,9 +639,11 @@ impl Workspace {
         let todo_id = record.id.clone();
         let accent = Look::of(window, cx).theme.accents[0].base;
         let monitor = cx.new(|cx| {
-            let mut m = TaskMonitor::new(record.worktree.clone(), record.base.clone(), accent, cx);
-            // No turns in a terminal: every write counts as the agent's edit.
-            m.set_turn_active(true);
+            let mut m = TaskMonitor::new(record.worktree.clone(), record.base.clone(), accent, record.in_root, cx);
+            // No turns in a terminal: in its own worktree every write counts as the
+            // agent's edit. In the project folder, only while it's busy (writing output;
+            // see terminal_activity), so your edits there stay yours.
+            m.set_turn_active(!record.in_root);
             m
         });
         self.watch_monitor(&monitor, window, cx);
@@ -773,8 +775,9 @@ impl Workspace {
         if let Some(tree) = self.trees.get(root).cloned() {
             let structural = paths.iter().any(|p| {
                 let rel = p.strip_prefix(root).unwrap_or(p);
-                let known = tree.read(cx).tree.find(rel).is_some();
-                known != p.exists()
+                // An ignore file changed: what the tree hides may have too.
+                let rules = matches!(rel.file_name().and_then(|n| n.to_str()), Some(".gitignore" | ".ignore"));
+                rules || tree.read(cx).tree.on_disk(rel) != p.exists()
             });
             if structural {
                 tree.update(cx, |t, cx| t.refresh(cx));
@@ -1150,6 +1153,7 @@ impl Workspace {
         let mut typed = Vec::new();
         let mut finished = Vec::new();
         let mut renamed = false;
+        let mut busy_flags = Vec::new();
         {
             let panel = self.terms.read(cx);
             for t in &mut self.term_tasks {
@@ -1164,6 +1168,9 @@ impl Workspace {
                     renamed = true;
                 }
                 let busy = s.is_busy();
+                if t.record.in_root {
+                    busy_flags.push((t.monitor.clone(), busy));
+                }
                 let started = s.has_output();
                 if !busy && started && let Some(p) = t.pending_type.take() {
                     // Startup (and setup) isn't a turn: start counting from here.
@@ -1189,6 +1196,9 @@ impl Workspace {
                     }
                 }
             }
+        }
+        for (m, busy) in busy_flags {
+            m.update(cx, |m, _| m.set_turn_active(busy));
         }
         if renamed {
             self.save_tasks(cx);

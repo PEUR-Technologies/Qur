@@ -182,9 +182,21 @@ impl SearchPanel {
         let with = self.replace.read(cx).text.clone();
         let files: Vec<PathBuf> = self.results.files.iter().map(|f| f.path.clone()).collect();
         let root = self.root.clone();
+        // Your replace, not an agent's edit: the heatmap leaves these writes out (noted
+        // before, as the watcher may report them before the replace returns, and after).
+        let abs: Vec<PathBuf> = files.iter().map(|f| root.join(f)).collect();
+        let note = move || {
+            let mut own = qur_heat::own_writes().lock().unwrap_or_else(|e| e.into_inner());
+            let now = std::time::Instant::now();
+            for p in &abs {
+                own.note(p, now);
+            }
+        };
+        note();
         let bg = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
             let r = bg.spawn(async move { qur_search::replace_all(&root, &query, &with, &files) }).await;
+            note();
             this.update(cx, |this, cx| {
                 cx.emit(SearchEvent::Message(match r {
                     Ok((f, n)) => format!("Replaced {n} match{} in {f} file{}", if n == 1 { "" } else { "es" }, if f == 1 { "" } else { "s" }),
