@@ -70,6 +70,10 @@ One window is one project. There's no permanent editor area: the window is for a
 - **Live file-tree heatmap.**
   - An outline on files waiting for your approval, a pulsing glow while editing, a fading glow while reading, and "new" or `+n −m` on changed files.
   - Heat deepens with how often a file was touched, and folders roll up their contents.
+  - Files the agent deleted stay in the tree, struck through and dimmed with their glow, until they come back or you merge or discard the task.
+  - It follows the same ignore rules as the tree: `.gitignore` and `.ignore` files in any folder, `.git/info/exclude` and your global git excludes.
+  - Your own saves from the code modal and Replace All never glow as an agent's edit.
+  - An agent working in the project folder (the first Agent Terminal) shares the folder with you, so only files it touched glow: writes count as its own while it's busy (an Agent Terminal printing output, or a structured agent running a tool), and your uncommitted work stays quiet.
   - On your main checkout, dots show which files agents changed in their worktrees.
 - **Live view** (structured agents): the file the agent is working in, as it types. Read-only while the agent edits, with **Take over** to step in. It follows the agent across files but never jumps within 5 s of your own scroll or click.
 - **Browser with Inspect.** Open your dev server next to the agent, pick elements or text, and ask the agent to adjust them. It gets the selector, HTML, key CSS, the source location when available, and a screenshot. Uses the system WebKit, freed when idle.
@@ -122,7 +126,7 @@ Everything lives in `~/Library/Application Support/Qur/`. Qur never writes into 
 | `projects/<id>.tasks.toml` | Tasks, so they survive restarts and resume their sessions. |
 | `worktrees/<id>/<task>/` | The task worktrees. |
 
-In your repo, an optional **`.worktreeinclude`** file lists one path per line (e.g. `.env`, `node_modules`). Qur copies those into each new worktree with APFS copy-on-write: instant, no extra disk.
+In your repo, an optional **`.worktreeinclude`** file lists one path per line (e.g. `.env`, `node_modules`, `apps/*/.env`; a leading `/` means the repo root, as in `.gitignore`). Qur copies those into each new worktree with APFS copy-on-write: instant, no extra disk. Files the worktree already has are left alone.
 
 ## Lightness
 
