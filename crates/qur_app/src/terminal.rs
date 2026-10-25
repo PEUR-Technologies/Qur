@@ -1061,6 +1061,16 @@ impl TerminalPanel {
         true
     }
 
+    /// QUR_DEBUG_ACTIONS `state`: sessions, the find box and the selection.
+    pub fn debug_state(&self, cx: &App) -> String {
+        let sel = self.sessions.get(self.active).and_then(|s| s.term.lock().selection_to_string()).unwrap_or_default();
+        let find = match &self.find {
+            Some(f) => format!("find={:?} found={}", f.input.read(cx).text, !f.error && f.last.is_some()),
+            None => "find=none".into(),
+        };
+        format!("sessions={} active={} {find} selection={sel:?}", self.sessions.len(), self.active)
+    }
+
     fn find(&mut self, _: &ta::Find, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(f) = &self.find {
             let focus = f.input.read(cx).focus.clone();
@@ -1375,6 +1385,8 @@ impl Element for GridElement {
         self.panel.update(cx, |p, _| {
             p.cell = (cw, lh);
             p.pane_bounds.insert(id, bounds);
+            crate::script::record(|| format!("term:{id}"), bounds);
+            crate::script::record(|| format!("term-cell:{id}"), Bounds::new(bounds.origin, gpui::size(cw, lh)));
             let Some(s) = p.sessions.iter_mut().find(|s| s.id == id) else { return };
             s.restore_selection();
             if s.size != (cols, lines) {
