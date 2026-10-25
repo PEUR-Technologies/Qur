@@ -18,7 +18,7 @@ use qur_acp::PermissionKind;
 use qur_agents::{AgentDef, Mode, Roster, TaskRecord, TaskStore};
 use qur_config::{Config, ProjectSettings, Value};
 use qur_editor::Point;
-use qur_theme::{Registry, Rgba, ThemeChoice};
+use qur_theme::{Appearance, Registry, Rgba, ThemeChoice};
 
 use crate::agent_view::{AgentEvent, AgentTask, Layout, Status, View};
 use crate::alerts;
@@ -216,8 +216,11 @@ pub struct Workspace {
     fullscreen: bool,
     /// Zen mode: the top bar is slid down because the mouse reached the top edge.
     zen_shown: bool,
-    /// Whether the traffic lights are hidden now (zen mode with the bar away).
+    /// Whether the native traffic lights are hidden now: in zen mode with the
+    /// bar away, and in full screen, where Qur draws its own in the bar.
     lights_hidden: bool,
+    /// Whether the system title bar strip is hidden (full screen only).
+    titlebar_hidden: bool,
     first_frame: bool,
     _subs: Vec<Subscription>,
 }
@@ -331,6 +334,7 @@ impl Workspace {
             title_drag: false,
             fullscreen: false,
             zen_shown: false,
+            titlebar_hidden: false,
             lights_hidden: false,
             first_frame: false,
             _subs: subs,
@@ -3508,6 +3512,7 @@ impl Workspace {
                 }
                 this.write_setting(false, "keys.vim", Some(Value::Bool(c.vim)), cx);
                 this.write_setting(false, "ui.zen", Some(Value::Bool(c.zen)), cx);
+                this.write_setting(false, "ui.traffic_lights", Some(c.traffic_lights.as_str().into()), cx);
                 this.write_setting(false, "ui.accent", Some(Value::Int(c.accent as i64)), cx);
                 this.preview_accent = None;
                 if !c.agents.is_empty() {
@@ -3799,6 +3804,7 @@ impl Workspace {
                     window.titlebar_double_click();
                 }
             })
+            .when(self.fullscreen, |d| d.child(self.traffic_lights(look, cx)))
             .child(
                 div()
                     .id("project")
@@ -3820,6 +3826,47 @@ impl Workspace {
             .children(session.map(|s| div().min_w(px(0.)).truncate().text_color(look.c(ui.text_secondary)).child(s)))
             .child(div().flex_1())
             .children(message.map(|m| div().flex_none().max_w(look.z(420.)).truncate().text_size(look.text(-1.)).text_color(look.c(ui.text_secondary)).child(m)))
+    }
+
+    /// Full screen: close, minimize and zoom in the bar itself, in line with the
+    /// project name, instead of the system's strip that slides down above it.
+    /// Minimize is off in full screen, as in AppKit; zoom leaves full screen.
+    /// `[ui] traffic_lights` may draw them in the theme's grey instead of red,
+    /// yellow and green: "auto" does in dark themes, "mono" always.
+    fn traffic_lights(&self, look: &Look, cx: &mut Context<Self>) -> impl IntoElement {
+        let mono = match self.config.ui.traffic_lights.as_str() {
+            "mono" => true,
+            "color" => false,
+            _ => look.theme.appearance == Appearance::Dark,
+        };
+        let grey = look.c(look.theme.ui.text_muted);
+        let light = |id: &'static str, color: u32| {
+            div()
+                .id(id)
+                .size(look.z(12.))
+                .rounded_full()
+                .map(|d| if mono { d.bg(grey) } else { d.bg(gpui::rgb(color)) })
+                .border_1()
+                .border_color(gpui::rgba(0x0000001f))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        };
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(look.z(8.))
+            .pr(look.z(6.))
+            .child(
+                light("light-close", 0xff5f57)
+                    .hover(|d| d.opacity(0.8))
+                    .on_click(cx.listener(|this, _, window, cx| this.close_window(&qur::CloseWindow, window, cx))),
+            )
+            .child(light("light-minimize", 0xfebc2e).opacity(0.35))
+            .child(
+                light("light-zoom", 0x28c840)
+                    .hover(|d| d.opacity(0.8))
+                    .on_click(|_, window, _| window.toggle_fullscreen()),
+            )
     }
 
     /// The title bar, or in zen mode the bar sliding in and out from above:
@@ -4686,6 +4733,7 @@ const CONFIG_TEMPLATE: &str = r#"# Qur settings. Saved changes apply right away.
 [ui]
 # font_size = 13
 # zoom = 1.0
+# traffic_lights = "auto"   # full screen: auto (grey in dark themes), color, mono
 
 [panels]
 # terminal = true
@@ -4699,10 +4747,14 @@ const CONFIG_TEMPLATE: &str = r#"# Qur settings. Saved changes apply right away.
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.fullscreen = window.is_fullscreen();
-        let zen_hidden = self.config.ui.zen && !self.zen_shown;
-        if zen_hidden != self.lights_hidden {
-            self.lights_hidden = zen_hidden;
-            set_traffic_lights_hidden(window, zen_hidden);
+        let lights_hidden = self.fullscreen || (self.config.ui.zen && !self.zen_shown);
+        if lights_hidden != self.lights_hidden {
+            self.lights_hidden = lights_hidden;
+            set_traffic_lights_hidden(window, lights_hidden);
+        }
+        if self.fullscreen != self.titlebar_hidden {
+            self.titlebar_hidden = self.fullscreen;
+            set_titlebar_hidden(window, self.fullscreen);
         }
         let look = Look::of(window, cx);
         let ui = look.theme.ui.clone();
@@ -5047,7 +5099,7 @@ mod tests {
     }
 }
 
-/// Hide or show the close, minimize and zoom buttons (zen mode). GPUI only
+/// Hide or show the close, minimize and zoom buttons (zen mode, full screen). GPUI only
 /// moves them, so this asks AppKit directly.
 #[cfg(target_os = "macos")]
 fn set_traffic_lights_hidden(window: &Window, hidden: bool) {
@@ -5076,3 +5128,39 @@ fn set_traffic_lights_hidden(window: &Window, hidden: bool) {
 
 #[cfg(not(target_os = "macos"))]
 fn set_traffic_lights_hidden(_: &Window, _: bool) {}
+
+/// Full screen: hide the system's title bar strip, which otherwise drops down
+/// with the menu bar as an empty grey band over Qur's own bar and its lights.
+/// The strip is the buttons' container view (NSTitlebarContainerView).
+#[cfg(target_os = "macos")]
+fn set_titlebar_hidden(window: &Window, hidden: bool) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+    // SAFETY: on the main thread, with GPUI's live content view; every
+    // object along the way may be nil, which is checked.
+    unsafe {
+        let view = h.ns_view.as_ptr().cast::<AnyObject>();
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        let button: *mut AnyObject = msg_send![ns_window, standardWindowButton: 0usize];
+        if button.is_null() {
+            return;
+        }
+        let titlebar: *mut AnyObject = msg_send![button, superview];
+        if titlebar.is_null() {
+            return;
+        }
+        let container: *mut AnyObject = msg_send![titlebar, superview];
+        if !container.is_null() {
+            let _: () = msg_send![container, setHidden: hidden];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_titlebar_hidden(_: &Window, _: bool) {}

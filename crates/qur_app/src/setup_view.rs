@@ -82,6 +82,7 @@ pub struct Choices {
     pub layout: String,
     pub vim: bool,
     pub zen: bool,
+    pub traffic_lights: String,
     pub theme: String,
     pub accent: usize,
 }
@@ -104,6 +105,7 @@ pub struct SetupView {
     layout: String,
     vim: bool,
     zen: bool,
+    traffic_lights: String,
     theme: String,
     accent: usize,
     /// Each service's sign-in; `None` while checking.
@@ -152,6 +154,7 @@ impl SetupView {
             layout,
             vim: config.keys.vim,
             zen: config.ui.zen,
+            traffic_lights: config.ui.traffic_lights.clone(),
             theme: config.theme.clone(),
             accent: config.ui.accent % 6,
             logins: [None, None],
@@ -318,7 +321,7 @@ impl SetupView {
 
     pub fn done(&mut self, cx: &mut Context<Self>) {
         let agents = self.agents.iter().filter(|f| f.enabled).map(|f| f.def.clone()).collect();
-        cx.emit(SetupEvent::Done(Choices { agents, layout: self.layout.clone(), vim: self.vim, zen: self.zen, theme: self.theme.clone(), accent: self.accent }));
+        cx.emit(SetupEvent::Done(Choices { agents, layout: self.layout.clone(), vim: self.vim, zen: self.zen, traffic_lights: self.traffic_lights.clone(), theme: self.theme.clone(), accent: self.accent }));
     }
 }
 
@@ -567,7 +570,16 @@ impl Render for SetupView {
                 this.zen = false;
                 cx.notify();
             })));
-        // 4b. Accent: the theme's palette in its own order (the look shown is
+        // 4b. Traffic lights in full screen: by theme, always colored, or grey.
+        let lights_row = div().flex().gap(look.z(8.)).children(
+            [("auto", "Match theme"), ("color", "Color"), ("mono", "Monochrome")].into_iter().enumerate().map(|(i, (key, label))| {
+                pill(("lights", i), label.into(), self.traffic_lights == key).on_click(cx.listener(move |this, _, _, cx| {
+                    this.traffic_lights = key.to_string();
+                    cx.notify();
+                }))
+            }),
+        );
+        // 4c. Accent: the theme's palette in its own order (the look shown is
         // rotated by the accent being previewed).
         let mut palette = look.theme.accents;
         palette.rotate_right(self.accent);
@@ -679,6 +691,8 @@ impl Render for SetupView {
             .child(keys_row)
             .child(heading("Top bar"))
             .child(top_row)
+            .child(heading("Traffic lights in full screen"))
+            .child(lights_row)
             .child(heading("Accent color"))
             .child(accent_row)
             .child(heading("Theme"))

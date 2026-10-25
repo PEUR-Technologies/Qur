@@ -111,6 +111,9 @@ pub struct UiConfig {
     /// Zen mode: hide the top bar and traffic lights until the mouse
     /// reaches the top edge of the window.
     pub zen: bool,
+    /// Full screen's traffic lights: "auto" (grey in dark themes, colored in
+    /// light ones), "color" or "mono".
+    pub traffic_lights: String,
     /// Turns every accent this many degrees around the color wheel (-180..180).
     pub accent_hue: f32,
     /// Makes every accent lighter (toward 1) or darker (toward -1).
@@ -161,7 +164,7 @@ impl Default for EditorConfig {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        UiConfig { font_size: 13.0, zoom: 1.0, accent: 0, keep_awake: true, zen: true, accent_hue: 0.0, accent_brightness: 0.0 }
+        UiConfig { font_size: 13.0, zoom: 1.0, accent: 0, keep_awake: true, zen: true, traffic_lights: "auto".into(), accent_hue: 0.0, accent_brightness: 0.0 }
     }
 }
 
