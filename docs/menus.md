@@ -94,6 +94,9 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Take Over (Live, when an agent is editing)
 - Rename Agent… (also double-click the agent's button)
 - Permission: Allow Once `Cmd+Y` · Allow for This Task `Cmd+Opt+Y` · Deny `Cmd+Opt+Z`
+- Permission: Allow All Pending (every queued request of the agent, each "allow once", never "always"; disabled when no request is waiting)
+- ---
+- Find in Chat `Cmd+F` (in a structured agent's view) · Copy Chat as Markdown (also in the sidebar's right-click menu, with Allow All Pending)
 - ---
 - Next Agent · Previous Agent · Switch Agent or Terminal… `Ctrl+T` · Agent 1–9 `Ctrl+1..9`
 - ---

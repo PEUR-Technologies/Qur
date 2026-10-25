@@ -73,9 +73,9 @@ pub mod setup {
     gpui::actions!(setup, [Done, Cancel]);
 }
 
-/// Answers for the permission bar of the selected agent.
+/// Answers for the permission bar of the selected agent, and its chat.
 pub mod agent {
-    gpui::actions!(agent, [AllowOnce, AllowAlways, Deny, CycleMode]);
+    gpui::actions!(agent, [AllowOnce, AllowAlways, Deny, AllowAllPending, CycleMode, FindInChat, CopyChatMarkdown]);
 }
 
 pub mod terminal {
@@ -167,6 +167,8 @@ const B: Option<&str> = Some("Browser && !TextInput");
 const NT: Option<&str> = Some("!Terminal");
 /// Permission answers: anywhere but where you're editing or typing a command.
 const PERM: Option<&str> = Some("!Editor && !Terminal && !Picker");
+/// A chat agent's view, but not the editor, terminal or page inside its stage.
+const CHAT: Option<&str> = Some("AgentView && !Editor && !Terminal && !Browser");
 use Tier::Ready as R;
 
 #[rustfmt::skip]
@@ -328,6 +330,10 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(agent::AllowOnce, "Agent", "Permission: Allow Once", "cmd-y", PERM, R),
     cmd!(agent::AllowAlways, "Agent", "Permission: Allow for This Task", "cmd-alt-y", PERM, R),
     cmd!(agent::Deny, "Agent", "Permission: Deny", "cmd-alt-z", PERM, R),
+    // Each waiting request "allow once", never "always".
+    cmd!(agent::AllowAllPending, "Agent", "Permission: Allow All Pending", "", W, R),
+    cmd!(agent::FindInChat, "Agent", "Find in Chat", "cmd-f", CHAT, R),
+    cmd!(agent::CopyChatMarkdown, "Agent", "Copy Chat as Markdown", "", W, R),
     cmd!(agent::CycleMode, "Agent", "Next Mode (Default / Accept Edits / Plan…)", "shift-tab", Some("AgentView"), R),
     cmd!(qur::ReviewChanges, "Agent", "Review Changes", "", W, R),
     cmd!(qur::ShowLastTurn, "Agent", "Show Last Turn's Changes", "", W, R),
@@ -401,6 +407,11 @@ pub fn find(action: &dyn Action) -> Option<&'static Cmd> {
 pub fn needs_turn(c: &Cmd) -> bool {
     let a = (c.action)();
     a.partial_eq(&qur::ShowLastTurn) || a.partial_eq(&qur::RewindLastTurn)
+}
+
+/// Commands that need a permission request waiting (disabled otherwise).
+pub fn needs_pending(c: &Cmd) -> bool {
+    (c.action)().partial_eq(&agent::AllowAllPending)
 }
 
 /// Commands shown in the palette (not the low-level cursor/input ones).
@@ -534,6 +545,8 @@ pub struct MenuState {
     pub merging: bool,
     /// The selected agent has a turn to show or rewind (ACP agents only).
     pub turns: bool,
+    /// An agent has a permission request waiting (Allow All Pending).
+    pub pending: bool,
     pub vim: bool,
     pub keep_awake: bool,
     pub zen: bool,
@@ -707,6 +720,10 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(agent::AllowOnce),
             item(agent::AllowAlways),
             item(agent::Deny),
+            item(agent::AllowAllPending).disabled(!s.pending),
+            sep(),
+            item(agent::FindInChat),
+            item(agent::CopyChatMarkdown),
             sep(),
             item(qur::NextAgent),
             item(qur::PrevAgent),
