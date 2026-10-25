@@ -2,7 +2,9 @@
 //! Key bindings, the command palette and the native menu bar are all built
 //! from `COMMANDS` (docs/keymap.md, docs/menus.md).
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::{Action, App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType};
 
@@ -17,14 +19,15 @@ pub mod qur {
             NextTerminal, PrevTerminal, CloseTerminal, OpenConfig, ThemePicker, NewWindow,
             OpenFolder, QuickOpen, SaveAll, RevertFile, NavBack, NavForward, RecentFile,
             UseDefaultTheme, ProjectSwitcher, PeekBrowser, ToggleInspect,
-            // Listed in menus/palette, built in later milestones (shown disabled).
             About, CheckSetup, OpenKeymap, OpenAgents, VimMode, NewAgentTask, FindInProject,
             ReplaceInProject, GitPanel, SearchPanel, PeekLayoutA, PeekLayoutB, PeekLayoutC,
             CyclePeekLayout, PeekLive, PeekTodo, PeekChat, PeekChanges, FollowAgent, GoToSymbol,
             FocusPrompt, FocusInput, StopAgent, TakeOver, NextAgent, PrevAgent, ReviewChanges, Merge,
             KeepWorking, DiscardTask, OpenWorktreeInTerminal, RevealWorktree, KeyboardShortcuts,
             RunDoctor, ShowLogs, ReportProblem, ExpandSelection, ShrinkSelection,
-            RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge, Caffeinate, ShowKeepAwake, SwitchSession,
+            RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge, Caffeinate, ShowKeepAwake, SwitchSession, ZenMode,
+            Gaps, ToggleGaps,
+            ShowLastTurn, RewindLastTurn, ReviewWork, ReviewPlan, SendReviewFindings,
         ]
     );
 
@@ -71,9 +74,9 @@ pub mod setup {
     gpui::actions!(setup, [Done, Cancel]);
 }
 
-/// Answers for the permission bar of the selected agent.
+/// Answers for the permission bar of the selected agent, and its chat.
 pub mod agent {
-    gpui::actions!(agent, [AllowOnce, AllowAlways, Deny, CycleMode]);
+    gpui::actions!(agent, [AllowOnce, AllowAlways, Deny, AllowAllPending, CycleMode, FindInChat, CopyChatMarkdown]);
 }
 
 pub mod terminal {
@@ -100,6 +103,7 @@ pub mod input {
 pub enum Tier {
     Ready,
     /// Built in a later milestone; shown disabled.
+    #[allow(dead_code)]
     Later(&'static str),
 }
 
@@ -118,9 +122,33 @@ impl Cmd {
         self.tier == Tier::Ready
     }
 
-    pub fn first_keys(&self) -> &'static str {
-        self.keys.split('|').next().unwrap_or("")
+    /// The keys in effect: keymap.toml's, else the default (`|`-separated).
+    pub fn keys(&self) -> String {
+        let i = COMMANDS.iter().position(|c| std::ptr::eq(c, self));
+        let o = OVERRIDES.read().unwrap_or_else(|e| e.into_inner());
+        match i.and_then(|i| o.get(&i)) {
+            Some(keys) => keys.join("|"),
+            None => self.keys.to_string(),
+        }
     }
+
+    pub fn first_keys(&self) -> String {
+        self.keys().split('|').next().unwrap_or("").to_string()
+    }
+
+    /// `qur::GoToSymbol`, as keymap.toml and QUR_DEBUG_ACTIONS name it.
+    pub fn action_name(&self) -> &'static str {
+        (self.action)().name()
+    }
+}
+
+/// keymap.toml's rebindings: command index -> keys (empty = unbound).
+static OVERRIDES: std::sync::RwLock<BTreeMap<usize, Vec<String>>> = std::sync::RwLock::new(BTreeMap::new());
+/// Bumped on every keymap load, so the menu bar picks up the new shortcuts.
+static KEYMAP_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub fn keymap_generation() -> u64 {
+    KEYMAP_GENERATION.load(Ordering::Relaxed)
 }
 
 macro_rules! cmd {
@@ -140,7 +168,9 @@ const B: Option<&str> = Some("Browser && !TextInput");
 const NT: Option<&str> = Some("!Terminal");
 /// Permission answers: anywhere but where you're editing or typing a command.
 const PERM: Option<&str> = Some("!Editor && !Terminal && !Picker");
-use Tier::{Later as L, Ready as R};
+/// A chat agent's view, but not the editor, terminal or page inside its stage.
+const CHAT: Option<&str> = Some("AgentView && !Editor && !Terminal && !Browser");
+use Tier::Ready as R;
 
 #[rustfmt::skip]
 pub static COMMANDS: &[Cmd] = &[
@@ -150,15 +180,16 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::HideOthers, "Qur", "Hide Others", "cmd-alt-h", W, R),
     cmd!(qur::ShowAll, "Qur", "Show All", "", W, R),
     cmd!(qur::About, "Qur", "About Qur", "", W, R),
-    cmd!(qur::CheckSetup, "Qur", "Setup…", "", W, R),
-    cmd!(qur::OpenConfig, "Qur", "Open config.toml", "cmd-,", W, R),
-    cmd!(qur::OpenKeymap, "Qur", "Open keymap.toml", "", W, L("a later version")),
+    cmd!(qur::CheckSetup, "Qur", "Settings…", "cmd-,", W, R),
+    cmd!(qur::OpenConfig, "Qur", "Open config.toml", "", W, R),
+    cmd!(qur::OpenKeymap, "Qur", "Open keymap.toml", "", W, R),
     cmd!(qur::OpenAgents, "Qur", "Agents (agents.toml)", "", W, R),
-    cmd!(qur::ThemePicker, "Qur", "Theme…", "cmd-k cmd-t", NT, R),
-    cmd!(qur::AccentColor, "Qur", "Accent Color…", "", W, R),
-    cmd!(qur::UseDefaultTheme, "Qur", "Use Default Theme for This Project", "", W, R),
-    cmd!(qur::Transparency, "Qur", "Transparency…", "", W, R),
-    cmd!(qur::VimMode, "Qur", "Vim Mode", "", W, R),
+    cmd!(qur::ThemePicker, "View", "Theme…", "cmd-k cmd-t", NT, R),
+    cmd!(qur::AccentColor, "View", "Accent Color…", "", W, R),
+    cmd!(qur::UseDefaultTheme, "View", "Use Default Theme for This Project", "", W, R),
+    cmd!(qur::Transparency, "View", "Transparency…", "", W, R),
+    cmd!(qur::Gaps, "View", "Gaps…", "", W, R),
+    cmd!(qur::VimMode, "Edit", "Vim Mode", "", W, R),
     cmd!(qur::NewWindow, "File", "New Window", "cmd-n", W, R),
     cmd!(qur::NewAgentTask, "Agent", "New Agent Task…", "cmd-shift-n", W, R),
     cmd!(qur::OpenFolder, "File", "Open Folder…", "cmd-o", W, R),
@@ -182,7 +213,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::GoToLine, "Go", "Go to Line…", "ctrl-g", NT, R),
     cmd!(qur::NavBack, "Go", "Back", "ctrl--", NT, R),
     cmd!(qur::NavForward, "Go", "Forward", "ctrl-shift--", NT, R),
-    cmd!(qur::GoToSymbol, "Go", "Go to Symbol in File…", "cmd-shift-o", W, L("a later version")),
+    cmd!(qur::GoToSymbol, "Go", "Go to Symbol in File…", "cmd-shift-o", W, R),
     cmd!(editor::JumpToBracket, "Go", "Jump to Matching Bracket", "cmd-shift-\\", E, R),
     // Editing
     cmd!(edit::Undo, "Edit", "Undo", "cmd-z", W, R),
@@ -234,8 +265,9 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(editor::ToggleComment, "Edit", "Toggle Line Comment", "cmd-/", E, R),
     cmd!(editor::ToggleBlockComment, "Edit", "Toggle Block Comment", "shift-alt-a", E, R),
     cmd!(editor::SelectLine, "Selection", "Select Line", "cmd-l", E, R),
-    cmd!(qur::ExpandSelection, "Selection", "Expand Selection", "", W, L("a later version")),
-    cmd!(qur::ShrinkSelection, "Selection", "Shrink Selection", "", W, L("a later version")),
+    // VS Code's keys (Smart Select).
+    cmd!(qur::ExpandSelection, "Selection", "Expand Selection", "ctrl-shift-cmd-right", E, R),
+    cmd!(qur::ShrinkSelection, "Selection", "Shrink Selection", "ctrl-shift-cmd-left", E, R),
     cmd!(editor::AddNextMatch, "Selection", "Add Next Match", "cmd-d", E, R),
     cmd!(editor::SelectAllMatches, "Selection", "Select All Matches", "cmd-shift-l", E, R),
     cmd!(editor::AddCursorAbove, "Selection", "Add Cursor Above", "cmd-alt-up", E, R),
@@ -263,6 +295,8 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::ToggleTerminal, "View", "Go to Terminal", "ctrl-`", W, R),
     cmd!(qur::Caffeinate, "View", "Keep Mac Awake (caffeinate)", "", W, R),
     cmd!(qur::ShowKeepAwake, "View", "Show Keep Awake in Sidebar", "", W, R),
+    cmd!(qur::ZenMode, "View", "Zen Mode", "ctrl-cmd-z", W, R),
+    cmd!(qur::ToggleGaps, "View", "Toggle Gaps", "", W, R),
     cmd!(terminal::Clear, "Terminal", "Clear", "cmd-k", T, R),
     cmd!(terminal::Find, "Terminal", "Find in Terminal", "cmd-f", T, R),
     cmd!(terminal::Tile, "Terminal", "New Tiled Terminal (Grid)", "cmd-enter", W, R),
@@ -299,8 +333,17 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(agent::AllowOnce, "Agent", "Permission: Allow Once", "cmd-y", PERM, R),
     cmd!(agent::AllowAlways, "Agent", "Permission: Allow for This Task", "cmd-alt-y", PERM, R),
     cmd!(agent::Deny, "Agent", "Permission: Deny", "cmd-alt-z", PERM, R),
+    // Each waiting request "allow once", never "always".
+    cmd!(agent::AllowAllPending, "Agent", "Permission: Allow All Pending", "", W, R),
+    cmd!(agent::FindInChat, "Agent", "Find in Chat", "cmd-f", CHAT, R),
+    cmd!(agent::CopyChatMarkdown, "Agent", "Copy Chat as Markdown", "", W, R),
     cmd!(agent::CycleMode, "Agent", "Next Mode (Default / Accept Edits / Plan…)", "shift-tab", Some("AgentView"), R),
     cmd!(qur::ReviewChanges, "Agent", "Review Changes", "", W, R),
+    cmd!(qur::ShowLastTurn, "Agent", "Show Last Turn's Changes", "", W, R),
+    cmd!(qur::RewindLastTurn, "Agent", "Rewind Last Turn…", "", W, R),
+    cmd!(qur::ReviewWork, "Agent", "Review Agent's Work…", "", W, R),
+    cmd!(qur::ReviewPlan, "Agent", "Review Agent's Plan…", "", W, R),
+    cmd!(qur::SendReviewFindings, "Agent", "Send Review Findings to Agent", "", W, R),
     cmd!(qur::Merge, "Agent", "Merge into My Branch", "", W, R),
     cmd!(qur::KeepWorking, "Agent", "Keep Working", "", W, R),
     cmd!(qur::RenameAgent, "Agent", "Rename Agent…", "", W, R),
@@ -366,17 +409,113 @@ pub fn find(action: &dyn Action) -> Option<&'static Cmd> {
     COMMANDS.iter().find(|c| (c.action)().partial_eq(action))
 }
 
+/// Commands that need the selected agent to have a turn (disabled otherwise).
+pub fn needs_turn(c: &Cmd) -> bool {
+    let a = (c.action)();
+    a.partial_eq(&qur::ShowLastTurn) || a.partial_eq(&qur::RewindLastTurn)
+}
+
+/// Commands that need a permission request waiting (disabled otherwise).
+pub fn needs_pending(c: &Cmd) -> bool {
+    (c.action)().partial_eq(&agent::AllowAllPending)
+}
+
+/// What the selected agent offers for review (disabled, not hidden, without it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReviewState {
+    /// A structured (ACP) agent is selected: Review Agent's Work….
+    pub work: bool,
+    /// …and it has a plan: Review Agent's Plan….
+    pub plan: bool,
+    /// Its reviewer has findings: Send Review Findings to Agent.
+    pub findings: bool,
+}
+
+/// Is a review command available in `s`? Other commands always are.
+pub fn review_available(c: &Cmd, s: ReviewState) -> bool {
+    let a = (c.action)();
+    if a.partial_eq(&qur::ReviewWork) {
+        s.work
+    } else if a.partial_eq(&qur::ReviewPlan) {
+        s.plan
+    } else if a.partial_eq(&qur::SendReviewFindings) {
+        s.findings
+    } else {
+        true
+    }
+}
+
 /// Commands shown in the palette (not the low-level cursor/input ones).
 pub fn palette_commands() -> impl Iterator<Item = &'static Cmd> {
     COMMANDS.iter().filter(|c| !matches!(c.category, "Editor" | "Input"))
 }
 
+fn binding(c: &Cmd, keys: &str, cx: &App) -> Result<KeyBinding, String> {
+    let predicate = c.context.map(|ctx| gpui::KeyBindingContextPredicate::parse(ctx).unwrap().into());
+    KeyBinding::load(keys, (c.action)(), predicate, false, None, cx).map_err(|e| e.to_string())
+}
+
+/// The command keymap.toml means by `name`: an action name
+/// (`qur::GoToSymbol`), a palette entry (`Go: Go to Symbol in File…`) or a
+/// title alone when only one command has it. Case and a trailing `…` don't matter.
+pub fn resolve(name: &str) -> Result<usize, String> {
+    let norm = |s: &str| s.trim().trim_end_matches('…').trim_end_matches("...").trim().to_lowercase();
+    let want = norm(name);
+    if let Some(i) = COMMANDS.iter().position(|c| c.action_name().eq_ignore_ascii_case(name.trim())) {
+        return Ok(i);
+    }
+    if let Some(i) = COMMANDS.iter().position(|c| norm(&format!("{}: {}", c.category, c.title)) == want) {
+        return Ok(i);
+    }
+    let hits: Vec<usize> = (0..COMMANDS.len()).filter(|&i| norm(COMMANDS[i].title) == want).collect();
+    match hits.as_slice() {
+        [i] => Ok(*i),
+        [] => Err(format!("no command named `{name}`")),
+        many => Err(format!(
+            "`{name}` is ambiguous; use one of {}",
+            many.iter().map(|&i| format!("`{}`", COMMANDS[i].action_name())).collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
+/// Load keymap.toml and rebind every key. Returns one message per entry that
+/// was skipped (unknown command, bad keystroke, wrong shape); the rest apply.
+pub fn reload_keymap(cx: &mut App) -> Vec<String> {
+    let (entries, mut errors) = qur_config::load_keymap();
+    let mut map = BTreeMap::new();
+    for e in entries {
+        let at = if e.line > 0 { format!("keymap.toml line {}", e.line) } else { "keymap.toml".to_string() };
+        let i = match resolve(&e.command) {
+            Ok(i) => i,
+            Err(msg) => {
+                errors.push(format!("{at}: {msg}"));
+                continue;
+            }
+        };
+        let mut keys = Vec::new();
+        for k in e.keys {
+            match binding(&COMMANDS[i], &k, cx) {
+                Ok(_) => keys.push(k),
+                Err(msg) => errors.push(format!("{at}: `{k}` for `{}`: {msg}", e.command)),
+            }
+        }
+        map.insert(i, keys);
+    }
+    *OVERRIDES.write().unwrap_or_else(|e| e.into_inner()) = map;
+    KEYMAP_GENERATION.fetch_add(1, Ordering::Relaxed);
+    cx.clear_key_bindings();
+    bind_keys(cx);
+    errors
+}
+
 pub fn bind_keys(cx: &mut App) {
     let mut bindings = Vec::new();
     for c in COMMANDS {
-        for keys in c.keys.split('|').filter(|k| !k.is_empty()) {
-            let predicate = c.context.map(|ctx| gpui::KeyBindingContextPredicate::parse(ctx).unwrap().into());
-            bindings.push(KeyBinding::load(keys, (c.action)(), predicate, false, None, cx).unwrap());
+        for keys in c.keys().split('|').filter(|k| !k.is_empty()) {
+            // Defaults always load; user keys were checked by `reload_keymap`.
+            if let Ok(b) = binding(c, keys, cx) {
+                bindings.push(b);
+            }
         }
     }
     const SESSION_KEYS: [&str; 9] = ["ctrl-1", "ctrl-2", "ctrl-3", "ctrl-4", "ctrl-5", "ctrl-6", "ctrl-7", "ctrl-8", "ctrl-9"];
@@ -435,8 +574,19 @@ pub struct MenuState {
     pub recent: Vec<PathBuf>,
     /// A merge stopped on conflicts: the Merge Conflicts items are enabled.
     pub merging: bool,
+    /// The selected agent has a turn to show or rewind (ACP agents only).
+    pub turns: bool,
+    /// An agent has a permission request waiting (Allow All Pending).
+    pub pending: bool,
+    /// Review Agent's Work… / Plan… / Send Review Findings for the selected agent.
+    pub review: ReviewState,
     pub vim: bool,
     pub keep_awake: bool,
+    pub zen: bool,
+    /// Window gaps are on (`[ui] gaps`).
+    pub gaps: bool,
+    /// `keymap_generation()`: new shortcuts rebuild the menus.
+    pub keymap: u64,
 }
 
 fn item(action: impl Action) -> MenuItem {
@@ -468,13 +618,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
         Menu::new("Qur").items([
             titled("About Qur", qur::About),
             item(qur::CheckSetup),
-            sep(),
-            M::submenu(Menu::new("Settings").items([item(qur::OpenConfig), item(qur::OpenKeymap), item(qur::OpenAgents)])),
-            item(qur::ThemePicker),
-            item(qur::AccentColor),
-            item(qur::UseDefaultTheme),
-            item(qur::Transparency),
-            item(qur::VimMode).checked(s.vim),
+            M::submenu(Menu::new("Settings Files").items([item(qur::OpenConfig), item(qur::OpenKeymap), item(qur::OpenAgents)])),
             sep(),
             M::os_submenu("Services", SystemMenuType::Services),
             sep(),
@@ -524,6 +668,8 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(editor::Indent),
             item(editor::Outdent),
             item(editor::TrimWhitespace),
+            sep(),
+            item(qur::VimMode).checked(s.vim),
         ]),
         Menu::new("Selection").items([
             item(editor::SelectLine),
@@ -577,6 +723,16 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::ZoomOut),
             item(qur::ZoomReset),
             sep(),
+            M::submenu(Menu::new("Appearance").items([
+                item(qur::ThemePicker),
+                item(qur::UseDefaultTheme),
+                sep(),
+                item(qur::AccentColor),
+                item(qur::Transparency),
+                item(qur::Gaps),
+            ])),
+            item(qur::ZenMode).checked(s.zen),
+            item(qur::ToggleGaps).checked(s.gaps),
             item(qur::ToggleFullScreen),
         ]),
         Menu::new("Go").items([
@@ -600,12 +756,21 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(agent::AllowOnce),
             item(agent::AllowAlways),
             item(agent::Deny),
+            item(agent::AllowAllPending).disabled(!s.pending),
+            sep(),
+            item(agent::FindInChat),
+            item(agent::CopyChatMarkdown),
             sep(),
             item(qur::NextAgent),
             item(qur::PrevAgent),
             item(qur::SwitchSession),
             sep(),
             item(qur::ReviewChanges),
+            item(qur::ShowLastTurn).disabled(!s.turns),
+            item(qur::RewindLastTurn).disabled(!s.turns),
+            item(qur::ReviewWork).disabled(!s.review.work),
+            item(qur::ReviewPlan).disabled(!s.review.plan),
+            item(qur::SendReviewFindings).disabled(!s.review.findings),
             item(qur::Merge),
             item(qur::KeepWorking),
             item(qur::RunChecks),
@@ -651,4 +816,51 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             titled("About Qur", qur::About),
         ]),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn name(r: Result<usize, String>) -> Result<&'static str, String> {
+        r.map(|i| COMMANDS[i].action_name())
+    }
+
+    #[test]
+    fn keymap_names_resolve() {
+        assert_eq!(name(resolve("qur::GoToSymbol")), Ok("qur::GoToSymbol"));
+        assert_eq!(name(resolve("Go: Go to Symbol in File…")), Ok("qur::GoToSymbol"));
+        assert_eq!(name(resolve("go to symbol in file")), Ok("qur::GoToSymbol"));
+        assert_eq!(name(resolve("Expand Selection")), Ok("qur::ExpandSelection"));
+        assert_eq!(name(resolve("Selection: Delete Line")), Ok("editor::DeleteLine"));
+        let e = resolve("Line Start").unwrap_err();
+        assert!(e.contains("editor::LineStart") && e.contains("terminal::SendLineStart"), "{e}");
+        assert!(resolve("No Such Command").unwrap_err().contains("no command"));
+    }
+
+    /// Cmd+, opens Settings (macOS standard), not config.toml; the files stay
+    /// reachable from Qur > Settings Files and the palette.
+    #[test]
+    fn settings_on_cmd_comma() {
+        assert_eq!(COMMANDS[resolve("qur::CheckSetup").unwrap()].keys(), "cmd-,");
+        assert_eq!(COMMANDS[resolve("Qur: Settings…").unwrap()].action_name(), "qur::CheckSetup");
+        let bound: Vec<&str> = COMMANDS.iter().filter(|c| c.keys().split('|').any(|k| k == "cmd-,")).map(|c| c.action_name()).collect();
+        assert_eq!(bound, ["qur::CheckSetup"]);
+        assert_eq!(COMMANDS[resolve("qur::OpenConfig").unwrap()].keys(), "");
+        assert_eq!(COMMANDS[resolve("View: Theme…").unwrap()].action_name(), "qur::ThemePicker");
+        assert_eq!(COMMANDS[resolve("Edit: Vim Mode").unwrap()].action_name(), "qur::VimMode");
+    }
+
+    #[test]
+    fn nothing_left_greyed_out() {
+        for c in COMMANDS {
+            assert!(c.ready(), "{} is still 'coming in a later version'", c.title);
+        }
+        for a in ["qur::GoToSymbol", "qur::ExpandSelection", "qur::ShrinkSelection", "qur::OpenKeymap"] {
+            let c = &COMMANDS[resolve(a).unwrap()];
+            assert!(c.ready());
+        }
+        assert_eq!(COMMANDS[resolve("qur::ExpandSelection").unwrap()].keys(), "ctrl-shift-cmd-right");
+        assert_eq!(COMMANDS[resolve("qur::ShrinkSelection").unwrap()].keys(), "ctrl-shift-cmd-left");
+    }
 }

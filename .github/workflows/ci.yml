@@ -1,0 +1,88 @@
+# One cheap macOS job: tests, clippy, and the part of the budget that runs
+# without a screen or a real agent. macOS minutes are paid on private repos,
+# so a newer push to the same branch cancels the run in progress.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # Scratch settings folder: tests and `qur doctor` never touch a real one.
+  QUR_HOME: ${{ github.workspace }}/.ci-qur-home
+
+jobs:
+  check:
+    # Apple silicon, with Xcode (GPUI compiles its Metal shaders with xcrun).
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+          rustc --version && cargo clippy --version
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # The GPUI git checkout and the release target are what's slow.
+          cache-on-failure: true
+
+      # Tests make throwaway repos; some commit without -c user.* overrides.
+      - name: Git identity for test repos
+        run: |
+          git config --global user.name "Qur CI"
+          git config --global user.email "ci@localhost"
+          git config --global init.defaultBranch main
+
+      # qur_syntax's tests read the 10,000-line large.ts (gitignored). Only
+      # that file: the 5,000-file big-repo is for timing tests that skip without it.
+      - name: Test fixture
+        run: python3 -c "import sys; sys.path.insert(0, 'spikes/fixtures'); import gen; gen.large_ts('spikes/fixtures/large.ts')"
+
+      - name: Clippy
+        run: cargo clippy --workspace --release -- -D warnings
+
+      # Tests that need a real agent (claude-agent-acp) are #[ignore]d, and
+      # none open a window.
+      - name: Tests
+        run: cargo test --release --workspace
+
+      - name: Build qur
+        run: cargo build --release -p qur_app
+
+      # The headless part of scripts/budget.sh: binary size, and the doctor's
+      # setup checks that don't need `claude` (agent rows are skipped: the
+      # runner has no agents installed).
+      - name: Budget (headless)
+        timeout-minutes: 5
+        run: |
+          BIN=target/release/qur
+          BYTES=$(stat -f %z "$BIN")
+          MB=$(echo "scale=1; $BYTES/1048576" | bc)
+          echo "binary_mb=$MB (budget 40)"
+          echo "### Budget (headless)" >> "$GITHUB_STEP_SUMMARY"
+          echo "binary: $MB MB (budget 40 MB)" >> "$GITHUB_STEP_SUMMARY"
+          [ "$BYTES" -lt $((40 * 1048576)) ] || { echo "::error::qur is $MB MB, over the 40 MB budget"; exit 1; }
+
+          mkdir -p "$QUR_HOME"
+          OUT=$("$BIN" doctor || true)
+          echo "$OUT"
+          for name in "macOS" "git" "Settings folder" "config.toml" "agents.toml"; do
+            echo "$OUT" | grep -q "^✓ $name: " || { echo "::error::qur doctor: '$name' check did not pass"; exit 1; }
+          done
+          echo "$OUT" | grep -qE "^(OK|All good|[0-9]+ problem)" || { echo "::error::qur doctor printed no summary"; exit 1; }

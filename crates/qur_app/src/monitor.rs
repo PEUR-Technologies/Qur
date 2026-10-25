@@ -39,7 +39,9 @@ impl EventEmitter<MonitorEvent> for TaskMonitor {}
 const DEBOUNCE: Duration = Duration::from_millis(50);
 
 impl TaskMonitor {
-    pub fn new(worktree: PathBuf, base: String, accent: Rgba, cx: &mut Context<Self>) -> Self {
+    /// `shared` = the agent works in the project folder, alongside you
+    /// (`Heatmap::set_shared`).
+    pub fn new(worktree: PathBuf, base: String, accent: Rgba, shared: bool, cx: &mut Context<Self>) -> Self {
         let (watcher, reader) = match qur_watch::Watcher::new(&worktree, DEBOUNCE) {
             Ok((w, mut changes)) => {
                 let task = cx.spawn(async move |this, cx| {
@@ -53,8 +55,10 @@ impl TaskMonitor {
             }
             Err(_) => (None, None),
         };
+        let mut heat = Heatmap::new(worktree.clone(), base.clone());
+        heat.set_shared(shared);
         let mut m = TaskMonitor {
-            heat: Heatmap::new(worktree.clone(), base.clone()),
+            heat,
             worktree,
             accent,
             base,
@@ -111,7 +115,10 @@ impl TaskMonitor {
     fn on_files(&mut self, batch: Vec<PathBuf>, cx: &mut Context<Self>) {
         let now = Instant::now();
         self.last_event_at = Some(now);
-        self.heat.on_fs_change(&batch, self.turn_active, now);
+        // Your own saves and replaces are never the agent's edits.
+        let (own, theirs) = qur_heat::own_writes().lock().unwrap_or_else(|e| e.into_inner()).split(batch.clone(), now);
+        self.heat.on_fs_change(&own, false, now);
+        self.heat.on_fs_change(&theirs, self.turn_active, now);
         cx.emit(MonitorEvent::Files(batch));
         self.schedule_recompute(cx);
         self.changed(cx);

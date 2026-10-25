@@ -178,6 +178,8 @@ pub struct Session {
     pub id: usize,
     pub kind: Kind,
     pub label: String,
+    /// The label was typed by you (Rename), so it isn't replaced by what's running.
+    pub renamed: bool,
     /// Where it started (resolves relative paths on Cmd-click).
     pub cwd: PathBuf,
     term: Arc<FairMutex<Term<Listener>>>,
@@ -305,6 +307,20 @@ impl Session {
     pub fn agent_title(&self) -> Option<String> {
         let raw = self.title.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
         clean_title(&raw)
+    }
+
+    /// A shell's name in the sidebar: yours if you renamed it, else what's
+    /// running in it (the program's title, or the foreground command such as
+    /// `cargo` or `npm`), else its numbered shell name.
+    pub fn display_label(&self) -> String {
+        if self.renamed {
+            return self.label.clone();
+        }
+        let Some(running) = foreground_name(self.pid) else { return self.label.clone() };
+        match self.agent_title() {
+            Some(t) => t,
+            None => running,
+        }
     }
 
     /// The program has printed something since it started.
@@ -499,6 +515,10 @@ pub struct TerminalPanel {
     split_bounds: Rc<RefCell<HashMap<Vec<bool>, Bounds<Pixels>>>>,
     /// A divider being dragged: its split's path and bounds.
     resizing: Option<(Vec<bool>, Bounds<Pixels>)>,
+    /// Shown as the whole stage (a shell row), not inside an Agent
+    /// Terminal's dock pane: with window gaps on, its panes are the tiles.
+    /// Set by the workspace as it lays the stage out.
+    pub standalone: std::cell::Cell<bool>,
 }
 
 impl EventEmitter<PanelEvent> for TerminalPanel {}
@@ -506,6 +526,7 @@ impl EventEmitter<PanelEvent> for TerminalPanel {}
 impl TerminalPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
         TerminalPanel {
+            standalone: std::cell::Cell::new(false),
             focus: cx.focus_handle(),
             sessions: Vec::new(),
             active: 0,
@@ -567,6 +588,7 @@ impl TerminalPanel {
             id,
             kind,
             label,
+            renamed: false,
             cwd: cwd.to_path_buf(),
             term,
             sender,
@@ -618,8 +640,29 @@ impl TerminalPanel {
             Kind::Shell => shell().rsplit('/').next().unwrap_or("sh").to_string(),
             Kind::Agent { task, .. } => return task.clone(),
         };
-        let dup = self.sessions.iter().filter(|s| s.kind == Kind::Shell).count();
-        if dup == 0 { base } else { format!("{base} {}", dup + 1) }
+        // The lowest free number, so closing "zsh" and opening another doesn't
+        // give two "zsh 2"s.
+        let taken: Vec<&str> = self.sessions.iter().filter(|s| s.kind == Kind::Shell).map(|s| s.label.as_str()).collect();
+        free_label(&base, &taken)
+    }
+
+    /// Rename a shell; empty goes back to the automatic name.
+    pub fn rename(&mut self, id: usize, name: &str, cx: &mut Context<Self>) {
+        let auto = if name.is_empty() {
+            // Its own label shouldn't count as taken.
+            if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
+                s.label.clear();
+            }
+            Some(self.label_for(&Kind::Shell))
+        } else {
+            None
+        };
+        if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
+            s.renamed = auto.is_none();
+            s.label = auto.unwrap_or_else(|| name.to_string());
+        }
+        cx.emit(PanelEvent::Activity);
+        cx.notify();
     }
 
     pub fn close(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -1061,6 +1104,21 @@ impl TerminalPanel {
         true
     }
 
+    /// QUR_DEBUG_ACTIONS `state`: sessions, the find box and the selection.
+    pub fn debug_state(&self, cx: &App) -> String {
+        let sel = self.sessions.get(self.active).and_then(|s| s.term.lock().selection_to_string()).unwrap_or_default();
+        let find = match &self.find {
+            Some(f) => format!("find={:?} found={}", f.input.read(cx).text, !f.error && f.last.is_some()),
+            None => "find=none".into(),
+        };
+        // The split's first share, for checking a dragged divider.
+        let split = match self.active_group().map(|g| &g.tile) {
+            Some(Tile::Split { ratio, .. }) => format!(" split={ratio:.3}"),
+            _ => String::new(),
+        };
+        format!("sessions={} active={} {find} selection={sel:?}{split}", self.sessions.len(), self.active)
+    }
+
     fn find(&mut self, _: &ta::Find, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(f) = &self.find {
             let focus = f.input.read(cx).focus.clone();
@@ -1375,6 +1433,8 @@ impl Element for GridElement {
         self.panel.update(cx, |p, _| {
             p.cell = (cw, lh);
             p.pane_bounds.insert(id, bounds);
+            crate::script::record(|| format!("term:{id}"), bounds);
+            crate::script::record(|| format!("term-cell:{id}"), Bounds::new(bounds.origin, gpui::size(cw, lh)));
             let Some(s) = p.sessions.iter_mut().find(|s| s.id == id) else { return };
             s.restore_selection();
             if s.size != (cols, lines) {
@@ -1530,8 +1590,10 @@ impl Render for TerminalPanel {
             Some(t) => Some(self.tile(&t, Vec::new(), true, &look, cx)),
             None => self.active_session().map(|s| s.id).map(|id| self.tile(&Tile::Term(id), Vec::new(), false, &look, cx)),
         };
+        let tiled = look.tiles.is_some() && self.standalone.get();
         let message = self.message.clone().map(|m| {
-            div().flex_none().px(look.z(8.)).py(look.z(4.)).text_size(look.text(-1.)).text_color(look.c(ui.text_muted)).child(m)
+            let d = if tiled { look.tile(div(), ui.panel_bg) } else { div() };
+            d.flex_none().px(look.z(8.)).py(look.z(4.)).text_size(look.text(-1.)).text_color(look.c(ui.text_muted)).child(m)
         });
         div()
             .key_context("Terminal")
@@ -1539,6 +1601,7 @@ impl Render for TerminalPanel {
             .size_full()
             .flex()
             .flex_col()
+            .when(tiled, |d| d.gap(look.gap()))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_action(cx.listener(Self::clear))
             .on_action(cx.listener(Self::line_start))
@@ -1561,8 +1624,7 @@ impl Render for TerminalPanel {
                     .flex()
                     .items_center()
                     .gap(look.z(8.))
-                    .mx(look.z(8.))
-                    .mt(look.z(4.))
+                    .when(!tiled, |d| d.mx(look.z(8.)).mt(look.z(4.)))
                     .px(look.z(8.))
                     .py(look.z(3.))
                     .rounded(look.z(4.))
@@ -1579,7 +1641,8 @@ impl Render for TerminalPanel {
                     .min_h(px(0.))
                     .flex()
                     // Split panes float as tiles with a gap all round (Hyprland).
-                    .when(split, |d| d.p(look.z(6.)))
+                    // (With window gaps the stage's own gaps do that.)
+                    .when(split && !tiled, |d| d.p(look.z(6.)))
                     // Files dragged in from Finder become their paths, as in Terminal.
                     .drag_over::<gpui::ExternalPaths>(|s, _, window, cx| {
                         let l = Look::of(window, cx);
@@ -1607,13 +1670,23 @@ impl TerminalPanel {
         match t {
             Tile::Term(id) => {
                 let on = split && self.active_session().is_some_and(|s| s.id == *id);
-                div()
-                    .size_full()
+                let tiled = look.tiles.is_some() && self.standalone.get();
+                // With window gaps every pane is a tile with its own background.
+                let d = if tiled { look.tile(div(), ui.panel_bg) } else { div() };
+                let edge = if on {
+                    look.c(look.theme.accents[0].base)
+                } else if !tiled || look.tiles.is_some_and(|t| t.border) {
+                    look.c(ui.border)
+                } else {
+                    gpui::transparent_black()
+                };
+                d.size_full()
                     .px(look.z(8.))
                     .py(look.z(4.))
                     // Tiling-WM look: each pane its own rounded box, the
                     // focused one outlined in the accent.
-                    .when(split, |d| d.rounded(look.z(6.)).border_1().border_color(look.c(if on { look.theme.accents[0].base } else { ui.border })))
+                    .when(split && !tiled, |d| d.rounded(look.z(6.)))
+                    .when(split || tiled && look.tiles.is_some_and(|t| t.border), |d| d.border_1().border_color(edge))
                     .child(GridElement { panel: cx.entity(), id: *id })
                     .into_any_element()
             }
@@ -1628,23 +1701,25 @@ impl TerminalPanel {
                     let (sb, path) = (sb.clone(), path.clone());
                     gpui::canvas(move |b, _, _| { sb.borrow_mut().insert(path.clone(), b); }, |_, _, _, _| {}).absolute().size_full()
                 };
+                let w = if look.tiles.is_some() && self.standalone.get() { look.gap() } else { look.z(6.) };
                 let handle = div()
                     .id(SharedString::from(format!("term-split-{path:?}")))
                     .group(SharedString::from(format!("term-split-{path:?}")))
                     .flex_none()
                     .relative()
                     // The gap between tiles; the accent shows while hovered.
-                    .when(*vertical, |d| d.h(look.z(6.)).w_full().cursor_row_resize())
-                    .when(!*vertical, |d| d.w(look.z(6.)).h_full().cursor_col_resize())
+                    .when(*vertical, |d| d.h(w).w_full().cursor_row_resize())
+                    .when(!*vertical, |d| d.w(w).h_full().cursor_col_resize())
                     .child(
                         div()
                             .absolute()
-                            .when(*vertical, |d| d.left_0().right_0().top(look.z(2.5)).h(px(1.)))
-                            .when(!*vertical, |d| d.top_0().bottom_0().left(look.z(2.5)).w(px(1.)))
+                            .when(*vertical, |d| d.left_0().right_0().top((w - px(1.)) / 2.).h(px(1.)))
+                            .when(!*vertical, |d| d.top_0().bottom_0().left((w - px(1.)) / 2.).w(px(1.)))
                             .group_hover(SharedString::from(format!("term-split-{path:?}")), |d| d.bg(look.c(look.theme.accents[0].base))),
                     )
                     // A wider grab area than the gap.
                     .child(div().absolute().when(*vertical, |d| d.left_0().right_0().top(px(-3.)).h(px(7.))).when(!*vertical, |d| d.top_0().bottom_0().left(px(-3.)).w(px(7.))))
+                    .children(crate::script::mark(|| format!("term-split:{}", if path.is_empty() { "root".to_string() } else { path.iter().map(|&b| if b { 'b' } else { 'a' }).collect() })))
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                         if let Some(b) = sb.borrow().get(&p2).copied() {
                             this.resizing = Some((p2.clone(), b));
@@ -1807,6 +1882,26 @@ fn shape_of(c: char) -> Option<Shape> {
     }
 }
 
+/// `base`, or `base 2`, `base 3`… : the first one not in `taken`.
+fn free_label(base: &str, taken: &[&str]) -> String {
+    (1..).map(|n| if n == 1 { base.to_string() } else { format!("{base} {n}") }).find(|l| !taken.contains(&l.as_str())).unwrap_or_default()
+}
+
+/// The program in the foreground of the shell `pid`'s terminal (its name,
+/// like `cargo`), or None while the shell itself is at its prompt.
+fn foreground_name(pid: i32) -> Option<String> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    let got = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+    let fg = info.e_tpgid as i32;
+    if got != size || fg <= 0 || fg as u32 == info.pbi_pgid {
+        return None;
+    }
+    let mut buf = [0u8; 256];
+    let n = unsafe { libc::proc_name(fg, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+}
+
 /// A terminal title as a task name: without spinner/status glyphs, and None
 /// for generic titles (the program's name, a shell, a path, user@host).
 fn clean_title(raw: &str) -> Option<String> {
@@ -1933,6 +2028,20 @@ mod tests {
         assert_eq!(clean_title("⠂ Add dark mode toggle").as_deref(), Some("Add dark mode toggle"));
         assert_eq!(clean_title("✳ Claude Code"), None);
         assert_eq!(clean_title("zsh"), None);
+    }
+
+    #[test]
+    fn shell_labels_reuse_the_lowest_free_number() {
+        assert_eq!(free_label("zsh", &[]), "zsh");
+        assert_eq!(free_label("zsh", &["zsh"]), "zsh 2");
+        // "zsh" closed while "zsh 2" stays open: the next one is "zsh" again, not a second "zsh 2".
+        assert_eq!(free_label("zsh", &["zsh 2"]), "zsh");
+        assert_eq!(free_label("zsh", &["zsh", "zsh 2", "zsh 4"]), "zsh 3");
+    }
+
+    #[test]
+    fn foreground_name_is_none_for_a_missing_process() {
+        assert_eq!(foreground_name(-1), None);
         assert_eq!(clean_title("yobi@mac:~/qur"), None);
         assert_eq!(clean_title("~/qur"), None);
         assert_eq!(clean_title("   "), None);

@@ -10,7 +10,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 |---|---|---|---|
 | `Cmd+Q` | Quit Qur | Qur | S |
 | `Cmd+H` / `Cmd+Opt+H` | Hide Qur / Hide Others | Qur | S |
-| `Cmd+,` | Open config.toml | Qur > Settings… | M1+ |
+| `Cmd+,` | Settings… (agents, appearance, editor, layout, files; changes apply and save at once, Esc closes) | Qur | ✅ |
 | `Cmd+N` | New Window | File | M1+ |
 | `Cmd+Shift+N` | New Agent Task (same as sidebar `+`) | File | M2 ✅ |
 | `Cmd+O` | Open Folder… | File | M1+ |
@@ -18,8 +18,9 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+Shift+W` | Close Window | File | S |
 | `Cmd+M` | Minimize | Window | S |
 | `Ctrl+Cmd+F` | Toggle Full Screen | View | S |
+| `Ctrl+Cmd+Z` | Zen Mode (hide the top bar until the mouse nears the top) | View | ✅ |
 | `Cmd+Shift+P` / `F1` | Command Palette | View | S |
-| `Cmd+K Cmd+T` | Theme Picker | Qur | M1 |
+| `Cmd+K Cmd+T` | Theme Picker | View > Appearance | M1 |
 | `Cmd+B` | Toggle Sidebar | View | S |
 | `Cmd+=` / `Cmd+-` / `Cmd+0` | Zoom In / Out / Reset (UI + code font) | View | S |
 
@@ -34,7 +35,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+Shift+E` | Reveal in Files (opens the Files dropdown) | S |
 | `Ctrl+G` | Go to Line… | S |
 | `Ctrl+-` / `Ctrl+Shift+-` | Navigate Back / Forward | M1 |
-| `Cmd+Shift+O` | Go to Symbol in File (tree-sitter outline, no LSP) | M1+ |
+| `Cmd+Shift+O` | Go to Symbol in File (tree-sitter outline, no LSP; arrows preview, Esc goes back) | ✅ |
 
 ## Editing
 
@@ -45,7 +46,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+A` | Select All | S |
 | `Shift+arrows` | Extend selection | S |
 | `Opt+Left/Right` | Word left/right (`Shift` extends) | S |
-| `Cmd+Left/Right` | Line start (smart home) / end (`Shift` extends) | S |
+| `Cmd+Left/Right`, `Home`/`End` | Line start (smart home) / end (`Shift` extends); with soft wrap, the visual row's start / end first, pressed again the line's | S |
 | `Cmd+Up/Down` | File start / end (`Shift` extends) | S |
 | `PageUp/PageDown`, `Fn+arrows` | Page up/down | S |
 | `Opt+Backspace` / `Opt+Delete` | Delete word left / right | S |
@@ -59,6 +60,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+/` | Toggle line comment (per language) | S |
 | `Shift+Opt+A` | Toggle block comment | M1 |
 | `Cmd+L` | Select line (repeat to extend) | S |
+| `Ctrl+Shift+Cmd+Right` / `Ctrl+Shift+Cmd+Left` | Expand / Shrink Selection by tree-sitter node (every cursor; shrink retraces the expands) | ✅ |
 | `Cmd+D` | Add selection to next match (multi-cursor) | M1 |
 | `Cmd+Shift+L` | Select all matches | M1 |
 | `Opt+Click` / `Cmd+Opt+Up/Down` | Add cursor | M1 |
@@ -122,6 +124,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Esc` (prompt) / `Cmd+.` | Stop the agent's turn (`session/cancel`) | M2 ✅ |
 | `@` / `/` in the prompt | Mention a file / pick an agent slash command | M2 ✅ |
 | `Cmd+Y` / `Cmd+Opt+Y` / `Cmd+Opt+Z` | Permission: Allow Once / Allow for This Task / Deny (Zed's keys), for the selected agent's request, else the first agent waiting; each works only when the agent offers that kind of answer, and its button shows the key. Not while the code modal, a terminal or a picker has focus (Agent menu too) | ✅ |
+| Agent menu / palette / permission bar | Permission: Allow All Pending: when several requests are queued, answer them all "allow once" (never "always"; a request without that option stays). The bar says "1 of N requests waiting" and has an **Allow all N once** button. No default keys; disabled when nothing is waiting | ✅ |
 | `Up` (empty prompt) | Pull the last queued message back into the prompt to edit it (each queued message also has Send now / Edit / ✕) | ✅ |
 | `Cmd+Z` / `Shift+Cmd+Z` (prompt, text fields) | Undo / redo in the prompt and the one-line fields (find, replace, go to line, pickers, address bar); typing groups into one step until a pause or a caret move | ✅ |
 | `Shift+Tab` (chat agent) | Next mode (Default / Accept Edits / Plan…), from the agent's session settings; click the Mode or Model chip above the prompt to choose | ✅ |
@@ -136,12 +139,15 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+C/X/V/A/Z`, `Shift+Cmd+Z` (in a page) | Copy, cut, paste, select all, undo, redo in the page | Browser ✅ |
 | Changes view / Agent menu | Merge into My Branch, Keep Working, Discard Task…, Review Changes | M4 ✅ |
 | Agent menu | Run Checks Now, Run Project in Worktree (no default keys) | ✅ |
+| Agent menu / chat turn line | Show Last Turn's Changes, Rewind Last Turn… (structured agents; no default keys) | ✅ |
 | `Cmd+F` (in a terminal) | Find in Terminal (regex; ↩ older, ⇧↩ newer, Esc closes) | M5 ✅ |
+| `Cmd+F` (in a structured agent's view) | Find in Chat: your messages, the agent's replies, thoughts, tool titles and output (ignores case); ↩ older, ⇧↩ newer, Esc closes. The current match's folded thought, tool call or group opens | ✅ |
+| Agent menu / palette / right-click an agent | Copy Chat as Markdown (no default keys) | ✅ |
 | `Cmd`-click (in a terminal) | Open a URL, or `path:line:col` in the code modal | M5 ✅ |
 | Agent menu / double-click a button | Rename Agent… | M5 ✅ |
 | `Cmd+Shift+F` / `Cmd+Shift+H` | Find / Replace in Project (Search view; ⌥C case, ⌥W word, ⌥R regex) | M6 ✅ |
-| Qur > Vim Mode | Vim keys in the code modal: normal / insert / visual / visual line | M6 ✅ |
-| Qur > Setup… | First-run picker (Enter saves, Esc cancels) | M6 ✅ |
+| Edit > Vim Mode (also Settings > Editor) | Vim keys in the code modal: normal / insert / visual / visual line | M6 ✅ |
+| Qur > Settings Files | Open config.toml, keymap.toml, agents.toml (no default keys; `Cmd+,` opens Settings) | ✅ |
 | Agent > Merge Conflicts | Next / Previous Conflict, Accept Ours / Theirs / Both, Finish Merge, Abort Merge (no default keys) | M4 ✅ |
 | View > Git | Stage All Changes, Unstage All Changes, Commit Staged… (no default keys) | M4 ✅ |
 | Changes view: click a line / ⌘-click | Comment on the line (sent to the agent as one message) / open the file there | M4 ✅ |
@@ -154,7 +160,7 @@ Normal/insert/visual basics: `hjkl wbe 0$ gg G`, `i a o O A I`, `x dd yy p P u C
 
 ## Rules
 
-- One table of bindings in `qur_config` (TOML, embedded default). Users may override in `~/Library/Application Support/Qur/keymap.toml`; no keymap UI.
+- One table of bindings (`qur_app/src/commands.rs`). Users override in `~/Library/Application Support/Qur/keymap.toml` (`[bindings]`, command name = keys; format in `docs/guide.md`, "Keymap"); no keymap UI. Bad entries are skipped and reported.
 - Chords (`Cmd+K …`) time out after 1.5 s and show the pending chord in the status area.
 - Shortcuts are routed by context (editor, terminal, prompt, sidebar, palette), like VS Code `when` clauses, but simpler: the focused element's context, then the window.
 - The macOS menu bar is native (File, Edit, Selection, View, Window, Help) and lists the shortcuts. Edit menu items use the standard selectors so system features (Emoji & Symbols, Dictation, AutoFill) work.

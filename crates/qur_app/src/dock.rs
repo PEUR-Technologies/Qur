@@ -74,6 +74,15 @@ impl Kind {
         }
     }
 
+    /// A pane tile's background with window gaps on: what the stage region
+    /// paints without them (the chat's editor colour, the terminal's panel).
+    pub fn fill(self, look: &Look) -> qur_theme::Rgba {
+        match self {
+            Kind::Acp => look.theme.ui.editor_bg,
+            Kind::Terminal => look.theme.ui.panel_bg,
+        }
+    }
+
     pub fn config_key(self) -> &'static str {
         match self {
             Kind::Acp => "layout.acp",
@@ -521,6 +530,11 @@ pub fn render<V: 'static>(kind: Kind, look: &Look, cx: &mut Context<V>, content:
         .into_any_element()
 }
 
+/// A pane's path for scripted runs' marks: `root`, else `a`/`b` per split (first/second).
+fn path_name(path: &[bool]) -> String {
+    if path.is_empty() { "root".into() } else { path.iter().map(|&b| if b { 'b' } else { 'a' }).collect() }
+}
+
 fn measure(path: Path, bounds: &Bnds) -> impl IntoElement {
     let bounds = bounds.clone();
     canvas(
@@ -543,16 +557,37 @@ fn node<V: 'static>(kind: Kind, n: &Node, path: Path, look: &Look, cx: &mut Cont
             let first = node(kind, a, pa, look, cx, content, bounds);
             let second = node(kind, b, pb, look, cx, content, bounds);
             let (bounds2, path2) = (bounds.clone(), path.clone());
+            // Without gaps a 1 px line; with them the divider is the gap
+            // itself (clear, the accent line showing while hovered).
+            let gap = look.gap();
+            let group = SharedString::from(format!("split-{kind:?}-{path:?}"));
             let handle = div()
-                .id(SharedString::from(format!("split-{kind:?}-{path:?}")))
+                .id(group.clone())
+                .group(group.clone())
                 .flex_none()
-                .bg(look.c(ui.border))
-                .hover(|d| d.bg(look.c(ui.focus_ring)))
-                .when(*vertical, |d| d.h(px(1.)).w_full().cursor_row_resize())
-                .when(!*vertical, |d| d.w(px(1.)).h_full().cursor_col_resize())
+                .when(look.tiles.is_none(), |d| {
+                    d.bg(look.c(ui.border))
+                        .hover(|d| d.bg(look.c(ui.focus_ring)))
+                        .when(*vertical, |d| d.h(px(1.)).w_full())
+                        .when(!*vertical, |d| d.w(px(1.)).h_full())
+                })
+                .when(look.tiles.is_some(), |d| {
+                    d.when(*vertical, |d| d.h(gap).w_full())
+                        .when(!*vertical, |d| d.w(gap).h_full())
+                        .child(
+                            div()
+                                .absolute()
+                                .when(*vertical, |d| d.left(gap * 2.).right(gap * 2.).top((gap - px(1.)) / 2.).h(px(1.)))
+                                .when(!*vertical, |d| d.top(gap * 2.).bottom(gap * 2.).left((gap - px(1.)) / 2.).w(px(1.)))
+                                .group_hover(group.clone(), |d| d.bg(look.c(ui.focus_ring))),
+                        )
+                })
+                .when(*vertical, |d| d.cursor_row_resize())
+                .when(!*vertical, |d| d.cursor_col_resize())
                 // A wider grab area than the 1 px line.
                 .child(div().absolute().when(*vertical, |d| d.left_0().right_0().top(px(-3.)).h(px(7.))).when(!*vertical, |d| d.top_0().bottom_0().left(px(-3.)).w(px(7.))))
                 .relative()
+                .children(crate::script::mark(|| format!("split:{kind:?}:{}", path_name(&path))))
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                     if let Some(b) = bounds2.borrow().get(&path2).copied() {
                         cx.global_mut::<Docks>().resizing = Some((kind, path2.clone(), b));
@@ -601,10 +636,13 @@ fn node<V: 'static>(kind: Kind, n: &Node, path: Path, look: &Look, cx: &mut Cont
                         .when(on, |d| d.bg(look.c(ui.active_bg)))
                         .hover(|d| d.bg(look.c(ui.hover_bg)))
                         .child(label)
+                        .children(crate::script::mark(|| format!("tab:{kind:?}:{p:?}")))
                         .when(p != Panel::Session, |d| {
                             d.child(
                                 div()
                                     .id(SharedString::from(format!("tab-close-{kind:?}-{p:?}")))
+                                    .relative()
+                                    .children(crate::script::mark(|| format!("close:{kind:?}:{p:?}")))
                                     .invisible()
                                     .group_hover("tab", |d| d.visible())
                                     .text_color(look.c(ui.text_muted))
@@ -632,7 +670,9 @@ fn node<V: 'static>(kind: Kind, n: &Node, path: Path, look: &Look, cx: &mut Cont
                             .text_size(look.text(-3.))
                             .text_color(look.c(ui.text_muted))
                             .hover(|d| d.bg(look.c(ui.hover_bg)).text_color(look.c(ui.text_secondary)))
+                            .relative()
                             .child(format!("+ {}", kind.label(p)))
+                            .children(crate::script::mark(|| format!("add:{kind:?}:{p:?}")))
                             .on_click(move |_, _, cx| {
                                 Docks::update(cx, kind, |d| {
                                     d.add(p);
@@ -641,9 +681,18 @@ fn node<V: 'static>(kind: Kind, n: &Node, path: Path, look: &Look, cx: &mut Cont
                             })
                     }))
                 });
-            let body = div().flex_1().min_h(px(0.)).relative().children(current.map(|p| content(p, cx)));
+            let body = div()
+                .flex_1()
+                .min_h(px(0.))
+                .relative()
+                .children(current.map(|p| content(p, cx)))
+                .children(crate::script::mark(|| format!("pane:{kind:?}:{}", path_name(&path))));
             let zones = drop_zones(kind, path.clone(), look);
-            div().size_full().flex().flex_col().relative().child(strip).child(body.child(zones)).into_any_element()
+            // With window gaps each pane is a tile (its own background); without
+            // them the stage region behind the dock paints one.
+            let pane = div().size_full().flex().flex_col().relative();
+            let pane = if look.tiles.is_some() { look.tile(pane, kind.fill(look)) } else { pane };
+            pane.child(strip).child(body.child(zones)).into_any_element()
         }
     }
 }

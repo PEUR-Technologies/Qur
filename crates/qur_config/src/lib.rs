@@ -108,11 +108,37 @@ pub struct UiConfig {
     pub accent: usize,
     /// Show the Keep Awake switch at the top of the sidebar.
     pub keep_awake: bool,
+    /// Zen mode: hide the top bar and traffic lights until the mouse
+    /// reaches the top edge of the window.
+    pub zen: bool,
+    /// Full screen's traffic lights: "auto" (grey in dark themes, colored in
+    /// light ones), "color" or "mono".
+    pub traffic_lights: String,
     /// Turns every accent this many degrees around the color wheel (-180..180).
     pub accent_hue: f32,
     /// Makes every accent lighter (toward 1) or darker (toward -1).
     pub accent_brightness: f32,
+    /// Window gaps (Hyprland's look): every region floats as its own tile
+    /// with `gap` pixels of desktop around it.
+    pub gaps: bool,
+    /// The space between tiles and around the window's edge, in points
+    /// before zoom (`MIN_GAP..=MAX_GAP`).
+    pub gap: f32,
+    /// Round the tiles' corners (only while gaps are on).
+    pub rounded: bool,
+    /// The tiles' corner radius in points before zoom (`0..=MAX_RADIUS`).
+    pub radius: f32,
+    /// A hairline border around each tile.
+    pub tile_border: bool,
 }
+
+/// Window gaps' slider range (`[ui] gap`).
+pub const MIN_GAP: f32 = 2.0;
+pub const MAX_GAP: f32 = 24.0;
+pub const DEFAULT_GAP: f32 = 8.0;
+/// The tiles' corner radius range (`[ui] radius`).
+pub const MAX_RADIUS: f32 = 16.0;
+pub const DEFAULT_RADIUS: f32 = 8.0;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default)]
@@ -158,7 +184,21 @@ impl Default for EditorConfig {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        UiConfig { font_size: 13.0, zoom: 1.0, accent: 0, keep_awake: true, accent_hue: 0.0, accent_brightness: 0.0 }
+        UiConfig {
+            font_size: 13.0,
+            zoom: 1.0,
+            accent: 0,
+            keep_awake: true,
+            zen: true,
+            traffic_lights: "auto".into(),
+            accent_hue: 0.0,
+            accent_brightness: 0.0,
+            gaps: false,
+            gap: DEFAULT_GAP,
+            rounded: true,
+            radius: DEFAULT_RADIUS,
+            tile_border: false,
+        }
     }
 }
 
@@ -189,6 +229,8 @@ impl Config {
     fn sanitized(mut self) -> Config {
         self.ui.zoom = self.ui.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
         self.ui.accent %= 6;
+        self.ui.gap = if self.ui.gap.is_finite() { self.ui.gap.clamp(MIN_GAP, MAX_GAP) } else { DEFAULT_GAP };
+        self.ui.radius = if self.ui.radius.is_finite() { self.ui.radius.clamp(0.0, MAX_RADIUS) } else { DEFAULT_RADIUS };
         self.editor.font_size = self.editor.font_size.clamp(6.0, 72.0);
         self.editor.line_height = self.editor.line_height.clamp(1.0, 3.0);
         self.editor.tab_width = self.editor.tab_width.clamp(1, 16);
@@ -526,15 +568,151 @@ impl ProjectState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// keymap.toml
+// ---------------------------------------------------------------------------
+
+pub fn keymap_path() -> PathBuf {
+    qur_home().join("keymap.toml")
+}
+
+/// One rebinding from keymap.toml: a command, named by its action
+/// (`qur::GoToSymbol`) or palette title (`Go to Symbol in File…`), and its
+/// new keys in GPUI syntax (`cmd-shift-o`, chords `cmd-k cmd-t`). Empty
+/// `keys` unbinds it. The app resolves the name and checks the keys.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyOverride {
+    pub command: String,
+    pub keys: Vec<String>,
+    /// 1-based line in keymap.toml, for messages.
+    pub line: usize,
+}
+
+/// Reads keymap.toml's `[bindings]`. A missing file gives nothing; an
+/// unreadable one gives one error; each entry of the wrong shape gives an
+/// error and is skipped (never a crash).
+pub fn load_keymap() -> (Vec<KeyOverride>, Vec<String>) {
+    load_keymap_from(&keymap_path())
+}
+
+pub fn load_keymap_from(path: &Path) -> (Vec<KeyOverride>, Vec<String>) {
+    let text = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), Vec::new()),
+        Err(e) => return (Vec::new(), vec![format!("keymap.toml: {e}")]),
+    };
+    let doc: toml_edit::DocumentMut = match text.parse() {
+        Ok(d) => d,
+        Err(e) => return (Vec::new(), vec![format!("keymap.toml: {}", e.to_string().trim())]),
+    };
+    // The line a key is on (spans aren't kept by DocumentMut): the first
+    // line starting with the key, bare or quoted.
+    let line_of = |key: &str| {
+        text.lines()
+            .position(|l| {
+                let l = l.trim_start();
+                let rest = l.strip_prefix(&format!("\"{key}\"")).or_else(|| l.strip_prefix(&format!("'{key}'"))).or_else(|| l.strip_prefix(key));
+                rest.is_some_and(|r| r.trim_start().starts_with('='))
+            })
+            .map_or(0, |i| i + 1)
+    };
+    let mut out = Vec::new();
+    let mut errors = Vec::new();
+    for (key, _) in doc.iter() {
+        if key != "bindings" {
+            errors.push(format!("keymap.toml: unknown key `{key}` (bindings go under [bindings])"));
+        }
+    }
+    let Some(item) = doc.get("bindings") else { return (out, errors) };
+    let Some(table) = item.as_table_like() else {
+        errors.push("keymap.toml: [bindings] must be a table".into());
+        return (out, errors);
+    };
+    for (command, item) in table.iter() {
+        let line = line_of(command);
+        let keys = match item.as_value() {
+            Some(toml_edit::Value::String(s)) => Some(vec![s.value().trim().to_string()]),
+            Some(toml_edit::Value::Array(a)) => {
+                a.iter().map(|v| v.as_str().map(|s| s.trim().to_string())).collect::<Option<Vec<_>>>()
+            }
+            _ => None,
+        };
+        match keys {
+            Some(keys) => {
+                let keys = keys.into_iter().filter(|k| !k.is_empty()).collect();
+                out.push(KeyOverride { command: command.trim().to_string(), keys, line });
+            }
+            None => errors.push(format!(
+                "keymap.toml line {line}: `{command}`: expected keys as a string or a list of strings"
+            )),
+        }
+    }
+    (out, errors)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keymap_entries_and_bad_ones() {
+        let d = tmp("keymap");
+        let p = d.join("keymap.toml");
+        assert_eq!(load_keymap_from(&p), (Vec::new(), Vec::new()), "missing file: no overrides");
+        std::fs::write(
+            &p,
+            "# mine\n[bindings]\n\"qur::GoToSymbol\" = \"cmd-t\"\n\"Delete Line\" = [\"cmd-shift-k\", \" ctrl-k \"]\n\"Toggle Sidebar\" = \"\"\nbad = 3\nalso_bad = [1]\n[other]\nx = 1\n",
+        )
+        .unwrap();
+        let (ov, errs) = load_keymap_from(&p);
+        let got: Vec<(&str, Vec<&str>, usize)> =
+            ov.iter().map(|o| (o.command.as_str(), o.keys.iter().map(String::as_str).collect(), o.line)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("qur::GoToSymbol", vec!["cmd-t"], 3),
+                ("Delete Line", vec!["cmd-shift-k", "ctrl-k"], 4),
+                ("Toggle Sidebar", vec![], 5),
+            ]
+        );
+        assert_eq!(errs.len(), 3, "{errs:?}");
+        assert!(errs[0].contains("`other`"), "{errs:?}");
+        assert!(errs[1].contains("line 6") && errs[1].contains("`bad`"), "{errs:?}");
+        assert!(errs[2].contains("`also_bad`"), "{errs:?}");
+        std::fs::write(&p, "[bindings\n").unwrap();
+        let (ov, errs) = load_keymap_from(&p);
+        assert!(ov.is_empty());
+        assert!(errs[0].starts_with("keymap.toml"), "{errs:?}");
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("qur-config-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn gaps_round_trip_and_clamp() {
+        let d = tmp("gaps");
+        let p = d.join("config.toml");
+        let (c, _) = Config::load_from(&p);
+        assert!(!c.ui.gaps && c.ui.rounded && !c.ui.tile_border);
+        assert_eq!((c.ui.gap, c.ui.radius), (DEFAULT_GAP, DEFAULT_RADIUS));
+        write_key(&p, "ui.gaps", Some(true.into())).unwrap();
+        write_key(&p, "ui.gap", Some(12.0f32.into())).unwrap();
+        write_key(&p, "ui.rounded", Some(false.into())).unwrap();
+        write_key(&p, "ui.radius", Some(4.0f32.into())).unwrap();
+        write_key(&p, "ui.tile_border", Some(true.into())).unwrap();
+        let (c, err) = Config::load_from(&p);
+        assert!(err.is_none(), "{err:?}");
+        assert!(c.ui.gaps && !c.ui.rounded && c.ui.tile_border);
+        assert_eq!((c.ui.gap, c.ui.radius), (12.0, 4.0));
+        std::fs::write(&p, "[ui]\ngaps = true\ngap = 500\nradius = -3\n").unwrap();
+        let (c, _) = Config::load_from(&p);
+        assert_eq!((c.ui.gap, c.ui.radius), (MAX_GAP, 0.0));
+        std::fs::write(&p, "[ui]\ngap = 0\n").unwrap();
+        assert_eq!(Config::load_from(&p).0.ui.gap, MIN_GAP);
     }
 
     #[test]

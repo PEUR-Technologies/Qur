@@ -220,6 +220,72 @@ pub struct TaskRecord {
     /// quit or a crash doesn't lose them (sent when the task next starts).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued: Vec<QueuedMessage>,
+    /// ACP turns with their checkpoints (oldest first): what each changed,
+    /// and Rewind. Trees are pinned under `refs/qur/turns/<id>/<n>/…`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub turns: Vec<Turn>,
+    /// A second-opinion reviewer on this task (Review Agent's Work…): a
+    /// read-only session in the same worktree. Dropped with the task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewLink>,
+}
+
+/// The reviewer attached to a task: which agent and model, what it reviews,
+/// and its ACP session (session/load shows its findings again after a restart).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReviewLink {
+    /// Roster id of the reviewing agent (may differ from the task's: Codex
+    /// reviewing a Claude task, or the reverse).
+    pub agent: String,
+    /// The model picked from the reviewer's own list (None: its default),
+    /// and that model's display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    /// "work" or "plan".
+    pub subject: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Unix seconds.
+    pub created: u64,
+}
+
+/// One ACP turn's checkpoints: the worktree's tree when the prompt was sent
+/// and when the turn ended.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Turn {
+    /// 1, 2, 3… within the task (never reused, also after a Rewind).
+    pub n: u32,
+    pub start: String,
+    /// None while the turn runs (or if Qur quit mid-turn).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
+    /// Files changed, lines added, lines removed (start → end).
+    #[serde(default)]
+    pub files: u32,
+    #[serde(default)]
+    pub added: u32,
+    #[serde(default)]
+    pub removed: u32,
+    /// Rewound: its changes (and any after it) were undone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rewound: bool,
+}
+
+impl TaskRecord {
+    /// The newest turn that can still be rewound or viewed.
+    pub fn last_turn(&self) -> Option<&Turn> {
+        self.turns.iter().rev().find(|t| !t.rewound)
+    }
+
+    pub fn turn(&self, n: u32) -> Option<&Turn> {
+        self.turns.iter().find(|t| t.n == n)
+    }
+
+    pub fn next_turn_number(&self) -> u32 {
+        self.turns.iter().map(|t| t.n).max().unwrap_or(0) + 1
+    }
 }
 
 /// A queued chat message as saved (browser screenshots aren't kept).
@@ -331,10 +397,35 @@ mod tests {
                 QueuedMessage { text: "then run the tests\nand fix them".into(), ..Default::default() },
                 QueuedMessage { text: "look".into(), mentions: vec![wt.join("a.rs")], context: vec!["<div>".into()], labels: vec!["div.nav".into()] },
             ],
+            turns: vec![
+                Turn { n: 1, start: "aa".into(), end: Some("bb".into()), files: 2, added: 12, removed: 4, rewound: true },
+                Turn { n: 2, start: "bb".into(), ..Default::default() },
+            ],
+            review: Some(ReviewLink {
+                agent: "codex".into(),
+                model: Some("gpt-5.5/high".into()),
+                model_name: Some("gpt-5.5 (high)".into()),
+                subject: "work".into(),
+                session_id: Some("r1".into()),
+                created: 2,
+            }),
         });
         let body = toml_edit::ser::to_string_pretty(&s).unwrap();
         let back: TaskStore = toml_edit::de::from_str(&body).unwrap();
-        assert_eq!(back, s, "queued messages survive a save");
+        assert_eq!(back, s, "queued messages, turns and the reviewer link survive a save");
+        assert!(body.contains("[task.review]") && body.contains("agent = \"codex\""), "{body}");
+        let t = &back.tasks[0];
+        assert_eq!((t.last_turn().map(|t| t.n), t.next_turn_number()), (Some(2), 3));
+        // Files written before turns existed still load.
+        let old = body.split("[[task.turns]]").next().unwrap();
+        let back: TaskStore = toml_edit::de::from_str(old).unwrap();
+        assert!(back.tasks[0].turns.is_empty());
+        // No reviewer: nothing written, and it reads back the same.
+        let mut plain = s.clone();
+        plain.tasks[0].review = None;
+        let body = toml_edit::ser::to_string_pretty(&plain).unwrap();
+        assert!(!body.contains("review"), "{body}");
+        assert_eq!(toml_edit::de::from_str::<TaskStore>(&body).unwrap(), plain);
     }
 
     #[test]

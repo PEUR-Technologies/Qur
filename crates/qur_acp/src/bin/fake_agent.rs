@@ -7,6 +7,9 @@
 //! - contains "crash": prints to stderr and exits 3
 //! - contains "garbage": writes a non-JSON line first
 //! - contains "picture": a session title, an image and a file link, max_tokens
+//! - contains "parallel": three finished tool calls in a row (two reads and
+//!   a command), then two edits whose permission requests are both sent
+//!   before either is answered; reports both choices
 //!
 //! Env: FAKE_AGENT_CHILD=1 spawns a `sleep 300` child (same process group);
 //! FAKE_AGENT_IGNORE_TERM=1 ignores SIGTERM (tests the SIGKILL path);
@@ -141,6 +144,39 @@ fn main() {
                     update(&sid, json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "image", "mimeType": "image/png", "data": "iVBORw0KGgo=" } }));
                     update(&sid, json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "resource_link", "uri": "file:///w/a.txt", "name": "a.txt" } }));
                     reply(json!({ "stopReason": "max_tokens" }));
+                    continue;
+                }
+                if text.contains("parallel") {
+                    chunk(&sid, "Looking first.");
+                    for (tid, title, kind) in [("r1", "Read a.txt", "read"), ("r2", "Read b.txt", "read"), ("x1", "grep -n needle a.txt", "execute")] {
+                        update(&sid, json!({ "sessionUpdate": "tool_call", "toolCallId": tid, "title": title, "kind": kind, "status": "completed",
+                                             "content": [{ "type": "content", "content": { "type": "text", "text": format!("{title}: found the needle") } }] }));
+                    }
+                    let mut asked = Vec::new();
+                    for (tid, file) in [("w1", "a.txt"), ("w2", "b.txt")] {
+                        update(&sid, json!({ "sessionUpdate": "tool_call", "toolCallId": tid, "title": format!("Write {file}"), "kind": "edit", "status": "pending" }));
+                        let perm = format!("perm-{tid}");
+                        send(json!({ "jsonrpc": "2.0", "id": perm, "method": "session/request_permission", "params": {
+                            "sessionId": sid,
+                            "toolCall": { "toolCallId": tid, "title": format!("Write {file}"), "kind": "edit" },
+                            "options": [
+                                { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+                                { "optionId": "always", "name": "Always allow", "kind": "allow_always" },
+                                { "optionId": "reject", "name": "Reject", "kind": "reject_once" } ] } }));
+                        asked.push((tid, perm));
+                    }
+                    let mut chosen = Vec::new();
+                    for _ in 0..asked.len() {
+                        let r = wait_for(&mut lines, |v| asked.iter().any(|(_, p)| v["id"] == p.as_str()) || v["method"] == "session/cancel");
+                        let Some(r) = r.filter(|r| r["method"] != "session/cancel") else { break };
+                        let (tid, _) = asked.iter().find(|(_, p)| r["id"] == p.as_str()).unwrap();
+                        let option = r["result"]["outcome"]["optionId"].as_str().unwrap_or("cancelled").to_string();
+                        let status = if option == "allow" || option == "always" { "completed" } else { "failed" };
+                        update(&sid, json!({ "sessionUpdate": "tool_call_update", "toolCallId": tid, "status": status }));
+                        chosen.push(format!("{tid}={option}"));
+                    }
+                    chunk(&sid, &format!("chose {}", chosen.join(" ")));
+                    reply(json!({ "stopReason": if chosen.len() == asked.len() { "end_turn" } else { "cancelled" } }));
                     continue;
                 }
                 if text.contains("slow") {

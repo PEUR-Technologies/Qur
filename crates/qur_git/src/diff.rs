@@ -64,7 +64,7 @@ pub const MAX_LINES_PER_FILE: usize = 5000;
 /// Lines longer than this (in tokens) get no word emphasis.
 const MAX_EMPHASIS_TOKENS: usize = 256;
 
-const DIFF_ARGS: &[&str] = &[
+pub(crate) const DIFF_ARGS: &[&str] = &[
     "diff",
     "--patch-with-raw",
     "-z",
@@ -164,7 +164,7 @@ fn task_index(worktree: &Path) -> Result<TempFile, String> {
 
 /// The checkout's index file: `.git/index`, or `<gitdir>/index` for a linked
 /// worktree (`.git` file). Falls back to asking git.
-fn index_path(worktree: &Path) -> Result<PathBuf, String> {
+pub(crate) fn index_path(worktree: &Path) -> Result<PathBuf, String> {
     let dot = worktree.join(".git");
     if dot.is_dir() {
         return Ok(dot.join("index"));

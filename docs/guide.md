@@ -25,7 +25,7 @@ qur doctor                             # checks git, the agents and their adapte
 
 Building needs **Rust** stable ([rustup](https://rustup.rs)) and **Xcode** with the Metal toolchain (`xcodebuild -downloadComponent MetalToolchain` once if the build asks). Release signing and notarization: [docs/signing.md](signing.md). Notifications need the app bundle; everything else also runs straight from `target/release/qur`.
 
-On first launch a short picker asks which agents to use, the stage layout, the keys (VS Code, optionally with Vim) and the theme; Qur > Setup… reopens it.
+On first launch the settings screen opens as a welcome: connect an AI account (install and sign in, decision 45), then pick the theme, accent, layout and keys if you like. **Qur > Settings…** (`Cmd+,`) brings it back any time.
 
 Then open a project (File > Open Folder, or `qur ~/path/to/repo`) and press `Cmd+Shift+T` for an Agent Terminal (Claude in its own worktree), or `Cmd+Shift+N` for a structured agent task. Describe the task and watch.
 
@@ -50,6 +50,7 @@ One window is one project. There's no permanent editor area: the window is for a
   - A structured (ACP) agent shows Live, Browser and Changes next to its Chat (with the permission bar and the prompt) and To-do.
   - Drag a tab onto a pane's edge to split, onto its middle to join; drag the dividers to resize; × tucks a tab away. Your arrangement is saved.
 - **Code modal**: opening a file shows it in a modal with full editing. `Esc` closes it.
+- **Window gaps** (View > Toggle Gaps, or Qur > Appearance > Gaps… to adjust; also a row in Setup): like Hyprland, the top bar, the sidebar, every dock pane and every split terminal float as their own tiles with clear gaps between them and around the window's edge, so Qur looks like a stack of separate windows. The popover sets the gap (2–24 pt), rounded corners and their radius (0–16 pt), and a hairline border per tile; it previews as you drag and saves when it closes. Drag a gap between panes (or between the sidebar and the stage) to resize. The gaps show your desktop even at 100% opacity; below 100% with blur on they're blurred too, because macOS blurs the whole window.
 
 ## Features
 
@@ -60,7 +61,10 @@ One window is one project. There's no permanent editor area: the window is for a
 - **Agents name their own work.** A button shows what the agent says it's doing (Claude Code's terminal title), unless you rename it (Agent > Rename Agent…, or double-click).
 - **Terminal comforts:** Find (`Cmd+F`, regex, through the scrollback) and `Cmd`-click to open URLs and `file:line` paths.
 - **Structured sessions** over the [Agent Client Protocol](https://agentclientprotocol.com):
-  - Streaming tool calls, the agent's to-do plan, and a permission bar (Allow once / Allow for this task / Deny).
+  - Streaming tool calls, the agent's to-do plan, and a permission bar (Allow once / Allow for this task / Deny). When the agent asks several things at once, the bar shows them one at a time ("1 of 3 requests waiting") and **Allow all 3 once** (also Agent > Permission: Allow All Pending) answers them all "allow once", never "always".
+  - Tool calls in a row fold into one line, like "Read 4 files, ran 2 commands ▸"; click it to see each call. A call that's running, failed or waiting for your permission stays in view.
+  - **Find in Chat** (`Cmd+F` in the agent's view) searches your messages, the agent's replies, thoughts, and tool titles and output, ignoring case. `↩` goes to the older match, `⇧↩` the newer one, `Esc` closes; a folded thought, tool call or group opens to show the match.
+  - **Copy Chat as Markdown** (Agent menu, the palette, or right-click the agent): the whole chat on the clipboard, with your messages quoted, the agent's Markdown as it wrote it, one line per tool call with ✓ / ✕, and thoughts left out.
   - Stop at any time. Messages sent mid-turn are queued; `@` mentions a file and `/` runs agent commands.
 - **Unread markers** on agents that finished or need you while you were elsewhere.
 - **Turn-end checks.** Set `[checks] command` per project, and Qur runs it in the worktree after each agent turn that changed files. A failure marks the agent's button `✕ checks` and lands in the prompt (or the Agent Terminal's input line) for you to send back. Agent > Run Checks Now runs it any time.
@@ -70,6 +74,10 @@ One window is one project. There's no permanent editor area: the window is for a
 - **Live file-tree heatmap.**
   - An outline on files waiting for your approval, a pulsing glow while editing, a fading glow while reading, and "new" or `+n −m` on changed files.
   - Heat deepens with how often a file was touched, and folders roll up their contents.
+  - Files the agent deleted stay in the tree, struck through and dimmed with their glow, until they come back or you merge or discard the task.
+  - It follows the same ignore rules as the tree: `.gitignore` and `.ignore` files in any folder, `.git/info/exclude` and your global git excludes.
+  - Your own saves from the code modal and Replace All never glow as an agent's edit.
+  - An agent working in the project folder (the first Agent Terminal) shares the folder with you, so only files it touched glow: writes count as its own while it's busy (an Agent Terminal printing output, or a structured agent running a tool), and your uncommitted work stays quiet.
   - On your main checkout, dots show which files agents changed in their worktrees.
 - **Live view** (structured agents): the file the agent is working in, as it types. Read-only while the agent edits, with **Take over** to step in. It follows the agent across files but never jumps within 5 s of your own scroll or click.
 - **Browser with Inspect.** Open your dev server next to the agent, pick elements or text, and ask the agent to adjust them. It gets the selector, HTML, key CSS, the source location when available, and a screenshot. Uses the system WebKit, freed when idle.
@@ -78,6 +86,8 @@ One window is one project. There's no permanent editor area: the window is for a
 ### Review and merge
 
 - Review the task's diff and comment on lines; comments go back to the agent as one message.
+- **Turns** (structured agents): each turn that changed files ends with a line like "3 files · +12 −4 · View · Rewind". **View** shows just that turn's changes in Changes (comment as usual; **All changes** goes back). **Rewind** puts the worktree's files back to how they were before that turn, after asking: it stops the agent first if it's working, warns if files changed since the turn ended, and tells the agent with your next message. Commits stay. Also Agent > Show Last Turn's Changes and Rewind Last Turn…. Qur keeps a snapshot at the start and end of each turn (a git tree in the task's worktree, pinned under `refs/qur/turns/<task>/`, deleted on Discard or after Merge); your own checkout, index and stash are never touched. Agent Terminals have no turns yet.
+- **Second opinion** (structured agents): Agent > **Review Agent's Work…** (or **Review Agent's Plan…** when the agent has a plan) starts a reviewer on the task. Pick who reviews (Up/Down or click): another agent from your roster, such as Codex reviewing a Claude task or the reverse, or another model of the same agent. The default is the other account when it's installed and signed in, else another model. An optional line tells it what to look at. The reviewer is a second session in the same worktree; it gets the task's diff and a summary of its chat (both capped in size) and answers with findings, each with a **Criticality N/10**. It shows as `↳ review · codex` under the agent in the sidebar; click it to watch it in the chat panel. It's **read-only by Qur's rule, not by an OS sandbox**: Qur denies every edit or command it asks to run (no permission bar; the chat says what was denied) and starts it in its plan or read-only mode. When it's done, **Send Findings to Agent** puts a reply request into the agent's prompt (per finding: Agree/Disagree, Why, Fix, then ask before changing anything), for you to edit and send; it queues if the agent is busy. A review costs one more session on the reviewer's own account. The reviewer is saved with the task (click it after a restart to see its findings again) and goes away on Close, Discard or Merge.
 - A pre-check warns about conflicts. **Merge** never touches your staged changes or stash.
 - Resolve conflicts in-app (Accept Ours / Theirs / Both, then Finish or Abort; also in Agent > Merge Conflicts), and stage and commit in the Git panel.
 - Discard removes the task's worktree and branch.
@@ -89,10 +99,14 @@ One window is one project. There's no permanent editor area: the window is for a
 
 ### Editor and looks
 
-- Code modal with tree-sitter highlighting for 13 languages, multi-cursor, regex find/replace, soft wrap and VS Code keybindings, plus optional Vim mode (Qur > Vim Mode).
-- A first-run picker for agents, layout, keys and theme (Qur > Setup… reopens it).
+- Code modal with tree-sitter highlighting for 13 languages, multi-cursor, regex find/replace, soft wrap and VS Code keybindings, plus optional Vim mode (Edit > Vim Mode, or Settings).
+- **Go to Symbol in File** (`Cmd+Shift+O`): functions, methods, types, classes, headings, keys… from the same tree-sitter parse as the colors (no language server). Arrow keys preview each symbol; Esc puts the cursor back.
+- **Expand / Shrink Selection** (`Ctrl+Shift+Cmd+→` / `←`): grows every cursor's selection to the enclosing syntax node (word, call, statement, block, function…), and shrinks back one step at a time. Files Qur doesn't parse grow by word, line, then the whole file.
+- With soft wrap on, `End` / `Cmd+→` stops at the end of the visual row first, then the line; `Home` / `Cmd+←` likewise.
+- Input methods (Japanese, Chinese, Korean, press-and-hold accents): the text being composed shows underlined at the cursor until you commit it.
+- **Settings** (`Cmd+,`): one screen with a section list. Agents (install, sign in, which agents to use), Appearance (theme for this project or all, accent color and brightness, transparency and blur, top bar, traffic lights in full screen), Editor (Vim mode, keys), Layout (the agent stage presets as diagrams), and Files (open config.toml, keymap.toml, agents.toml). Changes apply and save as you make them; Esc closes. It also opens by itself on first launch.
 - 17 built-in themes plus Auto (follows macOS), a theme per project, and window transparency with blur. Every theme passes a contrast test.
-- Every command is in the macOS menu bar and the command palette (`Cmd+Shift+P`). No toolbars or settings screens.
+- Every command is in the macOS menu bar and the command palette (`Cmd+Shift+P`). No toolbars; the one settings screen is Qur > Settings…, and its settings are also menu commands (View > Appearance, Edit > Vim Mode).
 
 ## Everyday keys
 
@@ -103,6 +117,7 @@ One window is one project. There's no permanent editor area: the window is for a
 | `Ctrl+T`, `Ctrl+1..9`, `Ctrl+Opt+↑/↓` | Switch sessions (`Ctrl+T` picks one by name) |
 | `Cmd+I`, `Esc` / `Cmd+.` | Focus the prompt, stop the agent |
 | `Cmd+P`, `Cmd+Shift+P` | Go to file, command palette |
+| `Cmd+Shift+O`, `Ctrl+Shift+Cmd+→/←` | Go to symbol in file; expand / shrink selection |
 | `Cmd+K Cmd+L`, `Cmd+1..5` | Structured agents: cycle layouts; Live / To-do / Chat / Changes / Browser (`Cmd+5` works for Agent Terminals too) |
 | `Cmd+Shift+C` | Browser: inspect element |
 | `Ctrl+Shift+G` | Source control |
@@ -116,13 +131,31 @@ Everything lives in `~/Library/Application Support/Qur/`. Qur never writes into 
 
 | File | What |
 |---|---|
-| `config.toml` | Theme, window opacity/blur, editor font, soft wrap, peek layout, `[keys] vim`, `[alerts]`. Qur > Settings opens it; saved changes apply right away. |
+| `config.toml` | Theme, window opacity/blur, editor font, soft wrap, peek layout, `[keys] vim`, `[alerts]`, and window gaps: `[ui] gaps = true`, `gap = 8`, `rounded = true`, `radius = 8`, `tile_border = false`. Qur > Settings… changes most of it; Qur > Settings Files > Open config.toml opens it, and saved changes apply right away. |
 | `agents.toml` | Which agents Qur can start (ACP or terminal mode). Written on first launch. |
+| `keymap.toml` | Your own key bindings (see below). Qur > Settings Files > Open keymap.toml (or Settings > Editor); saved changes apply right away. |
 | `projects/<id>.toml` | Per-project theme, opacity, `[worktree] setup = "pnpm install"` (runs in each new worktree before the agent starts), `[checks] command = "cargo check"` (runs after each agent turn that changed files), and `[run] command` / `url` with `$PORT` (Run Project). |
 | `projects/<id>.tasks.toml` | Tasks, so they survive restarts and resume their sessions. |
 | `worktrees/<id>/<task>/` | The task worktrees. |
 
-In your repo, an optional **`.worktreeinclude`** file lists one path per line (e.g. `.env`, `node_modules`). Qur copies those into each new worktree with APFS copy-on-write: instant, no extra disk.
+In your repo, an optional **`.worktreeinclude`** file lists one path per line (e.g. `.env`, `node_modules`, `apps/*/.env`; a leading `/` means the repo root, as in `.gitignore`). Qur copies those into each new worktree with APFS copy-on-write: instant, no extra disk. Files the worktree already has are left alone.
+
+### Keymap
+
+`keymap.toml` rebinds commands by name, under `[bindings]`:
+
+```toml
+[bindings]
+"Go to Symbol in File" = "cmd-r"                        # replaces Cmd+Shift+O
+"editor::DeleteLine" = ["cmd-shift-k", "ctrl-shift-k"]  # several keys
+"View: Sidebar" = ""                                     # unbound
+```
+
+- **Command names:** the action (`qur::GoToSymbol`, `editor::DeleteLine`; `QUR_DEBUG_ACTIONS` uses the same names), the command palette entry (`Go: Go to Symbol in File…`), or just its title when only one command has it. Case and a trailing `…` don't matter.
+- **Keys:** modifiers `cmd`, `ctrl`, `alt` (Option), `shift`, joined with `-` before the key: `cmd-shift-o`, `` ctrl-` ``, `alt-up`, `f5`. A chord is two keystrokes with a space: `cmd-k cmd-s`. A list binds several keys; `""` or `[]` unbinds.
+- A binding replaces all of that command's default keys and keeps where the command works (the editor, a terminal, anywhere).
+- Entries Qur can't use (an unknown or ambiguous name, a malformed key, a value that isn't a string or list) are skipped and written to the log (Help > Show Logs), and shown in the top bar when you save the file in Qur; the rest still apply. Qur never fails to start over keymap.toml.
+- The menu bar and the palette show your keys.
 
 ## Lightness
 
@@ -171,6 +204,28 @@ cargo test --release --workspace   # includes the theme contrast test and ACP te
 scripts/budget.sh 5                # weight budget; needs an unlocked screen (AC power recommended)
 ```
 
+CI (`.github/workflows/ci.yml`, one macOS job) runs clippy with `-D warnings`, the tests, a release build, the 40 MB binary budget, and the `qur doctor` checks that don't need an agent.
+
+### Scripted runs
+
+`QUR_DEBUG_ACTIONS` drives a window after its first frame: comma-separated steps, 200 ms apart. Always use a scratch `QUR_HOME`.
+
+| Step | Does |
+|---|---|
+| `qur::Name` | dispatches that action (as in the palette) |
+| `wait:<ms>` | pauses |
+| `type:<text>` | types the text as key presses: `\,` comma, `\n` Enter, `\t` Tab, `\\` backslash |
+| `key:<keys>` | presses keystrokes, space-separated, keymap syntax: `key:cmd-shift-p`, `key:escape`, `key:cmd-\,` (Cmd+,) |
+| `click:<at>` `dclick:` `rclick:` `cmdclick:` | left click, double click, right click, Cmd-click |
+| `drag:<at>,<at>` | press, move there a frame at a time, release (tabs, dividers, sliders) |
+| `scroll:<at>,<dy>` | turns the scroll wheel over a point by `dy` points (negative scrolls down) |
+| `state` | prints `STATE …`: overlay (and its text), selected agent, code modal (file, line, Vim mode, text), terminal find and selection, Git panel, both dock layouts |
+| `marks` | prints `BOUNDS <name> x,y wxh` for every marked element on screen |
+
+`<at>` is `x,y` in window points, or a marked element: `@tab:Terminal:Live` (its middle) or `@pane:Terminal:root~0.9~0.5` (fractions of its size). Marks: `agent:<button id>` (e.g. `agent:tt-root-1`), `menu:<item>`, `tab:` / `close:` / `add:<Kind>:<Panel>`, `pane:` / `split:<Kind>:<path>` (`root`, then `a`/`b` per split), `term:<session>`, `term-cell:<session>` (one cell, so `@term-cell:1~4.5~0.5` is column 4 of the top row), `git-row:` / `git-act:<staged|unstaged>:<path>`, and in Settings `settings:nav:<Section>`, `settings:<row>:<choice>` (`settings:vim:on`, `settings:top:zen`, `settings:lights:mono`, `settings:theme-scope:project`), `settings:theme:<Auto|n>`, `settings:slider:<Opacity|Hue|Brightness>`, `settings:blur`, `settings:file:<name>`, `settings:close`, `settings:done`. Marks exist only in scripted runs. Each input step draws the window first, so it works while the window is covered; check `STATE`, `FLASH` and files on disk rather than screenshots.
+
+`scripts/handcheck.sh` runs the hand checks this way (Vim keys, Find in Terminal, Rename, the agent menu, dock tabs and dividers, Cmd-click, the Git panel's stage, diff and typed commit, About, Accent Color, Run Doctor, window gaps with a dock divider and the sidebar gap, Settings from `Cmd+,` saving Vim, a theme, opacity and blur, and the first-run welcome) and prints ✓/✕ per assertion. It needs a logged-in session but no agent: a plain shell stands in for Claude Code.
+
 House rules:
 - Lightness is the product: measure with `scripts/budget.sh`, don't estimate.
 - No UI that isn't in the spec or decisions.
@@ -195,7 +250,7 @@ crates/
   qur_tree      lazy, gitignore-aware file tree
   qur_search    project search and replace (ignore + regex)
 docs/           spec (QUR_HANDOFF.md), owner decisions, keymap, menus, budget, signing, research
-scripts/        bundle.sh (Qur.app), make_icns.swift, budget.sh, shot.sh
+scripts/        bundle.sh (Qur.app), make_icns.swift, budget.sh, shot.sh, handcheck.sh
 spikes/         M0 spikes and test fixtures
 ```
 

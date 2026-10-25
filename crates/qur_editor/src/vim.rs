@@ -426,7 +426,7 @@ impl Vim {
             '^' => (line_first_nonblank(e, p.line), Kind::Exclusive),
             '$' => {
                 let line = (p.line + n - 1).min(last_line);
-                (line_start(e, line) + line_len(e, line).saturating_sub(1).max(0), Kind::Inclusive)
+                (line_start(e, line) + line_len(e, line).saturating_sub(1), Kind::Inclusive)
             }
             'w' => ((0..n).fold(here, |at, _| word_forward(e, at)), Kind::Exclusive),
             'b' => ((0..n).fold(here, |at, _| word_back(e, at)), Kind::Exclusive),
@@ -717,7 +717,7 @@ fn word_forward(e: &Editor, at: usize) -> usize {
         }
         i += 1;
     }
-    i.min(n.saturating_sub(1).max(0))
+    i.min(n.saturating_sub(1))
 }
 
 fn word_back(e: &Editor, at: usize) -> usize {
@@ -758,7 +758,7 @@ mod tests {
     use super::*;
 
     fn cx<'a>() -> Ctx<'a> {
-        Ctx { page_rows: 10, clipboard_in: None, clipboard_out: None, line_comment: Some("//"), block_comment: None, indent_unit: "    ", matching_bracket: None }
+        Ctx { page_rows: 10, clipboard_in: None, clipboard_out: None, line_comment: Some("//"), block_comment: None, indent_unit: "    ", matching_bracket: None, expand: None }
     }
 
     /// Feed keys; `<esc>` and `<C-r>` are special.

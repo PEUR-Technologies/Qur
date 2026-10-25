@@ -14,6 +14,7 @@ mod conflict;
 mod diff;
 mod merge;
 mod status;
+mod turns;
 
 #[cfg(test)]
 mod tests;
@@ -25,6 +26,7 @@ pub use merge::{
     start_conflict_merge,
 };
 pub use status::{Entry, Status, commit, discard_unstaged, stage, status, unstage};
+pub use turns::{TURNS_REF_PREFIX, changed_paths_between, delete_turn_refs, pin_turn, unpin_turn, restore_tree, snapshot_tree, tree_diff, tree_stats, turn_ref};
 
 use std::ffi::OsStr;
 use std::io::Write;

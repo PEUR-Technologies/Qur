@@ -104,6 +104,11 @@ pub enum Command {
     AddCursorAbove,
     AddCursorBelow,
     JumpToMatchingBracket,
+    /// Grow every selection to the enclosing syntax node (`Ctx::expand`),
+    /// else word, line, file. Remembers each step for `ShrinkSelection`.
+    ExpandSelection,
+    /// Undo the last `ExpandSelection` step (only right after expanding).
+    ShrinkSelection,
     // Clipboard: the app reads/writes the system clipboard via `Ctx`.
     Cut,
     Copy,
@@ -127,6 +132,9 @@ pub struct Ctx<'a> {
     pub indent_unit: &'a str,
     /// Matching bracket lookup (from qur_syntax), byte offset -> byte range.
     pub matching_bracket: Option<&'a dyn Fn(usize) -> Option<Range<usize>>>,
+    /// Syntax node strictly enclosing a byte range (from qur_syntax), for
+    /// Expand Selection. `None` falls back to word, line, file.
+    pub expand: Option<&'a dyn Fn(Range<usize>) -> Option<Range<usize>>>,
 }
 
 /// What a command did, so the UI knows what to refresh.
@@ -182,6 +190,11 @@ pub struct Editor {
     find: Option<FindState>,
     /// Last text we put on the clipboard, and whether it was a whole-line copy.
     last_copy: Option<(String, bool)>,
+    /// Expand Selection steps (selections, primary) to shrink back to.
+    expand_stack: Vec<(Vec<Selection>, usize)>,
+    /// Text version and selections the last expand/shrink left: the stack
+    /// only applies while both are unchanged.
+    expanded: Option<(u64, Vec<Selection>)>,
     now: fn() -> Instant,
     /// Inserted text of every edit, so tests can replay edits exactly.
     #[cfg(test)]
@@ -278,6 +291,8 @@ impl Editor {
             wrap,
             find: None,
             last_copy: None,
+            expand_stack: Vec::new(),
+            expanded: None,
             now: Instant::now,
             #[cfg(test)]
             edit_texts: Vec::new(),

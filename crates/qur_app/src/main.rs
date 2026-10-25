@@ -20,6 +20,8 @@ mod markdown;
 mod monitor;
 mod picker;
 mod prompt;
+mod script;
+mod review;
 mod search_view;
 mod setup_view;
 mod terminal;
@@ -66,32 +68,10 @@ pub fn set_menus(state: MenuState, cx: &mut App) {
 /// Called once per window after its first frame (scripts/budget.sh).
 pub fn first_frame(handle: AnyWindowHandle, cx: &mut App) {
     // Dev scripting for screenshots/tests: QUR_DEBUG_ACTIONS="qur::ThemePicker,wait:300,qur::ToggleTerminal"
-    // dispatches commands by name after the first frame.
+    // dispatches commands by name after the first frame; `type:`, `key:`,
+    // `click:` and `drag:` steps inject input (see `script`).
     if let Ok(list) = std::env::var("QUR_DEBUG_ACTIONS") {
-        let bg = cx.background_executor().clone();
-        cx.spawn(async move |cx| {
-            for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
-                if let Some(ms) = name.strip_prefix("wait:").and_then(|v| v.parse().ok()) {
-                    bg.timer(std::time::Duration::from_millis(ms)).await;
-                    continue;
-                }
-                bg.timer(std::time::Duration::from_millis(200)).await;
-                println!("ACTION {name} t={}ms", START.get().map(|s| s.elapsed().as_millis()).unwrap_or(0));
-                let _ = handle.update(cx, |root, window, cx| match cx.build_action(name, None) {
-                    // macOS stops drawing a fully covered window, so a view
-                    // focused since the last frame (e.g. the code modal) isn't in
-                    // the dispatch tree yet and the action would go nowhere.
-                    // Scripted runs usually sit behind other windows: fall back
-                    // to the workspace's own node.
-                    Ok(a) => match root.downcast::<workspace::Workspace>().map(|ws| ws.read(cx).root_focus()) {
-                        Ok(ws) if !ws.contains_focused(window, cx) => ws.dispatch_action(a.as_ref(), window, cx),
-                        _ => window.dispatch_action(a, cx),
-                    },
-                    Err(e) => eprintln!("QUR_DEBUG_ACTIONS: {name}: {e}"),
-                });
-            }
-        })
-        .detach();
+        script::run(handle, &list, cx);
     }
     if std::env::var_os("QUR_BENCH").is_some() {
         static ONCE: OnceLock<()> = OnceLock::new();
@@ -226,7 +206,11 @@ fn main() {
             .expect("bundled fonts");
         mark("fonts_added");
         qur_agents::warm_login_path();
-        commands::bind_keys(cx);
+        // Default keys plus keymap.toml; bad entries are logged and skipped.
+        for e in commands::reload_keymap(cx) {
+            log(&e);
+            eprintln!("KEYMAP {e}");
+        }
         // A clicked alert (M6) shows its agent: tag = qur:<window>:<task id>.
         cx.on_system_notification_response(|resp, cx| {
             let Some((win, id)) = resp.tag.strip_prefix("qur:").and_then(|t| t.split_once(':')) else { return };

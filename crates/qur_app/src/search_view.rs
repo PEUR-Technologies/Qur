@@ -182,9 +182,21 @@ impl SearchPanel {
         let with = self.replace.read(cx).text.clone();
         let files: Vec<PathBuf> = self.results.files.iter().map(|f| f.path.clone()).collect();
         let root = self.root.clone();
+        // Your replace, not an agent's edit: the heatmap leaves these writes out (noted
+        // before, as the watcher may report them before the replace returns, and after).
+        let abs: Vec<PathBuf> = files.iter().map(|f| root.join(f)).collect();
+        let note = move || {
+            let mut own = qur_heat::own_writes().lock().unwrap_or_else(|e| e.into_inner());
+            let now = std::time::Instant::now();
+            for p in &abs {
+                own.note(p, now);
+            }
+        };
+        note();
         let bg = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
             let r = bg.spawn(async move { qur_search::replace_all(&root, &query, &with, &files) }).await;
+            note();
             this.update(cx, |this, cx| {
                 cx.emit(SearchEvent::Message(match r {
                     Ok((f, n)) => format!("Replaced {n} match{} in {f} file{}", if n == 1 { "" } else { "es" }, if f == 1 { "" } else { "s" }),
@@ -249,7 +261,7 @@ impl SearchPanel {
                     .filter(|r| r.start >= indent && r.end > r.start)
                     .map(|r| (r.start - indent..r.end - indent, hl))
                     .collect();
-                let col = l.ranges.first().map(|r| l.text[..r.start].chars().count()).unwrap_or(0);
+                let col = l.col;
                 let (path, line) = (self.root.join(&f.path), l.line);
                 div()
                     .id(("sl", ix))
@@ -324,7 +336,7 @@ impl Render for SearchPanel {
             .size_full()
             .flex()
             .flex_col()
-            .bg(look.bg(ui.editor_bg))
+            .bg(look.region_bg(ui.editor_bg))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                 let k = &ev.keystroke;
                 if k.modifiers.alt && !k.modifiers.platform && !k.modifiers.control {

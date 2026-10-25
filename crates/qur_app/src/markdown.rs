@@ -427,12 +427,13 @@ fn highlights(lang: &str, text: &str) -> Rc<Vec<(Range<usize>, usize)>> {
 /// Called when a file link is clicked: open it in the code modal.
 pub type OnFile = Rc<dyn Fn(PathBuf, Option<u32>, &mut Window, &mut App)>;
 
-/// Render `text` as Markdown. `id` must be unique and stable per chat item
-/// (element ids and the parse cache hang off it).
-pub fn render(text: &str, id: impl Into<SharedString>, root: Option<&Path>, look: &Look, on_file: OnFile) -> gpui::Div {
+/// Render `text` as Markdown, with Find in Chat's matches marked (`hl`).
+/// `id` must be unique and stable per chat item (element ids and the parse
+/// cache hang off it).
+pub fn render(text: &str, id: impl Into<SharedString>, root: Option<&Path>, look: &Look, on_file: OnFile, hl: Option<&FindHl>) -> gpui::Div {
     let id = id.into();
     let blocks = cached(&id, text, root);
-    let r = Renderer { look, on_file, id, n: std::cell::Cell::new(0) };
+    let r = Renderer { look, on_file, id, n: std::cell::Cell::new(0), hl };
     r.blocks(&blocks, 0).text_size(look.text(0.)).text_color(look.c(look.theme.ui.text))
 }
 
@@ -457,6 +458,128 @@ struct Renderer<'a> {
     on_file: OnFile,
     id: SharedString,
     n: std::cell::Cell<usize>,
+    hl: Option<&'a FindHl>,
+}
+
+// -- find in chat ----------------------------------------------------------------
+
+/// Byte ranges of `needle` in `hay`, ignoring case, left to right and not
+/// overlapping. Matches start and end on whole characters.
+pub fn find_all(hay: &str, needle: &str) -> Vec<Range<usize>> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if hay.is_ascii() && needle.is_ascii() {
+        let (h, n) = (hay.as_bytes(), needle.as_bytes());
+        let mut i = 0;
+        while i + n.len() <= h.len() {
+            if h[i..i + n.len()].eq_ignore_ascii_case(n) {
+                out.push(i..i + n.len());
+                i += n.len();
+            } else {
+                i += 1;
+            }
+        }
+        return out;
+    }
+    // Lower-cased characters, each with the byte range of the character it came from.
+    let low: Vec<(char, Range<usize>)> = hay.char_indices().flat_map(|(i, c)| c.to_lowercase().map(move |l| (l, i..i + c.len_utf8()))).collect();
+    let pat: Vec<char> = needle.chars().flat_map(char::to_lowercase).collect();
+    let mut a = 0;
+    while a + pat.len() <= low.len() {
+        let whole_start = a == 0 || low[a - 1].1 != low[a].1;
+        let b = a + pat.len();
+        let whole_end = b == low.len() || low[b].1 != low[b - 1].1;
+        if whole_start && whole_end && low[a..b].iter().map(|(c, _)| *c).eq(pat.iter().copied()) {
+            out.push(low[a].1.start..low[b - 1].1.end);
+            a = b;
+        } else {
+            a += 1;
+        }
+    }
+    out
+}
+
+/// Find in Chat's marks for one chat row as it's drawn: every match gets
+/// `style`; the `current`-th match of the row (counted in drawing order)
+/// gets `strong`.
+pub struct FindHl {
+    pub query: String,
+    pub current: Option<usize>,
+    pub style: HighlightStyle,
+    pub strong: HighlightStyle,
+    seen: std::cell::Cell<usize>,
+}
+
+impl FindHl {
+    pub fn new(query: String, current: Option<usize>, style: HighlightStyle, strong: HighlightStyle) -> Self {
+        FindHl { query, current, style, strong, seen: std::cell::Cell::new(0) }
+    }
+
+    /// The matches in `text` (the next ones of the row), styled.
+    pub fn ranges(&self, text: &str) -> Vec<(Range<usize>, HighlightStyle)> {
+        find_all(text, &self.query)
+            .into_iter()
+            .map(|r| {
+                let k = self.seen.get();
+                self.seen.set(k + 1);
+                (r, if Some(k) == self.current { self.strong } else { self.style })
+            })
+            .collect()
+    }
+
+    /// `text` with its matches marked.
+    pub fn text(&self, text: impl Into<SharedString>) -> StyledText {
+        let text = text.into();
+        let hl = self.ranges(&text);
+        StyledText::new(text).with_highlights(hl)
+    }
+}
+
+/// `hl`'s marks on top of `base` (sorted, not overlapping, as StyledText wants).
+fn with_find(base: Vec<(Range<usize>, HighlightStyle)>, text: &str, hl: Option<&FindHl>) -> Vec<(Range<usize>, HighlightStyle)> {
+    match hl.map(|h| h.ranges(text)).filter(|m| !m.is_empty()) {
+        Some(marks) => gpui::combine_highlights(base, marks).collect(),
+        None => base,
+    }
+}
+
+/// Every piece of text the blocks show, in the order `render` draws them.
+fn visit<'b>(blocks: &'b [Block], f: &mut impl FnMut(&'b str)) {
+    for b in blocks {
+        match b {
+            Block::Para(i) | Block::Heading(_, i) => f(&i.text),
+            Block::Code { text, .. } => f(text),
+            Block::List { items, .. } => items.iter().for_each(|item| visit(item, f)),
+            Block::Quote(v) => visit(v, f),
+            Block::Rule => {}
+            Block::Table { head, rows } => {
+                let cols = head.len().max(rows.iter().map(Vec::len).max().unwrap_or(0));
+                for cells in std::iter::once(head).chain(rows) {
+                    cells.iter().take(cols).for_each(|i| f(&i.text));
+                }
+            }
+        }
+    }
+}
+
+/// How many matches of `query` `render` would mark in this Markdown (the
+/// shown text, not the raw: `**a**` is "a").
+pub fn count_matches(text: &str, id: impl Into<SharedString>, root: Option<&Path>, query: &str) -> usize {
+    let blocks = cached(&id.into(), text, root);
+    let mut n = 0;
+    visit(&blocks, &mut |t| n += find_all(t, query).len());
+    n
+}
+
+/// The text Markdown shows (tests).
+#[cfg(test)]
+fn shown(text: &str) -> Vec<String> {
+    let blocks = parse(text, None);
+    let mut out = Vec::new();
+    visit(&blocks, &mut |t| out.push(t.to_string()));
+    out
 }
 
 impl Renderer<'_> {
@@ -498,6 +621,7 @@ impl Renderer<'_> {
                     })
                     .collect();
                 let hl: Vec<(Range<usize>, HighlightStyle)> = spans.iter().map(|(r, h)| (r.clone(), styles[*h])).collect();
+                let hl = with_find(hl, text, self.hl);
                 div()
                     .flex()
                     .flex_col()
@@ -597,6 +721,7 @@ impl Renderer<'_> {
                 (r.clone(), style)
             })
             .collect();
+        let hl = with_find(hl, &i.text, self.hl);
         let code: Vec<(Range<usize>, SharedString)> = i.runs.iter().filter(|(_, m)| m.code).map(|(r, _)| (r.clone(), look.code_font.clone())).collect();
         let text = StyledText::new(i.text.clone()).with_highlights(hl).with_font_family_overrides(code);
         let (ranges, targets): (Vec<Range<usize>>, Vec<Target>) = i
@@ -692,6 +817,37 @@ mod tests {
         assert!(i.runs.iter().any(|(r, m)| &i.text[r.clone()] == "src/nope.rs" && m.link.is_none()));
         assert_eq!(file_target("/etc/hosts", &root), None);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn find_all_ignores_case() {
+        assert_eq!(find_all("Foo foo FOO", "foo"), [0..3, 4..7, 8..11]);
+        assert_eq!(find_all("aaaa", "aa"), [0..2, 2..4], "not overlapping");
+        assert!(find_all("abc", "").is_empty());
+        assert!(find_all("ab", "abc").is_empty());
+        // Non-ASCII: byte ranges of whole characters.
+        let s = "Ünïcode ünÏ";
+        let m = find_all(s, "ÜNÏ");
+        assert_eq!(m.len(), 2);
+        assert_eq!(&s[m[0].clone()], "Ünï");
+        assert_eq!(&s[m[1].clone()], "ünÏ");
+        // A character that lower-cases to two must match whole.
+        assert!(find_all("İx", "i").is_empty());
+    }
+
+    #[test]
+    fn find_counts_shown_text() {
+        // `**` isn't shown, so it isn't found; code and table cells are.
+        let md = "**bold** fix\n\n```rs\nfix()\n```\n\n| fix | a |\n|--|--|\n| b | fix |\n";
+        assert_eq!(count_matches(md, "t-find", None, "fix"), 4);
+        assert_eq!(count_matches(md, "t-find", None, "**"), 0);
+        assert_eq!(shown("- a\n- b\n\n> c"), ["a", "b", "c"]);
+        // Drawing order and counting order agree: FindHl numbers matches as drawn.
+        let hl = FindHl::new("x".into(), Some(1), HighlightStyle::default(), HighlightStyle { font_weight: Some(FontWeight::BOLD), ..Default::default() });
+        let first = hl.ranges("x x");
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[1].1.font_weight, Some(FontWeight::BOLD));
+        assert_eq!(hl.ranges("x")[0].1.font_weight, None, "third match isn't current");
     }
 
     #[test]

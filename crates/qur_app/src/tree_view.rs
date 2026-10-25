@@ -1,7 +1,8 @@
 //! The Files tree: a virtualized tree of the project or the selected task's
 //! worktree. For a worktree it is the live heatmap (handoff section 9): rows
-//! glow in the agent's accent as it reads and edits; the main checkout's tree
-//! shows overlap dots for files agents changed in their worktrees.
+//! glow in the agent's accent as it reads and edits, and files it deleted stay
+//! as struck-through rows; the main checkout's tree shows overlap dots for
+//! files agents changed in their worktrees.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -65,9 +66,25 @@ impl TreeView {
     }
 
     pub fn set_monitor(&mut self, m: Entity<TaskMonitor>, cx: &mut Context<Self>) {
-        self._sub = Some(cx.observe(&m, |this, _, cx| this.follow_focus(cx)));
+        self._sub = Some(cx.observe(&m, |this, _, cx| {
+            this.sync_ghosts(cx);
+            this.follow_focus(cx);
+        }));
         self.monitor = Some(m);
+        self.sync_ghosts(cx);
         cx.notify();
+    }
+
+    /// Files the agent deleted keep a row (struck through, still glowing) until
+    /// they come back or the task is merged or discarded. Reloads the tree only
+    /// when that set changes.
+    fn sync_ghosts(&mut self, cx: &mut Context<Self>) {
+        let Some(m) = &self.monitor else { return };
+        let deleted = m.read(cx).heat.deleted();
+        if self.tree.ghosts().len() != deleted.len() || !deleted.iter().all(|d| self.tree.ghosts().contains(d)) {
+            self.tree.set_ghosts(deleted);
+            cx.notify();
+        }
     }
 
     /// When the agent starts editing a deep file, expand its folders and
@@ -147,6 +164,7 @@ impl Render for TreeView {
                         let id = this.tree.visible()[row];
                         let n = this.tree.node(id);
                         let is_dir = n.is_dir();
+                        let ghost = n.ghost;
                         let rel = n.rel.clone();
                         let current = !is_dir && this.current.as_deref() == Some(this.tree.abs_path(id).as_path());
                         let (cell, folder) = match heat {
@@ -170,7 +188,9 @@ impl Render for TreeView {
                                 right = right.child(div().text_color(look.c(accent)).child("new"));
                             } else if st.binary {
                                 right = right.child(div().text_color(look.c(ui.text_muted)).child("bin"));
-                            } else if !st.deleted {
+                            } else if st.deleted {
+                                right = right.when(st.removed > 0, |d| d.child(div().text_color(look.c(look.theme.diff.removed_text)).child(format!("−{}", st.removed))));
+                            } else {
                                 right = right
                                     .when(st.added > 0, |d| d.child(div().text_color(look.c(look.theme.diff.added_text)).child(format!("+{}", st.added))))
                                     .when(st.removed > 0, |d| d.child(div().text_color(look.c(look.theme.diff.removed_text)).child(format!("−{}", st.removed))));
@@ -193,7 +213,7 @@ impl Render for TreeView {
                         // Background: heat tint by level, transient glows on top.
                         let base_bg = match state {
                             HeatState::Changed | HeatState::Created | HeatState::Deleted if level > 0 => Some(tint(accent, 0.05 + 0.05 * level as f32, &look)),
-                            HeatState::Changed | HeatState::Created => Some(tint(accent, 0.06, &look)),
+                            HeatState::Changed | HeatState::Created | HeatState::Deleted => Some(tint(accent, 0.06, &look)),
                             HeatState::Reading => Some(tint(accent, 0.22 * cell.map(|c| c.fade).unwrap_or(0.), &look)),
                             _ => None,
                         };
@@ -211,19 +231,21 @@ impl Render for TreeView {
                             .when(current, |d| d.bg(look.c(ui.active_bg)))
                             .when_some(base_bg.filter(|_| !current), |d, bg| d.bg(bg))
                             .when(state == HeatState::NeedsApproval, |d| d.border_1().border_color(look.c(accent)).rounded(look.z(3.)))
-                            .when(state == HeatState::Deleted, |d| d.line_through().opacity(0.5))
+                            // Deleted (or a folder of deleted files): struck through and dimmed.
+                            .when(state == HeatState::Deleted || ghost, |d| d.line_through().opacity(0.55))
                             .hover(|d| d.bg(look.c(ui.hover_bg)))
                             .cursor_pointer()
                             .children(chevron)
                             .when(!is_dir, |d| d.child(div().w(look.z(12.)).flex_none()))
                             .child(div().flex_1().min_w(px(0.)).truncate().child(n.name.clone()))
                             .child(right)
-                            .on_drag(DraggedFile { abs: this.tree.abs_path(id), label: n.name.clone().into() }, |f, _, _, cx| cx.new(|_| f.clone()))
+                            .when(!ghost, |d| d.on_drag(DraggedFile { abs: this.tree.abs_path(id), label: n.name.clone().into() }, |f, _, _, cx| cx.new(|_| f.clone())))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.last_user = Some(Instant::now());
                                 if this.tree.node(id).is_dir() {
                                     this.tree.toggle(id);
-                                } else {
+                                } else if !this.tree.node(id).ghost {
+                                    // A deleted file has nothing to open (Changes shows its diff).
                                     cx.emit(TreeEvent::Open(this.tree.abs_path(id)));
                                 }
                                 cx.notify();

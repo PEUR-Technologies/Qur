@@ -1,0 +1,135 @@
+//! Scripted-run state (`debug_state`) and benchmarks.
+
+use super::*;
+
+impl Workspace {
+    /// QUR_DEBUG_ACTIONS `state`: what scripted runs check instead of a
+    /// (possibly stale) screenshot.
+    pub fn debug_state(&self, cx: &App) -> String {
+        let overlay = match &self.overlay {
+            None => "none".to_string(),
+            Some(Overlay::Picker(..)) => "picker".into(),
+            Some(Overlay::GoTo(i)) => format!("goto:{:?}", i.read(cx).text),
+            Some(Overlay::Rename(i)) => format!("rename:{:?}", i.read(cx).text),
+            Some(Overlay::Setup(v)) => format!("settings:{}", v.read(cx).section_name()),
+            Some(Overlay::Accent) => "accent".into(),
+            Some(Overlay::AgentMenu { id, .. }) => format!("agent_menu:{id}"),
+            Some(Overlay::Layouts) => "layouts".into(),
+            Some(Overlay::About) => "about".into(),
+            Some(Overlay::Transparency { .. }) => "transparency".into(),
+            Some(Overlay::Gaps) => "gaps".into(),
+            Some(Overlay::NewTask { .. }) => "new_task".into(),
+            Some(Overlay::Review { input, .. }) => format!("review:{:?}", input.read(cx).text),
+        };
+        let selected = match &self.selected {
+            Some(Selected::Agent(id) | Selected::TermTask(id)) => {
+                let title = self.task_parts(id, cx).map(|p| p.2).unwrap_or_default();
+                format!("task:{id}:{title:?}")
+            }
+            Some(Selected::Shell(n)) => format!("shell:{n}"),
+            Some(Selected::Git) => "git".into(),
+            Some(_) => "other".into(),
+            None => "none".into(),
+        };
+        let code = match &self.code {
+            Some(c) => {
+                let e = c.read(cx);
+                let p = e.cursor();
+                let mode = e.vim.as_ref().and_then(|v| v.mode).map(|m| m.label()).unwrap_or("-");
+                let text: String = e.model.rope().to_string().chars().take(200).collect();
+                format!("{}@{}:{} vim={mode} dirty={} text={text:?}", e.title(), p.line + 1, p.col + 1, e.is_dirty())
+            }
+            None => "none".into(),
+        };
+        let vc = self.git.as_ref().map(|g| g.read(cx).debug_state(cx)).unwrap_or_else(|| "none".into());
+        let docks = format!("acp={} terminal={}", Docks::get(cx, dock::Kind::Acp).serialize(), Docks::get(cx, dock::Kind::Terminal).serialize());
+        let u = &self.config.ui;
+        let gaps = format!("on={} gap={} rounded={} radius={} border={} sidebar_w={}", u.gaps, u.gap, u.rounded, u.radius, u.tile_border, self.sidebar_w);
+        format!(
+            "overlay={overlay} selected={selected} code={code} term={{{}}} git={{{vc}}} docks={{{docks}}} gaps={{{gaps}}}",
+            self.terms.read(cx).debug_state(cx)
+        )
+    }
+
+    /// QUR_BENCH=glow: a terminal task's worktree gets 20 probe writes from a
+    /// background thread (like a formatter or codegen); each is timed from the
+    /// write until its row is painted glowing (acceptance: < 100 ms).
+    pub(super) fn bench_glow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.root.clone();
+        let dir = qur_agents::worktrees_dir(&self.project_id);
+        let bg = cx.background_executor().clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let created = bg.spawn(async move { qur_worktree::create(&root, &dir, "bench", "glow") }).await;
+            let Ok(c) = created else { return };
+            let wt = c.path.clone();
+            this.update_in(cx, |this, window, cx| {
+                let record = TaskRecord {
+                    id: c.slug.clone(),
+                    agent: "bench".into(),
+                    title: "glow bench".into(),
+                    branch: c.branch.clone(),
+                    worktree: c.path.clone(),
+                    base: c.base.clone(),
+                    session_id: None,
+                    created: 0,
+                    mode: Mode::Terminal,
+                    browser_url: None,
+                    renamed: false,
+                    in_root: false,
+                    queued: Vec::new(),
+                    turns: Vec::new(), review: None,
+                };
+                this.add_term_task(record, window, cx);
+                // Show the tree without starting a terminal process.
+                this.selected = Some(Selected::TermTask(c.slug.clone()));
+                let root = this.current_root(cx);
+                this.tree_for(&root, window, cx);
+                cx.notify();
+            })
+            .ok();
+            bg.timer(Duration::from_millis(1500)).await;
+            for i in 0..20 {
+                let p = wt.join(format!("glow-{i}.txt"));
+                std::fs::write(&p, "x\n").ok();
+                crate::tree_view::GLOW_WRITES.lock().unwrap().push((p, Instant::now()));
+                bg.timer(Duration::from_millis(400)).await;
+            }
+            bg.timer(Duration::from_millis(800)).await;
+            let mut v = crate::tree_view::GLOW_SEEN.lock().unwrap().clone();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            if !v.is_empty() {
+                println!("METRIC glow_n={}", v.len());
+                println!("METRIC glow_p50_ms={:.1}", v[v.len() / 2]);
+                println!("METRIC glow_max_ms={:.1}", v[v.len() - 1]);
+            }
+            println!("METRIC glow_missed={}", 20 - v.len());
+            this.update(cx, |this, cx| {
+                let _ = qur_worktree::remove(&this.root, &c.path, &c.branch, true);
+                cx.quit();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// QUR_BENCH=theme: switch through every theme, one per frame.
+    pub(super) fn bench_theme_step(&mut self, i: usize, mut samples: Vec<f64>, window: &mut Window, cx: &mut Context<Self>) {
+        let themes = Registry::global().all();
+        if i >= themes.len() * 2 {
+            samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let pct = |p: f64| samples[((samples.len() - 1) as f64 * p).round() as usize];
+            println!("METRIC theme_switch_n={}", samples.len());
+            println!("METRIC theme_switch_p50_ms={:.2}", pct(0.5));
+            println!("METRIC theme_switch_max_ms={:.2}", samples[samples.len() - 1]);
+            return cx.quit();
+        }
+        let t0 = Instant::now();
+        self.preview_theme = Some(themes[i % themes.len()].name.clone());
+        self.apply_look(window, cx);
+        let me = cx.entity();
+        window.on_next_frame(move |window, cx| {
+            samples.push(t0.elapsed().as_secs_f64() * 1000.0);
+            me.update(cx, |ws, cx| ws.bench_theme_step(i + 1, samples, window, cx));
+        });
+    }
+}

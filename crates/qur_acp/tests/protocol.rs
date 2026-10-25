@@ -136,6 +136,31 @@ fn full_turn_with_permission_and_clean_shutdown() {
 }
 
 #[test]
+fn two_permission_requests_wait_together() {
+    // Allow All Pending's ground: an agent may ask twice before either is answered.
+    let (client, mut rx) = fake(&[]);
+    let sid = start(&client);
+    let turn = client.prompt(&sid, vec![PromptBlock::Text("parallel".into())]);
+    let mut asked = Vec::new();
+    let evs = events_until(&mut rx, 10, |e| {
+        if let Event::Permission { id, tool_call, .. } = e {
+            asked.push((id.clone(), tool_call.id.clone()));
+        }
+        asked.len() == 2
+    });
+    assert_eq!(asked.iter().map(|(_, t)| t.to_string()).collect::<Vec<_>>(), ["w1", "w2"]);
+    let tools = evs.iter().filter(|e| matches!(e, Event::Update { update: SessionUpdate::ToolCall(_), .. })).count();
+    assert_eq!(tools, 5, "three finished calls, then the two edits");
+    for (id, _) in asked {
+        client.respond_permission(id, PermissionOutcome::Selected("allow".into()));
+    }
+    assert_eq!(wait(turn, 10).unwrap(), StopReason::EndTurn);
+    let evs = events_until(&mut rx, 10, |e| matches!(e, Event::Update { update: SessionUpdate::AgentMessage(c), .. } if c.text.starts_with("chose")));
+    assert_eq!(texts(&evs).last().map(String::as_str), Some("chose w1=allow w2=allow"));
+    client.shutdown(Duration::from_secs(2));
+}
+
+#[test]
 fn cancel_resolves_the_prompt() {
     let (client, mut rx) = fake(&[]);
     let sid = start(&client);
