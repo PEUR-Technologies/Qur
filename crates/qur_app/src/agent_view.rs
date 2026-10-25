@@ -247,6 +247,9 @@ pub struct AgentTask {
     chat: Vec<ChatItem>,
     tools: HashMap<ToolCallId, ToolCall>,
     list: ListState,
+    /// Text sizes and zoom the chat rows were measured at; the list caches
+    /// row heights, so a change re-measures them.
+    measured_at: (f32, f32, f32),
     plan: Vec<PlanEntry>,
     permission: Option<Permission>,
     pub prompt: Entity<PromptInput>,
@@ -383,6 +386,7 @@ impl AgentTask {
             chat: Vec::new(),
             tools: HashMap::new(),
             list,
+            measured_at: (0., 0., 0.),
             plan: Vec::new(),
             permission: None,
             prompt,
@@ -1306,6 +1310,7 @@ impl AgentTask {
             ChatItem::User(t) => pad(div())
                 .child(
                     div()
+                        .text_size(look.text(0.))
                         .px(look.z(10.))
                         .py(look.z(6.))
                         .rounded(look.z(6.))
@@ -2079,7 +2084,8 @@ impl AgentTask {
         let ui = look.theme.ui.clone();
         let me = cx.entity();
         let look2 = look.clone();
-        let chat = list(self.list.clone(), move |ix, _, cx| me.update(cx, |t, cx| t.render_item(ix, &look2, cx))).size_full();
+        // Sized here too, so nothing in a row falls back to GPUI's default size.
+        let chat = list(self.list.clone(), move |ix, _, cx| me.update(cx, |t, cx| t.render_item(ix, &look2, cx))).size_full().text_size(look.text(0.));
         // Scrolled up: a "↓" to jump back to the newest message.
         let jump = (!self.list.is_following_tail() && self.list.is_scrolled_to_end() == Some(false)).then(|| {
             div()
@@ -2308,6 +2314,11 @@ impl AgentTask {
 impl Render for AgentTask {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
+        let sizes = (look.ui_size, look.code_size, look.zoom);
+        if sizes != self.measured_at {
+            self.measured_at = sizes;
+            self.list.remeasure();
+        }
         let ui = look.theme.ui.clone();
         let header = self.header(&look, cx);
         // The stage is a dock you can rearrange (dock.rs).

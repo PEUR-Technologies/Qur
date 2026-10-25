@@ -2994,6 +2994,9 @@ impl Workspace {
     /// Rename Agent… (also double-click its button): the name sticks; an
     /// empty name goes back to following the agent.
     fn rename_agent(&mut self, _: &qur::RenameAgent, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Selected::Shell(tid)) = self.selected {
+            return self.rename_shell(tid, window, cx);
+        }
         let Some((id, ..)) = self.selected_worktree(cx) else {
             return self.flash("Select an agent first", cx);
         };
@@ -3010,6 +3013,32 @@ impl Workspace {
                 let name = input.read(cx).text.trim().to_string();
                 this.close_overlays(window, cx);
                 this.set_task_name(&id, name, cx);
+            }
+            InputEvent::Cancel => this.close_overlays(window, cx),
+            _ => {}
+        });
+        self._subs.push(sub);
+        let f = input.read(cx).focus.clone();
+        window.focus(&f, cx);
+        self.overlay = Some(Overlay::Rename(input));
+        cx.notify();
+    }
+
+    /// Rename for a shell under TERMINALS (double-click, or Rename with it selected).
+    fn rename_shell(&mut self, tid: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(current) = self.terms.read(cx).session_by_id(tid).map(|s| if s.renamed { s.label.clone() } else { String::new() }) else { return };
+        self.close_overlays(window, cx);
+        self.prev_focus = window.focused(cx);
+        let input = cx.new(|cx| {
+            let mut i = TextInput::new("Terminal name (empty = show what's running)", cx);
+            i.set_text(&current, cx);
+            i
+        });
+        let sub = cx.subscribe_in(&input, window, move |this, input, ev: &InputEvent, window, cx| match ev {
+            InputEvent::Confirm { .. } => {
+                let name = input.read(cx).text.trim().to_string();
+                this.close_overlays(window, cx);
+                this.terms.update(cx, |p, cx| p.rename(tid, &name, cx));
             }
             InputEvent::Cancel => this.close_overlays(window, cx),
             _ => {}
@@ -4114,9 +4143,14 @@ impl Workspace {
                 let s = panel.session_by_id(tid)?;
                 let sel = self.selected == Some(Selected::Shell(tid));
                 Some(
-                    self.session_row(format!("sh-{tid}").into(), None, s.label.clone(), String::new(), if s.is_busy() { "~" } else { "" }, sel, look)
+                    self.session_row(format!("sh-{tid}").into(), None, s.display_label(), String::new(), if s.is_busy() { "~" } else { "" }, sel, look)
                         .group("shell-row")
-                        .on_click(cx.listener(move |this, _, window, cx| this.select(Some(Selected::Shell(tid)), window, cx)))
+                        .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
+                            this.select(Some(Selected::Shell(tid)), window, cx);
+                            if ev.click_count() == 2 {
+                                this.rename_agent(&qur::RenameAgent, window, cx);
+                            }
+                        }))
                         // Close the terminal (and its splits), shown on hover.
                         .child(
                             div()
@@ -4803,6 +4837,8 @@ impl Render for Workspace {
             .flex()
             .flex_col()
             .font_family(look.ui_font.clone())
+            // The base for any text that doesn't set its own size (it follows Text Size and zoom).
+            .text_size(look.text(0.))
             .text_color(look.c(ui.text))
             // Regions paint their own (translucent) backgrounds.
             .bg(look.surface(ui.window_bg))
