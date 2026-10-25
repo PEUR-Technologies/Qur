@@ -78,6 +78,7 @@ One window is one project. There's no permanent editor area: the window is for a
 ### Review and merge
 
 - Review the task's diff and comment on lines; comments go back to the agent as one message.
+- **Turns** (structured agents): each turn that changed files ends with a line like "3 files · +12 −4 · View · Rewind". **View** shows just that turn's changes in Changes (comment as usual; **All changes** goes back). **Rewind** puts the worktree's files back to how they were before that turn, after asking: it stops the agent first if it's working, warns if files changed since the turn ended, and tells the agent with your next message. Commits stay. Also Agent > Show Last Turn's Changes and Rewind Last Turn…. Qur keeps a snapshot at the start and end of each turn (a git tree in the task's worktree, pinned under `refs/qur/turns/<task>/`, deleted on Discard or after Merge); your own checkout, index and stash are never touched. Agent Terminals have no turns yet.
 - A pre-check warns about conflicts. **Merge** never touches your staged changes or stash.
 - Resolve conflicts in-app (Accept Ours / Theirs / Both, then Finish or Abort; also in Agent > Merge Conflicts), and stage and commit in the Git panel.
 - Discard removes the task's worktree and branch.

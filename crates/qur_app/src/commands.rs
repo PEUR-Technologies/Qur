@@ -26,6 +26,7 @@ pub mod qur {
             KeepWorking, DiscardTask, OpenWorktreeInTerminal, RevealWorktree, KeyboardShortcuts,
             RunDoctor, ShowLogs, ReportProblem, ExpandSelection, ShrinkSelection,
             RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge, Caffeinate, ShowKeepAwake, SwitchSession, ZenMode,
+            ShowLastTurn, RewindLastTurn,
         ]
     );
 
@@ -329,6 +330,8 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(agent::Deny, "Agent", "Permission: Deny", "cmd-alt-z", PERM, R),
     cmd!(agent::CycleMode, "Agent", "Next Mode (Default / Accept Edits / Plan…)", "shift-tab", Some("AgentView"), R),
     cmd!(qur::ReviewChanges, "Agent", "Review Changes", "", W, R),
+    cmd!(qur::ShowLastTurn, "Agent", "Show Last Turn's Changes", "", W, R),
+    cmd!(qur::RewindLastTurn, "Agent", "Rewind Last Turn…", "", W, R),
     cmd!(qur::Merge, "Agent", "Merge into My Branch", "", W, R),
     cmd!(qur::KeepWorking, "Agent", "Keep Working", "", W, R),
     cmd!(qur::RenameAgent, "Agent", "Rename Agent…", "", W, R),
@@ -392,6 +395,12 @@ pub static COMMANDS: &[Cmd] = &[
 
 pub fn find(action: &dyn Action) -> Option<&'static Cmd> {
     COMMANDS.iter().find(|c| (c.action)().partial_eq(action))
+}
+
+/// Commands that need the selected agent to have a turn (disabled otherwise).
+pub fn needs_turn(c: &Cmd) -> bool {
+    let a = (c.action)();
+    a.partial_eq(&qur::ShowLastTurn) || a.partial_eq(&qur::RewindLastTurn)
 }
 
 /// Commands shown in the palette (not the low-level cursor/input ones).
@@ -523,6 +532,8 @@ pub struct MenuState {
     pub recent: Vec<PathBuf>,
     /// A merge stopped on conflicts: the Merge Conflicts items are enabled.
     pub merging: bool,
+    /// The selected agent has a turn to show or rewind (ACP agents only).
+    pub turns: bool,
     pub vim: bool,
     pub keep_awake: bool,
     pub zen: bool,
@@ -702,6 +713,8 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::SwitchSession),
             sep(),
             item(qur::ReviewChanges),
+            item(qur::ShowLastTurn).disabled(!s.turns),
+            item(qur::RewindLastTurn).disabled(!s.turns),
             item(qur::Merge),
             item(qur::KeepWorking),
             item(qur::RunChecks),

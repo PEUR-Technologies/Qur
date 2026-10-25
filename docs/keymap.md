@@ -138,6 +138,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+C/X/V/A/Z`, `Shift+Cmd+Z` (in a page) | Copy, cut, paste, select all, undo, redo in the page | Browser ✅ |
 | Changes view / Agent menu | Merge into My Branch, Keep Working, Discard Task…, Review Changes | M4 ✅ |
 | Agent menu | Run Checks Now, Run Project in Worktree (no default keys) | ✅ |
+| Agent menu / chat turn line | Show Last Turn's Changes, Rewind Last Turn… (structured agents; no default keys) | ✅ |
 | `Cmd+F` (in a terminal) | Find in Terminal (regex; ↩ older, ⇧↩ newer, Esc closes) | M5 ✅ |
 | `Cmd`-click (in a terminal) | Open a URL, or `path:line:col` in the code modal | M5 ✅ |
 | Agent menu / double-click a button | Rename Agent… | M5 ✅ |

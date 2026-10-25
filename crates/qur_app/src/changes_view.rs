@@ -165,8 +165,19 @@ pub fn diff_row(files: &[FileDiff], row: Row, look: &Look, collapsed: bool) -> g
     }
 }
 
+/// Changes filtered to one agent turn (its checkpoints).
+#[derive(Clone)]
+pub struct TurnFilter {
+    pub n: u32,
+    pub start: String,
+    /// None while the turn runs: up to the worktree as it is now.
+    pub end: Option<String>,
+}
+
 pub struct ChangesView {
     pub worktree: PathBuf,
+    /// Showing one turn's changes instead of the whole task's.
+    pub turn: Option<TurnFilter>,
     base: String,
     pub files: Vec<FileDiff>,
     pub totals: (u32, u32),
@@ -192,6 +203,7 @@ impl ChangesView {
     pub fn new(root: PathBuf, worktree: PathBuf, base: String, branch: String, cx: &mut Context<Self>) -> Self {
         let mut v = ChangesView {
             worktree,
+            turn: None,
             base,
             files: Vec::new(),
             totals: (0, 0),
@@ -212,15 +224,40 @@ impl ChangesView {
         v
     }
 
+    /// Show what one turn changed (the chat's View, Show Last Turn's Changes).
+    pub fn show_turn(&mut self, n: u32, start: String, end: Option<String>, cx: &mut Context<Self>) {
+        if self.turn.as_ref().map(|t| t.n) != Some(n) {
+            self.files.clear();
+            self.collapsed.clear();
+            self.draft = None;
+        }
+        self.turn = Some(TurnFilter { n, start, end });
+        self.refresh(cx);
+    }
+
+    /// Back to everything the task changed (Review Changes, Show All).
+    pub fn show_all(&mut self, cx: &mut Context<Self>) {
+        if self.turn.take().is_some() {
+            self.files.clear();
+            self.collapsed.clear();
+            self.draft = None;
+        }
+        self.refresh(cx);
+    }
+
     /// Recompute the diff and the conflict pre-check off the UI thread.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let (wt, base, root, branch) = (self.worktree.clone(), self.base.clone(), self.root.clone(), self.branch.clone());
+        let turn = self.turn.clone();
         let bg = cx.background_executor().clone();
         self.loading = true;
         self.refresh_task = Some(cx.spawn(async move |this, cx| {
             let (diff, conflicts) = bg
                 .spawn(async move {
-                    let diff = qur_git::task_diff(&wt, &base);
+                    let diff = match turn {
+                        Some(t) => t.end.map(Ok).unwrap_or_else(|| qur_git::snapshot_tree(&wt)).and_then(|end| qur_git::tree_diff(&wt, &t.start, &end)),
+                        None => qur_git::task_diff(&wt, &base),
+                    };
                     // Pre-check what the merge would do, including uncommitted work:
                     // `git stash create` makes a commit object without touching anything.
                     let tip = qur_worktree::git(&wt, &["stash", "create"]).ok().filter(|s| !s.is_empty()).unwrap_or(branch);
@@ -335,6 +372,7 @@ impl Render for ChangesView {
                             .flex()
                             .gap(look.z(6.))
                             .text_size(look.text(-1.))
+                            .children(self.turn.as_ref().map(|t| div().text_color(look.c(ui.text)).font_weight(gpui::FontWeight::MEDIUM).child(format!("Turn {}:", t.n))))
                             .child(div().text_color(look.c(ui.text)).child(if self.loading && n == 0 { "Loading changes…".to_string() } else { format!("{n} file{} changed", if n == 1 { "" } else { "s" }) }))
                             .child(div().text_color(look.c(look.theme.diff.added_text)).child(format!("+{}", self.totals.0)))
                             .child(div().text_color(look.c(look.theme.diff.removed_text)).child(format!("−{}", self.totals.1))),
@@ -351,6 +389,7 @@ impl Render for ChangesView {
                 let c = self.comments.len();
                 d.child(button(format!("Send {c} comment{}", if c == 1 { "" } else { "s" }).into(), "send-comments", false).on_click(cx.listener(|v, _, _, cx| v.send_comments(cx))))
             })
+            .when(self.turn.is_some(), |d| d.child(button("All changes".into(), "changes-all", false).on_click(cx.listener(|v, _, _, cx| v.show_all(cx)))))
             .child(button("Refresh".into(), "changes-refresh", false).on_click(cx.listener(|v, _, _, cx| v.refresh(cx))))
             .child(button("Discard…".into(), "changes-discard", false).on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesEvent::Discard))))
             .child(button("Keep working".into(), "changes-keep", false).on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesEvent::KeepWorking))))
@@ -358,7 +397,7 @@ impl Render for ChangesView {
         let rows = self.rows();
         let count = rows.len();
         let body = if n == 0 && !self.loading {
-            div().flex_1().flex().items_center().justify_center().text_color(look.c(ui.text_muted)).child("No changes yet.").into_any_element()
+            div().flex_1().flex().items_center().justify_center().text_color(look.c(ui.text_muted)).child(if self.turn.is_some() { "This turn changed no files." } else { "No changes yet." }).into_any_element()
         } else {
             uniform_list(
                 "changes",

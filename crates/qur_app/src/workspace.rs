@@ -496,6 +496,7 @@ impl Workspace {
             soft_wrap: self.code.as_ref().map(|e| e.read(cx).soft_wrap()).unwrap_or(self.config.editor.soft_wrap),
             recent: qur_config::State::load().recent_projects,
             merging: self.merge.is_some(),
+            turns: self.selected_last_turn(cx).is_some(),
             vim: self.config.keys.vim,
             keep_awake: self.config.ui.keep_awake,
             zen: self.config.ui.zen,
@@ -879,6 +880,11 @@ impl Workspace {
                 cx.notify();
             }
             AgentEvent::Subagents => cx.notify(),
+            AgentEvent::TurnsChanged => this.sync_menus(cx),
+            AgentEvent::Rewind(n) => {
+                let id = a.read(cx).record.id.clone();
+                this.rewind_turn(&id, *n, window, cx);
+            }
             AgentEvent::SlashRequested => {
                 let (cmds, opts, target) = {
                     let a = a.read(cx);
@@ -981,6 +987,7 @@ impl Workspace {
                         renamed: false,
                         in_root: false,
                         queued: Vec::new(),
+                        turns: Vec::new(),
                     };
                     let debug_browser = std::env::var_os("QUR_DEBUG_BROWSER_URL").is_some();
                     match def.mode {
@@ -1074,6 +1081,7 @@ impl Workspace {
                 renamed: false,
                 in_root: true,
                 queued: Vec::new(),
+                turns: Vec::new(),
             };
             let id = record.id.clone();
             self.add_term_task(record, window, cx);
@@ -1112,6 +1120,7 @@ impl Workspace {
                         renamed: false,
                         in_root: false,
                         queued: Vec::new(),
+                        turns: Vec::new(),
                     };
                     this.add_term_task(record, window, cx);
                     this.apply_look(window, cx);
@@ -1774,11 +1783,15 @@ impl Workspace {
         }
         let root = self.root.clone();
         let bg = cx.background_executor().clone();
+        let id = id.to_string();
         cx.spawn_in(window, async move |this, cx| {
             let r = bg
                 .spawn(async move {
                     if let Some(h) = handle {
                         let _ = h.join();
+                    }
+                    if let Err(e) = qur_git::delete_turn_refs(&root, &id) {
+                        eprintln!("TURN {id} refs: {e}");
                     }
                     qur_worktree::remove(&root, &wt, &branch, true)
                 })
@@ -2057,6 +2070,98 @@ impl Workspace {
         }
     }
 
+    /// The selected ACP agent and its newest turn that can be shown or
+    /// rewound. Agent Terminals have no turn boundaries (none).
+    fn selected_last_turn(&self, cx: &App) -> Option<(Entity<AgentTask>, u32)> {
+        let a = self.selected_agent()?;
+        let n = a.read(cx).record.last_turn()?.n;
+        Some((a, n))
+    }
+
+    fn show_last_turn(&mut self, _: &qur::ShowLastTurn, _: &mut Window, cx: &mut Context<Self>) {
+        match self.selected_last_turn(cx) {
+            Some((a, n)) => a.update(cx, |a, cx| a.show_turn(n, cx)),
+            None => self.no_turn_message(cx),
+        }
+    }
+
+    fn rewind_last_turn(&mut self, _: &qur::RewindLastTurn, window: &mut Window, cx: &mut Context<Self>) {
+        match self.selected_last_turn(cx) {
+            Some((a, n)) => {
+                let id = a.read(cx).record.id.clone();
+                self.rewind_turn(&id, n, window, cx);
+            }
+            None => self.no_turn_message(cx),
+        }
+    }
+
+    fn no_turn_message(&mut self, cx: &mut Context<Self>) {
+        let msg = match &self.selected {
+            Some(Selected::TermTask(_)) => "Agent Terminals have no turns to show or rewind yet",
+            Some(Selected::Agent(_)) => "No turn has changed files yet",
+            _ => "Select an agent first",
+        };
+        self.flash(msg, cx);
+    }
+
+    /// Rewind: ask (warning when files changed since the turn ended), then
+    /// the agent stops if needed and its worktree goes back to before turn N.
+    fn rewind_turn(&mut self, id: &str, n: u32, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(a) = self.agent(id).cloned() else { return };
+        let (wt, label, running, turn, later, last_end) = {
+            let t = a.read(cx);
+            let r = &t.record;
+            let Some(turn) = r.turn(n).cloned() else { return };
+            let later = r.turns.iter().filter(|x| x.n > n && !x.rewound).count();
+            (r.worktree.clone(), t.def.label.clone(), t.turn_running(), turn, later, r.last_turn().and_then(|x| x.end.clone()))
+        };
+        if turn.rewound {
+            return self.flash(format!("Turn {n} was already rewound"), cx);
+        }
+        let bg = cx.background_executor().clone();
+        cx.spawn_in(window, async move |this, cx| {
+            // Changed since the last turn ended (by hand, or another program)?
+            let by_hand = match (running, last_end) {
+                (false, Some(end)) => bg.spawn(async move { qur_git::snapshot_tree(&wt).map(|now| now != end).unwrap_or(false) }).await,
+                _ => false,
+            };
+            this.update_in(cx, |_, window, cx| {
+                let mut detail = format!(
+                    "The files in this agent's worktree go back to how they were before turn {n} ({} file{}, +{} −{}).",
+                    turn.files,
+                    if turn.files == 1 { "" } else { "s" },
+                    turn.added,
+                    turn.removed
+                );
+                if later > 0 {
+                    detail.push_str(&format!(" This also undoes the {later} turn{} after it.", if later == 1 { "" } else { "s" }));
+                }
+                if running {
+                    detail.push_str(&format!(" {label} is working: it will be stopped first."));
+                }
+                if by_hand {
+                    detail.push_str("
+
+Files in the worktree changed after the turn ended (by you or another program). Rewinding loses those changes too.");
+                }
+                detail.push_str(&format!("
+
+Commits stay; {label} is told with your next message."));
+                let title = if later == 0 { "Rewind the last turn?".to_string() } else { format!("Rewind to before turn {n}?") };
+                let answer = ask(window, PromptLevel::Warning, &title, Some(&detail), &["Rewind", "Cancel"], cx);
+                let a = a.clone();
+                cx.spawn(async move |_, cx| {
+                    if answer.await.ok() == Some(0) {
+                        a.update(cx, |a, cx| a.rewind(n, cx));
+                    }
+                })
+                .detach();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn keep_working(&mut self, _: &qur::KeepWorking, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.selected, Some(Selected::TermTask(_))) {
             Docks::update(cx, dock::Kind::Terminal, |d| d.activate(dock::Panel::Session));
@@ -2307,6 +2412,9 @@ impl Workspace {
                 .spawn(async move {
                     if let Some(h) = handle {
                         let _ = h.join();
+                    }
+                    if let Err(e) = qur_git::delete_turn_refs(&root, &id) {
+                        eprintln!("TURN {id} refs: {e}");
                     }
                     qur_worktree::remove(&root, &wt, &branch, true)
                 })
@@ -2939,6 +3047,7 @@ impl Workspace {
             return self.close_overlays(window, cx);
         }
         let cmds: Vec<_> = commands::palette_commands().collect();
+        let turns = self.selected_last_turn(cx).is_some();
         let items = cmds
             .iter()
             .map(|c| {
@@ -2946,7 +3055,8 @@ impl Workspace {
                     commands::Tier::Ready => commands::display_keys(&c.first_keys()),
                     commands::Tier::Later(m) => format!("coming in {m}"),
                 };
-                PickItem::new(format!("{}: {}", c.category, c.title)).right(right).enabled(c.ready())
+                let available = turns || !commands::needs_turn(c);
+                PickItem::new(format!("{}: {}", c.category, c.title)).right(right).enabled(c.ready() && available)
             })
             .collect();
         self.open_picker("Type a command…", items, PickKind::Commands(cmds), false, window, cx);
@@ -3236,6 +3346,9 @@ impl Workspace {
             ("Open Folder in Terminal", || Box::new(qur::OpenWorktreeInTerminal), true, false),
         ];
         if acp {
+            let turns = self.agent(id).is_some_and(|a| a.read(cx).record.last_turn().is_some());
+            items.push(("Show Last Turn's Changes", || Box::new(qur::ShowLastTurn), turns, false));
+            items.push(("Rewind Last Turn…", || Box::new(qur::RewindLastTurn), turns, false));
             items.push(("Stop", || Box::new(qur::StopAgent), true, false));
         }
         items.push((if in_root { "Close Agent…" } else { "Delete Agent…" }, || Box::new(qur::DiscardTask), true, true));
@@ -3822,6 +3935,7 @@ impl Workspace {
                     renamed: false,
                     in_root: false,
                     queued: Vec::new(),
+                    turns: Vec::new(),
                 };
                 this.add_term_task(record, window, cx);
                 // Show the tree without starting a terminal process.
@@ -5054,6 +5168,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::finish_merge_action))
             .on_action(cx.listener(Self::abort_merge_action))
             .on_action(cx.listener(Self::review_changes))
+            .on_action(cx.listener(Self::show_last_turn))
+            .on_action(cx.listener(Self::rewind_last_turn))
             .on_action(cx.listener(Self::keep_working))
             .on_action(cx.listener(Self::cycle_layout))
             .on_action(cx.listener(Self::layout_a))
