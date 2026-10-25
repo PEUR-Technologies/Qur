@@ -2,7 +2,7 @@
 
 **See what your agents see.** A native macOS editor for running AI coding agents: each one gets its own worktree, and the file tree lights up as it works.
 
-Rust + GPUI · no Electron · runs locally · uses your Claude Code login, not an API key · pre-release 0.1, macOS only
+Rust + GPUI · no Electron · runs locally · uses your Claude Code or Codex login, not an API key · pre-release 0.1, macOS only
 
 ![Live heatmap: files glow as the agent writes them; Live follows the file](docs/images/heatmap-live.png)
 
@@ -22,9 +22,11 @@ Rust + GPUI · no Electron · runs locally · uses your Claude Code login, not a
 - **Heatmap.** See which files are being read and edited.
 - **Live.** Follow the agent's cursor. Take over anytime.
 - **Review → Merge.** Comment on lines, send them back, merge.
+- **Rewind.** Undo an agent's last turn.
+- **Second opinion.** Another agent reviews the work, read-only.
 - **Checks.** `cargo check` (or anything) after every turn.
 - **Alerts.** Notification and Dock badge when it's your turn.
-- **Any CLI agent.** Claude Code, Aider, …
+- **Any CLI agent.** Claude Code, Codex, Aider, …
 - **Editor.** 13 languages, multi-cursor, Vim, 17 themes.
 
 ## Light
