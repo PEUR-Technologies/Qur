@@ -1495,10 +1495,10 @@ impl Workspace {
                     a.update(cx, |a, cx| a.set_view(v, cx));
                 }
             }
-            Some(Selected::TermTask(id)) => {
-                if self.term_task(&id).is_some() && dock::Kind::Terminal.panels().contains(&v.panel()) {
-                    Docks::update(cx, dock::Kind::Terminal, |d| d.activate(v.panel()));
-                }
+            Some(Selected::TermTask(id))
+                if self.term_task(&id).is_some() && dock::Kind::Terminal.panels().contains(&v.panel()) =>
+            {
+                Docks::update(cx, dock::Kind::Terminal, |d| d.activate(v.panel()));
             }
             _ => {}
         }
@@ -1647,7 +1647,7 @@ impl Workspace {
                     this.offer_cleanup(&id, window, cx);
                 }
                 Ok(qur_git::MergeOutcome::Refused { reason }) => {
-                    let _ = ask(window, PromptLevel::Warning, "Merge not started", Some(&reason), &["OK"], cx);
+                    drop(ask(window, PromptLevel::Warning, "Merge not started", Some(&reason), &["OK"], cx));
                 }
                 Ok(qur_git::MergeOutcome::Conflicts { files }) => {
                     let detail = format!(
@@ -3038,7 +3038,7 @@ impl Workspace {
                 let text = crate::doctor::render(&checks);
                 crate::log(&format!("doctor:\n{text}"));
                 let title = if fails == 0 { "Qur Doctor: all good".to_string() } else { format!("Qur Doctor: {fails} problem(s)") };
-                let _ = ask(window, if fails == 0 { PromptLevel::Info } else { PromptLevel::Warning }, &title, Some(&text), &["OK"], cx);
+                drop(ask(window, if fails == 0 { PromptLevel::Info } else { PromptLevel::Warning }, &title, Some(&text), &["OK"], cx));
                 this.message = None;
                 cx.notify();
             })
