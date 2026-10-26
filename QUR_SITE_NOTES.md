@@ -114,6 +114,8 @@ Only compare sizes and these facts. We haven't measured Orca's or Superset's mem
 - **More agents, built in.** Gemini CLI, opencode, GitHub Copilot and Cursor join Claude Code and Codex as structured agents (Agent Client Protocol). Settings lists each one as soon as it's installed; tick it to use it.
 - **Add any agent from Settings.** Settings > Agents > Add agent: a name, the command, and whether it runs as a structured agent or in a terminal. No config file to edit. Agents added by hand in `agents.toml` show up in Settings too.
 - **Agent dropdown in New Agent Task.** Pick the agent from one dropdown instead of a row of buttons, so the dialog stays tidy however many agents you have.
+- **Smoother auto-hide sidebar.** It slides in and out like zen's bar, with the panes easing over alongside it.
+- **Fill the screen with gaps.** With window gaps on, the green button fills the screen on your current desktop, so the tiles stay over your wallpaper. Option-click still gives full screen on its own desktop.
 
 **Before putting these on the site:**
 - None of the four new agents has been run in Qur yet. Only Claude Code and Codex have been tried. Try each one before naming it on the site.
