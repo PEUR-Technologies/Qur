@@ -195,7 +195,7 @@ Measured on a MacBook Air M5 with `scripts/budget.sh` ([docs/budget.md](budget.m
 | Agent link | Terminal or ACP (structured) | Terminal by default; structured chat experimental | Terminal by default; optional ACP chat |
 | Live view of the agent's current file, with Take over | Yes | — | — |
 | File-tree heatmap of agent activity | Yes | — | — |
-| Permissions | Asked in a permission bar by default | Permission-bypass flags by default | Bypass flags by default for Claude Code and Codex |
+| Permissions | No bypass flags; asked in a permission bar (structured Claude sessions start in the adapter's `auto` mode, which asks less) | Permission-bypass flags by default | Bypass flags by default for Claude Code and Codex |
 | Shipping changes | Local Merge into your branch (index- and stash-safe) | Push and pull request | Commit, push and pull request |
 | Browser + element inspect | System WebKit, freed when idle | Bundled Chromium | Bundled Chromium (Electron webview) |
 | Telemetry / background daemon | None / none (`lsof` shows no sockets in Qur's process) | Opt-out telemetry / keeps terminals alive after quit | PostHog and Sentry / agents keep running after ⌘Q |

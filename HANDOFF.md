@@ -140,7 +140,6 @@ Scripted runs (all with a scratch `QUR_HOME`):
 2. **Distribution:** Developer ID signing and notarization need the owner's Apple Developer account (`docs/signing.md`); until then a downloaded copy has to be allowed in System Settings > Privacy & Security.
 3. **Unfinished work from v0.1.6, on branches, not merged** (decision 69; each is a WIP commit on its branch, in a worktree under `.claude/worktrees/`): Notepad++-style file handling (`worktree-agent-adbffc7e784c3ed96`), chat history on disk and saved chats plus `[terminal] scrollback` (`worktree-agent-a5990a81cff81245e`), freeing closed files (`worktree-agent-a5afeca830e21b964`), memory checks and readout plus the `budget.sh` 3-agent fix (`worktree-agent-abd94ed8d93fb57d1`), crash logs (`worktree-agent-a30af04da749c0698`), commit messages from turns (`worktree-agent-a06f2f78f43da85e7`), worktree cleanup (`worktree-cleanup`), the no-project window (`worktree-agent-a5ed59d593ee753d0`), Reveal in Finder / Copy Path (`worktree-agent-a56988ddc70006843`). They're based on 06b394e: rebase or merge onto main, finish, test.
 4. **`budget.sh`'s 3-agent number is suspect:** it starts three tasks with the same prompt, so they get the same worktree name and two fail; the recorded 129 MB is probably one agent (fixed on the memory-checks branch).
-5. **claude-agent-acp starts sessions in `auto` mode**, not Manual: the guide's "asked in a permission bar by default" depends on it. Owner to decide whether Qur switches new sessions to the default mode.
 4. **On hold (owner's notes):** a window background image or GIF with blur and readable text.
 5. **Known gaps:**
    - **qur_git:** `root` must be the top of the checkout; `diff --cc` entries are skipped; a change to only the final newline shows no marker; submodules and fsmonitor are untested; a gpgsign passphrase prompt could block commits.
@@ -153,4 +152,3 @@ Scripted runs (all with a scratch `QUR_HOME`):
 ## Open questions for the owner
 
 - Trademark clearance for "Qur" hasn't been done (the README says so).
-- Should new ACP sessions start in Manual instead of the adapter's `auto` mode?
