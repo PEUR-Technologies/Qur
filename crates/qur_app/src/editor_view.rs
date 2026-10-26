@@ -21,6 +21,9 @@ use crate::commands::{edit, editor as ea};
 use crate::input::{InputEvent, TextInput};
 use crate::look::Look;
 
+mod diff;
+pub use diff::DiffBase;
+
 /// `qur_syntax::TextSource` over a rope (no flattening).
 pub struct RopeText(pub Rope);
 
@@ -48,6 +51,8 @@ pub enum EditorEvent {
     Changed,
     /// A user-facing error (save failed, ...).
     Error(String),
+    /// A short note for the top bar ("No changes vs HEAD").
+    Message(String),
     /// Soft wrap toggled (menu checkmark).
     WrapToggled,
     /// Esc with nothing left to dismiss: close the code modal (decision 18).
@@ -110,6 +115,8 @@ pub struct EditorView {
     /// Opened during a merge with conflicts: show the resolve bar (M4).
     pub merge_conflicts: bool,
     conflict_cache: Option<(u64, Vec<qur_git::Conflict>)>,
+    /// Change markers vs the task's base or HEAD (code modal only).
+    diff: Option<diff::GutterDiff>,
     /// IME composition (marked text): drawn underlined at the primary
     /// cursor, not in the buffer until committed (then typed at every cursor).
     marked: Option<Marked>,
@@ -174,6 +181,7 @@ impl EditorView {
             disk_changed: false,
             merge_conflicts: false,
             conflict_cache: None,
+            diff: None,
             marked: None,
             bench,
         };
@@ -350,6 +358,7 @@ impl EditorView {
                 self.hl_cache = None;
                 self.wrap_cols = None;
                 self.disk_changed = false;
+                self.schedule_diff(false, cx);
                 cx.emit(EditorEvent::Changed);
                 cx.notify();
             }
@@ -467,6 +476,7 @@ impl EditorView {
     fn after_edit(&mut self, cx: &mut Context<Self>) {
         let edits = self.model.take_edits();
         self.hl_cache = None;
+        self.schedule_diff(true, cx);
         // Still parsing the file: that parse restarts itself on a version change.
         let Some(s) = self.syntax.as_mut() else { return };
         for e in &edits {
@@ -782,6 +792,9 @@ impl EditorView {
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         self.last_user_input = Some(Instant::now());
+        if self.gutter_click(ev, cx) {
+            return;
+        }
         let p = self.hit(ev.position);
         match ev.click_count {
             2 => self.model.select_word_at(p),
@@ -977,7 +990,8 @@ simple! {
 }
 
 impl EditorView {
-    /// Esc steps out one layer at a time: find bar, extra cursors, then the modal.
+    /// Esc steps out one layer at a time: a change's peek, find bar, extra
+    /// cursors, then the modal.
     fn a_escape(&mut self, _: &ea::Escape, window: &mut Window, cx: &mut Context<Self>) {
         // Vim first: leave insert/visual or drop a pending command. Plain
         // normal mode falls through, so Esc still closes the modal.
@@ -985,6 +999,9 @@ impl EditorView {
             && (v.mode() != VimMode::Normal || !v.pending_text().is_empty())
         {
             self.vim_key(VimKey::Esc, cx);
+            return;
+        }
+        if self.close_peek(cx) {
             return;
         }
         if self.find.is_some() {
@@ -1439,6 +1456,7 @@ impl Element for EditorElement {
 
         let mut under = Vec::new();
         let mut carets = Vec::new();
+        let markers = v.diff_quads(&pre.rows, bounds, &look);
         let sels = v.model.selections();
         let primary = v.model.primary();
         let x_at = |row: &Row, col: usize| -> Pixels {
@@ -1515,6 +1533,9 @@ impl Element for EditorElement {
                 if let Some(g) = &row.gutter {
                     g.paint(point(gutter_x + look.z(8.), row.y), lh, gpui::TextAlign::Left, None, window, cx).ok();
                 }
+            }
+            for q in markers {
+                window.paint_quad(q);
             }
             window.with_content_mask(Some(ContentMask { bounds: text_clip }), |window| {
                 for row in &pre.rows {
@@ -1809,12 +1830,14 @@ impl Render for EditorView {
                 div()
                     .flex_1()
                     .min_h(px(0.))
+                    .relative()
                     .cursor_text()
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_scroll(cx.listener(Self::on_scroll))
-                    .child(EditorElement { view: cx.entity() }),
+                    .child(EditorElement { view: cx.entity() })
+                    .children(self.peek_view(&look, cx)),
             )
     }
 }

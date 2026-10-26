@@ -46,6 +46,8 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Indent `Cmd+]` · Outdent `Cmd+[`
 - Trim Trailing Whitespace
 - ---
+- Changes ▸ Next Change `Opt+F5` · Previous Change `Shift+Opt+F5` · Show Change `Opt+F3` · Revert Change · Accept Change · --- · Last Turn Only (checkmark) (the code modal's change markers: an agent's changes vs its task's base, your own files vs HEAD)
+- ---
 - Vim Mode (checkmark)
 - ---
 - (macOS adds Start Dictation / Emoji & Symbols)
@@ -89,6 +91,8 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Back `Ctrl+-` · Forward `Ctrl+Shift+-`
 - Next / Previous Recent File `Ctrl+Tab`
 - Jump to Matching Bracket
+- ---
+- Next Change `Opt+F5` · Previous Change `Shift+Opt+F5` (also in Edit > Changes)
 
 ## Agent
 - New Agent Task… `Cmd+Shift+N` · New Agent Terminal `Cmd+Shift+T`

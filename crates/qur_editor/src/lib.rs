@@ -154,6 +154,7 @@ pub struct FindOptions {
 }
 
 mod commands;
+pub mod diff;
 mod find;
 #[cfg(test)]
 mod tests;
@@ -595,6 +596,19 @@ impl Editor {
         }
         let mut out = self.find_next();
         out.text_changed = true;
+        out
+    }
+
+    /// Replace whole lines `lines` (0-based, half-open; the end may be the
+    /// line count) with `text`, as one undo step of its own. The caret goes
+    /// to the start of the new text. Reverting a change hunk uses it.
+    pub fn replace_lines(&mut self, lines: Range<usize>, text: &str) -> Outcome {
+        let n = self.rope.len_lines();
+        let (a, b) = (self.rope.line_to_char(lines.start.min(n)), self.rope.line_to_char(lines.end.min(n)));
+        let text = text::normalize_newlines(text).into_owned();
+        self.break_group = true;
+        let out = self.commit(vec![Change::new(a, b.max(a), text, 0, self.primary)], Plan::Carets, Kind::Other);
+        self.break_group = true;
         out
     }
 

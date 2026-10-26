@@ -102,6 +102,7 @@ impl Workspace {
             self.code_prev_focus = window.focused(cx);
         }
         self.code = Some(buf.clone());
+        self.load_diff_base(&buf, cx);
         if let Some(p) = at {
             buf.update(cx, |b, cx| b.set_cursor(p, cx));
         }
@@ -203,7 +204,7 @@ impl Workspace {
                 }
                 cx.notify();
             }
-            EditorEvent::Error(e) => self.flash(e.clone(), cx),
+            EditorEvent::Error(e) | EditorEvent::Message(e) => self.flash(e.clone(), cx),
             EditorEvent::WrapToggled => self.sync_menus(cx),
             EditorEvent::CloseRequested => self.close_code(window, cx),
         }

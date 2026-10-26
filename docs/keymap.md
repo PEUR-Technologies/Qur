@@ -37,6 +37,18 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Ctrl+-` / `Ctrl+Shift+-` | Navigate Back / Forward | M1 |
 | `Cmd+Shift+O` | Go to Symbol in File (tree-sitter outline, no LSP; arrows preview, Esc goes back) | ✅ |
 
+## Reviewing changes in the code modal
+
+A file in an agent's worktree (the modal says "in <task>") shows the agent's changes in the gutter: a green bar beside added lines, an amber bar beside changed ones, a red tick where lines were removed, all against the task's base commit (or, with Edit > Changes > Last Turn Only, against the snapshot its last turn started from). Your own files in the main checkout get the same markers against HEAD; untracked files get none. The markers catch up a moment after you stop typing.
+
+| Keys | Command | Tier |
+|---|---|---|
+| `Opt+F5` / `Shift+Opt+F5` | Next / Previous Change (wraps around; VS Code's keys) | ✅ |
+| `Opt+F3` (or click a marker) | Show Change: a peek under the change with the removed lines and ‹ › Revert Accept ✕; again to close | ✅ |
+| Edit > Changes / palette / peek | Revert Change: put the base's lines back in the buffer as one undoable edit (`Cmd+Z` brings the agent's back; save to keep it; the index is never touched) | ✅ |
+| Edit > Changes / palette / peek | Accept Change: mark it reviewed; its marker goes until its text changes again (for this session), and the cursor moves to the next change | ✅ |
+| Edit > Changes | Last Turn Only (checkmark): a task's markers show what its last turn changed, not everything since it started | ✅ |
+
 ## Editing
 
 | Keys | Command | Tier |
@@ -64,7 +76,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+D` | Add selection to next match (multi-cursor) | M1 |
 | `Cmd+Shift+L` | Select all matches | M1 |
 | `Opt+Click` / `Cmd+Opt+Up/Down` | Add cursor | M1 |
-| `Esc` | Collapse to one cursor / close find | S |
+| `Esc` | Close a change's peek / collapse to one cursor / close find | S |
 | `Shift+Cmd+\` | Jump to matching bracket | M1 |
 | `Cmd+K Cmd+X` | Trim trailing whitespace | M1 |
 | `Opt+Z` | Toggle soft wrap | S |
@@ -152,7 +164,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | View > Git | Stage All Changes, Unstage All Changes, Commit Staged… (no default keys) | M4 ✅ |
 | Changes view: click a line / ⌘-click | Comment on the line (sent to the agent as one message) / open the file there | M4 ✅ |
 
-The code modal closes with `Esc`: first the find bar, then extra cursors, then the modal (decision 18).
+The code modal closes with `Esc`: first a change's peek, then the find bar, then extra cursors, then the modal (decision 18).
 
 ## Vim mode (optional, M6)
 

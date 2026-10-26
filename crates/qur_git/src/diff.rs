@@ -219,6 +219,31 @@ pub fn file_diff(root: &Path, path: &Path, staged: bool) -> Result<Option<FileDi
     Ok(parse_patch(&out).into_iter().find(|f| f.path == p))
 }
 
+/// A file's text at a commit or tree (`rev:path`), the base of the code
+/// modal's change markers. `Ok(None)` when the path isn't there (a new
+/// file, or no commits yet). Binary (a NUL byte) and non-UTF-8 content is an
+/// error. One `cat-file --batch`, so a missing path costs no second process.
+pub fn file_at(root: &Path, rev: &str, path: &Path) -> Result<Option<String>, String> {
+    check_rev(rev)?;
+    let p = rel(root, path)?;
+    let p = p.to_str().filter(|s| !s.contains('\n')).ok_or_else(|| format!("unsupported path: {}", path.display()))?;
+    let out = Git::ro(root).args(["cat-file", "--batch"]).stdin(format!("{rev}:{p}\n").into_bytes()).ok()?;
+    // `<oid> <type> <size>\n<content>\n`, or `<object> missing\n`.
+    let nl = out.iter().position(|&b| b == b'\n').ok_or("cat-file: no header")?;
+    let header = String::from_utf8_lossy(&out[..nl]).into_owned();
+    let mut parts = header.rsplitn(3, ' ');
+    let (size, kind) = (parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
+    let Ok(size) = size.parse::<usize>() else { return Ok(None) };
+    if kind != "blob" {
+        return Ok(None);
+    }
+    let body = out.get(nl + 1..nl + 1 + size).ok_or("cat-file: short read")?;
+    if body.contains(&0) {
+        return Err("binary file".into());
+    }
+    String::from_utf8(body.to_vec()).map(Some).map_err(|_| "not UTF-8".to_string())
+}
+
 struct RawEntry {
     status: u8,
     path: PathBuf,

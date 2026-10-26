@@ -37,7 +37,7 @@ impl Workspace {
                 let p = e.cursor();
                 let mode = e.vim.as_ref().and_then(|v| v.mode).map(|m| m.label()).unwrap_or("-");
                 let text: String = e.model.rope().to_string().chars().take(200).collect();
-                format!("{}@{}:{} vim={mode} dirty={} text={text:?}", e.title(), p.line + 1, p.col + 1, e.is_dirty())
+                format!("{}@{}:{} vim={mode} dirty={} changes={} text={text:?}", e.title(), p.line + 1, p.col + 1, e.is_dirty(), e.diff_debug())
             }
             None => "none".into(),
         };
