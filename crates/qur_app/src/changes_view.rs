@@ -36,6 +36,19 @@ pub struct Comment {
     pub text: String,
 }
 
+/// The line-comment field's hint (the Changes view and plan comments).
+pub const COMMENT_PLACEHOLDER: &str = "Comment for the agent… (↩ add, esc cancel)";
+
+/// Line comments as one message for the agent: `intro`, then each comment
+/// numbered with where it is, the line's text and what you wrote.
+pub fn comments_prompt<'a>(intro: &str, comments: impl IntoIterator<Item = (String, &'a str, &'a str)>) -> String {
+    let mut s = format!("{intro}\n\n");
+    for (i, (at, quote, text)) in comments.into_iter().enumerate() {
+        s.push_str(&format!("{}. `{at}` — `{}`\n   {text}\n\n", i + 1, quote.trim()));
+    }
+    s
+}
+
 /// One visual row of a diff list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Row {
@@ -317,7 +330,7 @@ impl ChangesView {
     }
 
     fn start_comment(&mut self, key: (usize, usize, usize), window: &mut Window, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| TextInput::new("Comment for the agent… (↩ add, esc cancel)", cx));
+        let input = cx.new(|cx| TextInput::new(COMMENT_PLACEHOLDER, cx));
         let sub = cx.subscribe_in(&input, window, move |this, input, ev: &InputEvent, _, cx| match ev {
             InputEvent::Confirm { .. } => {
                 let text = input.read(cx).text.trim().to_string();
@@ -352,10 +365,10 @@ impl ChangesView {
         if self.comments.is_empty() {
             return;
         }
-        let mut s = String::from("Review comments on your changes. Please address each one:\n\n");
-        for (i, c) in self.comments.iter().enumerate() {
-            s.push_str(&format!("{}. `{}:{}` — `{}`\n   {}\n\n", i + 1, c.path.display(), c.line, c.quote.trim(), c.text));
-        }
+        let s = comments_prompt(
+            "Review comments on your changes. Please address each one:",
+            self.comments.iter().map(|c| (format!("{}:{}", c.path.display(), c.line), c.quote.as_str(), c.text.as_str())),
+        );
         self.comments.clear();
         cx.emit(ChangesEvent::SendComments(s));
         cx.notify();
@@ -619,5 +632,16 @@ mod tests {
         let t = qur_agents::Turn { files: 2, ..t };
         assert_eq!(turn_chip_label(&t), "#3 · 2 files +12 −4");
         assert_eq!(turn_chip_label(&qur_agents::Turn { rewound: true, ..t }), "#3 rewound");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn comments_go_as_one_numbered_message() {
+        let s = comments_prompt("Review comments on your changes. Please address each one:", [("src/a.rs:3".to_string(), "  let x = 1;", "Name it count"), ("b.md:1".into(), "# Title", "Shorter")]);
+        assert_eq!(s, "Review comments on your changes. Please address each one:\n\n1. `src/a.rs:3` — `let x = 1;`\n   Name it count\n\n2. `b.md:1` — `# Title`\n   Shorter\n\n");
     }
 }

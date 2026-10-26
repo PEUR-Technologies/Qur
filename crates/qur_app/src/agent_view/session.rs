@@ -62,6 +62,7 @@ impl AgentTask {
         // load replays, and the user's settings go back on.
         self.replaying = saved.is_some() && self.resume.is_some();
         let restore = self.resume.as_ref().map(|r| r.settings.clone()).unwrap_or_default();
+        let plan_first = self.plan_first && role.is_none();
         cx.spawn(async move |this, cx| {
             let session = match saved {
                 Some(id) => match client.load_session(&id, &cwd).await {
@@ -87,7 +88,12 @@ impl AgentTask {
                 None if loaded => restore_settings(&client, &session, settings, &restore).await,
                 None => settings,
             };
+            let (settings, pre_plan) = if plan_first { plan::plan_setup(&client, &session, settings).await } else { (settings, None) };
             this.update(cx, |t, cx| {
+                if plan_first {
+                    t.plan_first = false;
+                    t.pre_plan_mode = pre_plan;
+                }
                 t.sign_in = None;
                 t.settings = settings;
                 t.record.session_id = Some(session.to_string());
@@ -979,6 +985,7 @@ impl AgentTask {
                     let cost = cost.or(self.usage.and_then(|u| u.2));
                     self.usage = Some((used, size, cost));
                 }
+                SessionUpdate::TurnUsage(u) => self.tokens += u.total,
                 SessionUpdate::Subagent { id, title, state } => {
                     let ix = match self.subagents.iter().position(|s| s.id == id) {
                         Some(ix) => ix,

@@ -179,6 +179,7 @@ impl Workspace {
         let turns = self.selected_last_turn(cx).is_some();
         let pending = self.agents.iter().any(|a| a.read(cx).has_permission());
         let review = self.review_state(cx);
+        let plan = self.plan_state(cx);
         let items = cmds
             .iter()
             .map(|c| {
@@ -186,7 +187,7 @@ impl Workspace {
                     commands::Tier::Ready => commands::display_keys(&c.first_keys()),
                     commands::Tier::Later(m) => format!("coming in {m}"),
                 };
-                let available = (turns || !commands::needs_turn(c)) && (pending || !commands::needs_pending(c)) && commands::review_available(c, review);
+                let available = (turns || !commands::needs_turn(c)) && (pending || !commands::needs_pending(c)) && commands::review_available(c, review) && commands::plan_available(c, plan);
                 PickItem::new(format!("{}: {}", c.category, c.title)).right(right).enabled(c.ready() && available)
             })
             .collect();

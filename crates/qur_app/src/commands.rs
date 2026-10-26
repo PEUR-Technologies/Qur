@@ -28,6 +28,7 @@ pub mod qur {
             RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge, Caffeinate, ShowKeepAwake, SwitchSession, ZenMode,
             Gaps, ToggleGaps, AutoHideSidebar, SidebarOnRight,
             ShowLastTurn, RewindLastTurn, ReviewWork, ReviewPlan, SendReviewFindings,
+            PlanMode, CommentOnPlan, ApprovePlan, SendPlanComments,
         ]
     );
 
@@ -340,6 +341,11 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(agent::FindInChat, "Agent", "Find in Chat", "cmd-f", CHAT, R),
     cmd!(agent::CopyChatMarkdown, "Agent", "Copy Chat as Markdown", "", W, R),
     cmd!(agent::CycleMode, "Agent", "Next Mode (Default / Accept Edits / Plan…)", "shift-tab", Some("AgentView"), R),
+    // Plan mode (in the New Agent Task dialog: start the task in it).
+    cmd!(qur::PlanMode, "Agent", "Plan Mode", "cmd-alt-p", W, R),
+    cmd!(qur::CommentOnPlan, "Agent", "Comment on Plan…", "", W, R),
+    cmd!(qur::ApprovePlan, "Agent", "Approve Plan", "", W, R),
+    cmd!(qur::SendPlanComments, "Agent", "Send Plan Comments", "", W, R),
     cmd!(qur::ReviewChanges, "Agent", "Review Changes", "", W, R),
     cmd!(qur::ShowLastTurn, "Agent", "Show Last Turn's Changes", "", W, R),
     cmd!(qur::RewindLastTurn, "Agent", "Rewind Last Turn…", "", W, R),
@@ -442,6 +448,33 @@ pub fn review_available(c: &Cmd, s: ReviewState) -> bool {
         s.plan
     } else if a.partial_eq(&qur::SendReviewFindings) {
         s.findings
+    } else {
+        true
+    }
+}
+
+/// The selected agent's plan mode (Agent menu).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlanState {
+    /// A structured agent is selected (or the New Agent Task dialog is open): Plan Mode.
+    pub agent: bool,
+    /// It's in plan mode (the checkmark).
+    pub on: bool,
+    /// It has a plan to comment on: Comment on Plan…, Approve Plan.
+    pub plan: bool,
+    /// …and comments on it: Send Plan Comments.
+    pub comments: bool,
+}
+
+/// Is a plan command available in `s`? Other commands always are.
+pub fn plan_available(c: &Cmd, s: PlanState) -> bool {
+    let a = (c.action)();
+    if a.partial_eq(&qur::PlanMode) {
+        s.agent
+    } else if a.partial_eq(&qur::CommentOnPlan) || a.partial_eq(&qur::ApprovePlan) {
+        s.plan
+    } else if a.partial_eq(&qur::SendPlanComments) {
+        s.comments
     } else {
         true
     }
@@ -585,6 +618,8 @@ pub struct MenuState {
     pub pending: bool,
     /// Review Agent's Work… / Plan… / Send Review Findings for the selected agent.
     pub review: ReviewState,
+    /// Plan Mode and the plan's commands for the selected agent.
+    pub plan: PlanState,
     pub vim: bool,
     pub keep_awake: bool,
     pub zen: bool,
@@ -767,6 +802,11 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             sep(),
             item(agent::FindInChat),
             item(agent::CopyChatMarkdown),
+            sep(),
+            item(qur::PlanMode).checked(s.plan.on).disabled(!s.plan.agent),
+            item(qur::CommentOnPlan).disabled(!s.plan.plan),
+            item(qur::ApprovePlan).disabled(!s.plan.plan),
+            item(qur::SendPlanComments).disabled(!s.plan.comments),
             sep(),
             item(qur::NextAgent),
             item(qur::PrevAgent),

@@ -83,6 +83,9 @@ impl AgentTask {
         if let Some(sub) = self.open_subagent.as_ref().and_then(|id| self.subagents.iter().find(|s| s.id == *id)) {
             return self.subagent_view(sub, look, cx);
         }
+        if self.plan_review.open {
+            return self.plan_view(look, cx);
+        }
         let ui = look.theme.ui.clone();
         let me = cx.entity();
         let look2 = look.clone();
@@ -260,7 +263,26 @@ impl AgentTask {
                     .text_color(look.c(if matches!(self.status, Status::Error(_)) { ui.error } else { ui.text_muted }))
                     .child(format!("{}{elapsed}", self.status.label())),
             )
+            .when(self.in_plan_mode(), |d| {
+                d.child(
+                    div()
+                        .id("plan-mode")
+                        .flex_none()
+                        .px(look.z(6.))
+                        .rounded(look.z(4.))
+                        .border_1()
+                        .border_color(look.c(self.accent))
+                        .cursor_pointer()
+                        .text_size(look.text(-2.))
+                        .text_color(look.c(ui.text_secondary))
+                        .child("plan mode")
+                        .on_click(cx.listener(|t, _, _, cx| {
+                            t.show_plan(cx);
+                        })),
+                )
+            })
             .child(div().flex_1())
+            .children(usage_readout(self.tokens, self.usage.and_then(|u| u.2)).map(|u| div().flex_none().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(u)))
             .child(div().flex_none().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(self.record.branch.clone()))
             .when(working, |d| {
                 d.child(
@@ -309,5 +331,20 @@ impl AgentTask {
         Docks::update(cx, Kind::Acp, |d| d.activate(Panel::Changes));
         self.changes.update(cx, |c, cx| c.show_all(cx));
         cx.notify();
+    }
+}
+
+/// The header's usage: "121.2k tokens · $0.12" (tokens the turns used,
+/// the session's cost as the agent reports it). None when it reports neither.
+pub(super) fn usage_readout(tokens: u64, cost: Option<f64>) -> Option<String> {
+    let tokens = (tokens > 0).then(|| match tokens {
+        0..1_000 => format!("{tokens} tokens"),
+        1_000..1_000_000 => format!("{:.1}k tokens", tokens as f64 / 1e3),
+        _ => format!("{:.1}M tokens", tokens as f64 / 1e6),
+    });
+    let cost = cost.filter(|c| *c > 0.).map(|c| format!("${c:.2}"));
+    match (tokens, cost) {
+        (Some(t), Some(c)) => Some(format!("{t} · {c}")),
+        (t, c) => t.or(c),
     }
 }

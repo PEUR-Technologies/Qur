@@ -327,7 +327,7 @@ impl Workspace {
                 this.sync_menus(cx);
                 cx.notify();
             }
-            AgentEvent::TurnsChanged | AgentEvent::PermissionsChanged => this.sync_menus(cx),
+            AgentEvent::TurnsChanged | AgentEvent::PermissionsChanged | AgentEvent::PlanChanged => this.sync_menus(cx),
             AgentEvent::Rewind(n) => {
                 let id = a.read(cx).record.id.clone();
                 this.rewind_turn(&id, *n, window, cx);
@@ -393,8 +393,9 @@ impl Workspace {
         a
     }
 
-    /// New Agent Task: worktree, then spawn the agent with the task as its first prompt.
-    pub(super) fn start_task(&mut self, agent_ix: usize, text: String, mentions: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    /// New Agent Task: worktree, then spawn the agent with the task as its
+    /// first prompt (`plan`: sent in the agent's plan mode).
+    pub(super) fn start_task(&mut self, agent_ix: usize, text: String, mentions: Vec<PathBuf>, plan: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(def) = self.roster.agents.get(agent_ix).cloned() else { return };
         let title = first_line(&text);
         let slug = qur_worktree::slugify(&title);
@@ -441,6 +442,7 @@ impl Workspace {
                     match def.mode {
                         Mode::Acp => {
                             let a = this.add_agent(record, def, window, cx);
+                            a.update(cx, |a, _| a.plan_first = plan);
                             if debug_browser {
                                 a.update(cx, |a, cx| a.show_browser(true, cx));
                             }
@@ -982,8 +984,8 @@ impl Workspace {
         let input = cx.new(|cx| PromptInput::new("Describe the task…  (@ to mention a file, ⇧↩ for a new line)", self.root.clone(), cx));
         let sub = cx.subscribe_in(&input, window, |this, input, ev: &PromptEvent, window, cx| match ev {
             PromptEvent::Submit => {
-                let Some(Overlay::NewTask { agent, .. }) = &this.overlay else { return };
-                let agent = *agent;
+                let Some(Overlay::NewTask { agent, plan, .. }) = &this.overlay else { return };
+                let (agent, plan) = (*agent, *plan);
                 let (text, mut mentions) = input.update(cx, |i, cx| i.take(cx));
                 // A new task starts from text: attached files go as mentions,
                 // a pasted image as a file in the temp folder.
@@ -996,7 +998,7 @@ impl Workspace {
                 }
                 this.overlay = None;
                 this.prev_focus = None;
-                this.start_task(agent, text, mentions, window, cx);
+                this.start_task(agent, text, mentions, plan, window, cx);
             }
             PromptEvent::Cancel => {
                 if this.mention_over_dialog.take().is_none() {
@@ -1034,7 +1036,7 @@ impl Workspace {
         self._subs.push(sub);
         let f = input.read(cx).focus.clone();
         window.focus(&f, cx);
-        self.overlay = Some(Overlay::NewTask { input, agent: 0 });
+        self.overlay = Some(Overlay::NewTask { input, agent: 0, plan: false });
         cx.notify();
     }
 }

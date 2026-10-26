@@ -3,6 +3,7 @@
 //! Prompt text picks the script:
 //! - default: message, tool call + update, plan, permission request (reports
 //!   the chosen option), an unsupported `fs/read_text_file` call, end_turn
+//!   with the turn's token usage
 //! - contains "slow": one chunk, then waits for session/cancel -> cancelled
 //! - contains "crash": prints to stderr and exits 3
 //! - contains "garbage": writes a non-JSON line first
@@ -224,7 +225,7 @@ fn main() {
                 let r = wait_for(&mut lines, |v| v["id"] == fs_id);
                 let code = r.and_then(|r| r["error"]["code"].as_i64()).unwrap_or(0);
                 chunk(&sid, &format!("fs refused {code}"));
-                reply(json!({ "stopReason": "end_turn" }));
+                reply(json!({ "stopReason": "end_turn", "usage": { "inputTokens": 2, "outputTokens": 30, "cachedReadTokens": 100, "cachedWriteTokens": 8, "totalTokens": 140 } }));
             }
             "session/cancel" => {}
             _ if id.is_some() => send(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "nope" } })),
