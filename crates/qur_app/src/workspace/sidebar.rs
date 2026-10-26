@@ -483,12 +483,17 @@ impl Workspace {
         if self.config.ui.sidebar != "auto" {
             return side.into_any_element();
         }
-        // Auto-hide: the stage moves over once and the sidebar slides into
-        // the space from its edge (as the zen top bar does).
+        // Auto-hide: the sidebar's space grows as it slides in (and shrinks
+        // as it slides out), so the stage eases over with its edge, as the
+        // content does under zen's bar.
+        let p = self.sidebar_p();
+        if self.sidebar_since.elapsed() < ZEN_SLIDE {
+            crate::tiling::next_frame(cx);
+        }
         let w = f32::from(look.z(self.sidebar_w));
         div()
             .flex_none()
-            .w(px(w))
+            .w(px(w * p))
             .h_full()
             .relative()
             .overflow_hidden()
@@ -499,11 +504,9 @@ impl Workspace {
                     .bottom_0()
                     .w(px(w))
                     .flex()
-                    .child(side)
-                    .with_animation("sidebar-in", Animation::new(ZEN_SLIDE).with_easing(gpui::ease_out_quint()), move |d, t| {
-                        let off = px(w * (1. - t));
-                        if right { d.left(off) } else { d.left(-off) }
-                    }),
+                    .when(right, |d| d.left_0())
+                    .when(!right, |d| d.right_0())
+                    .child(side),
             )
             .into_any_element()
     }
@@ -542,7 +545,18 @@ impl Workspace {
     /// auto-hide only while slid in.
     /// The empty window has one only while it has terminals.
     pub(super) fn sidebar_visible(&self) -> bool {
-        self.sidebar && (self.config.ui.sidebar != "auto" || self.sidebar_shown) && !(self.home && self.shells.is_empty())
+        self.sidebar && (self.config.ui.sidebar != "auto" || self.sidebar_p() > 0.) && !(self.home && self.shells.is_empty())
+    }
+
+    /// Auto-hide: how far in the sidebar is, 0 (away) to 1 (in), eased over
+    /// `ZEN_SLIDE` like zen's bar (symmetric, so turning around doesn't jump).
+    /// Always 1 when it doesn't auto-hide.
+    pub(super) fn sidebar_p(&self) -> f32 {
+        if self.config.ui.sidebar != "auto" {
+            return 1.;
+        }
+        let e = gpui::ease_in_out((self.sidebar_since.elapsed().as_secs_f32() / ZEN_SLIDE.as_secs_f32()).min(1.));
+        if self.sidebar_shown { e } else { 1. - e }
     }
 
     pub(super) fn sidebar_right(&self) -> bool {
@@ -564,6 +578,9 @@ impl Workspace {
             x <= px(ZEN_EDGE) + look.gap()
         };
         if show != self.sidebar_shown {
+            // Turning around mid-slide carries on from where the sidebar is.
+            let t = (self.sidebar_since.elapsed().as_secs_f32() / ZEN_SLIDE.as_secs_f32()).min(1.);
+            self.sidebar_since = Instant::now().checked_sub(ZEN_SLIDE.mul_f32(1. - t)).unwrap_or_else(Instant::now);
             self.sidebar_shown = show;
             cx.notify();
         }
@@ -575,6 +592,7 @@ impl Workspace {
         self.write_setting(false, "ui.sidebar", Some(mode.into()), cx);
         self.sidebar = mode != "hidden";
         self.sidebar_shown = false;
+        self.sidebar_since = Instant::now().checked_sub(ZEN_SLIDE).unwrap_or_else(Instant::now);
         self.broadcast_reload(cx);
         self.sync_menus(cx);
         self.sync_settings(cx);
@@ -607,7 +625,7 @@ impl Workspace {
         div()
             .id("sidebar-resize")
             .flex_none()
-            .w(look.gap())
+            .w(look.gap() * self.sidebar_p())
             .h_full()
             .cursor_col_resize()
             .relative()
