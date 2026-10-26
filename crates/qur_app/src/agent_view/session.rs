@@ -584,7 +584,7 @@ impl AgentTask {
 
     /// What you asked this session, oldest first (a pull request's body).
     pub fn user_prompts(&self) -> Vec<String> {
-        self.chat.iter().filter_map(|c| if let ChatItem::User(t) = c { Some(t.clone()) } else { None }).collect()
+        self.full_chat().0.into_iter().filter_map(|c| if let ChatItem::User(t) = c { Some(t) } else { None }).collect()
     }
 
     pub fn set_error(&mut self, msg: String, cx: &mut Context<Self>) {
