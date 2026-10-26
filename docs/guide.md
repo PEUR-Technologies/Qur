@@ -170,7 +170,7 @@ Measured on a MacBook Air M5 with `scripts/budget.sh` ([docs/budget.md](budget.m
 
 | | Target | Qur |
 |---|---|---|
-| App | < 40 MB | 25 MB (`Qur.app`), including 13 tree-sitter grammars (~11 MB) |
+| App | < 40 MB | 29 MB (`Qur.app`), including 13 tree-sitter grammars (~11 MB) |
 | Idle memory, project + small file (physical footprint) | < 80 MB | 73 MB |
 | Memory with 3 Claude agents active (Qur's process) | < 150 MB | 129 MB |
 | Start to first frame | < 250 ms | 113 ms |
@@ -188,7 +188,7 @@ Measured on a MacBook Air M5 with `scripts/budget.sh` ([docs/budget.md](budget.m
 
 | | Qur | Orca | Superset |
 |---|---|---|---|
-| Tech | Rust + GPUI, native; ~25 MB app | Electron + React; ~254 MB app | Electron + React; ~431 MB download (arm64 .dmg) |
+| Tech | Rust + GPUI, native; ~29 MB app | Electron + React; ~254 MB app | Electron + React; ~431 MB download (arm64 .dmg) |
 | License | GPL-3.0-or-later | MIT | Elastic License 2.0 (source-available) |
 | Account | None | None | Sign-in (GitHub or Google) |
 | Agents in isolated worktrees | Always, outside the repo | Yes | Yes, outside the repo |
