@@ -605,10 +605,11 @@ impl Render for Workspace {
             let me = cx.entity();
             window.on_next_frame(move |window, cx| {
                 crate::first_frame(handle, cx);
-                // Menus and the main-checkout watcher start after the first frame.
+                // Menus, the main-checkout watcher and idle release start after the first frame.
                 me.update(cx, |ws, cx| {
                     ws.sync_menus(cx);
                     ws.watch_root(window, cx);
+                    ws.watch_idle(cx);
                 });
             });
             // Dev/test: QUR_DEBUG_TASKS="prompt one|prompt two" starts agent tasks at launch.

@@ -194,6 +194,8 @@ pub struct ChangesView {
     scroll: UniformListScrollHandle,
     refresh_task: Option<Task<()>>,
     pub merged: bool,
+    /// The diff was let go while out of sight (`release`); `wake` reloads it.
+    released: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -218,6 +220,7 @@ impl ChangesView {
             scroll: UniformListScrollHandle::new(),
             refresh_task: None,
             merged: false,
+            released: false,
             _subs: Vec::new(),
         };
         v.refresh(cx);
@@ -245,8 +248,24 @@ impl ChangesView {
         self.refresh(cx);
     }
 
+    /// Idle release: drop the diff's text (totals, conflicts and your
+    /// comments stay), unless a comment is being written or it's loading.
+    pub fn release(&mut self) {
+        if self.draft.is_none() && !self.loading && !self.files.is_empty() {
+            self.files = Vec::new();
+            self.released = true;
+        }
+    }
+
+    pub fn wake(&mut self, cx: &mut Context<Self>) {
+        if self.released {
+            self.refresh(cx);
+        }
+    }
+
     /// Recompute the diff and the conflict pre-check off the UI thread.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.released = false;
         let (wt, base, root, branch) = (self.worktree.clone(), self.base.clone(), self.root.clone(), self.branch.clone());
         let turn = self.turn.clone();
         let bg = cx.background_executor().clone();

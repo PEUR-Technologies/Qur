@@ -235,6 +235,9 @@ fn load_session_replays_history() {
     let evs = events_until(&mut rx, 10, |e| matches!(e, Event::Update { update: SessionUpdate::AgentMessage(_), .. }));
     assert!(evs.iter().any(|e| matches!(e, Event::Update { update: SessionUpdate::UserMessage(c), .. } if c.text == "earlier question")));
     assert_eq!(texts(&evs), ["earlier answer"]);
+    // The replay is over once `Loaded` comes, right after the last replayed update.
+    let rest = events_until(&mut rx, 10, |e| matches!(e, Event::Loaded(_)));
+    assert!(matches!(rest.as_slice(), [Event::Loaded(id)] if *id == "s1"), "{rest:?}");
     client.shutdown(Duration::from_secs(2));
 }
 

@@ -376,10 +376,17 @@ impl Client {
         rx
     }
 
-    /// Resume a session; the agent replays its history as `Update` events.
-    /// Resolves with the session's settings.
+    /// Resume a session; the agent replays its history as `Update` events,
+    /// and `Event::Loaded` follows them in the event stream. Resolves with
+    /// the session's settings.
     pub fn load_session(&self, session_id: &SessionId, cwd: &Path) -> Pending<Vec<ConfigOption>> {
-        let (rx, r) = typed(|v| Ok(ConfigOption::parse_session(&v)));
+        let (rx, resolve) = typed(|v| Ok(ConfigOption::parse_session(&v)));
+        let (events, id) = (self.inner.events.clone(), session_id.clone());
+        // Runs on the reader thread, after it has emitted every replayed update.
+        let r: Responder = Box::new(move |res| {
+            let _ = events.unbounded_send(Event::Loaded(id));
+            resolve(res);
+        });
         self.inner.request("session/load", json!({ "sessionId": session_id.as_str(), "cwd": cwd, "mcpServers": [] }), r);
         rx
     }
