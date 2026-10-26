@@ -335,14 +335,10 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The agents ticked in Settings, first in agents.toml; agents added by
-    /// hand (not ones Settings knows) are kept after them.
+    /// The agents ticked in Settings become agents.toml. Settings lists every
+    /// agent there (added by hand too), so unticking one removes it.
     fn save_agents(&mut self, chosen: Vec<AgentDef>, cx: &mut Context<Self>) {
-        let mut roster = qur_agents::Roster::load().0;
-        roster.agents.retain(|a| !setup_view::KNOWN.iter().any(|k| k.0 == a.id));
-        let mut agents = chosen;
-        agents.extend(roster.agents);
-        roster.agents = agents;
+        let roster = qur_agents::Roster { agents: chosen };
         if let Err(e) = roster.save() {
             self.flash(format!("Couldn't save agents.toml: {e}"), cx);
         }

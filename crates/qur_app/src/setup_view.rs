@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Bounds, Context, DispatchPhase, ElementId, EventEmitter, FocusHandle, Hsla, MouseButton, Pixels, ScrollHandle, SharedString, Stateful, Task, Window, canvas, div, prelude::*, px, svg,
+    Bounds, Context, DispatchPhase, ElementId, Entity, EventEmitter, FocusHandle, Hsla, MouseButton, Pixels, ScrollHandle, SharedString, Stateful, Task, Window, canvas, div, prelude::*, px, svg,
 };
 use qur_agents::{AgentDef, Mode};
 use qur_theme::{Registry, Rgba, Theme};
@@ -31,17 +31,23 @@ use qur_theme::{Registry, Rgba, Theme};
 use crate::assets;
 use crate::commands::qur;
 use crate::doctor::Login;
+use crate::input::{InputEvent, TextInput};
 use crate::look::Look;
 
-/// Agents Qur knows how to run (Codex since decision 44). Others can be
-/// added to agents.toml by hand.
-pub const KNOWN: &[(&str, &str, Mode, &str, Option<&str>)] = &[
-    ("claude", "Claude Code", Mode::Acp, "claude-agent-acp", None),
-    ("claude-cli", "Claude Code (terminal)", Mode::Terminal, "claude", Some("arg")),
+/// Agents Qur knows how to run (Codex since decision 44): (id, label, mode,
+/// command, args, prompt). Others are added in Settings (Add agent) or in
+/// agents.toml by hand.
+type Known = (&'static str, &'static str, Mode, &'static str, &'static [&'static str], Option<&'static str>);
+pub const KNOWN: &[Known] = &[
+    ("claude", "Claude Code", Mode::Acp, "claude-agent-acp", &[], None),
+    ("claude-cli", "Claude Code (terminal)", Mode::Terminal, "claude", &[], Some("arg")),
     // Zed's ACP adapter for OpenAI's Codex CLI; signs in with ChatGPT.
-    ("codex", "Codex", Mode::Acp, "codex-acp", None),
-    ("codex-cli", "Codex (terminal)", Mode::Terminal, "codex", Some("arg")),
-    ("aider", "Aider (terminal)", Mode::Terminal, "aider", Some("--message")),
+    ("codex", "Codex", Mode::Acp, "codex-acp", &[], None),
+    ("codex-cli", "Codex (terminal)", Mode::Terminal, "codex", &[], Some("arg")),
+    ("aider", "Aider (terminal)", Mode::Terminal, "aider", &[], Some("--message")),
+    // Native ACP; `--acp` is stable from @google/gemini-cli 0.50.0.
+    ("gemini", "Gemini CLI", Mode::Acp, "gemini", &["--acp"], None),
+    ("opencode", "opencode", Mode::Acp, "opencode", &["acp"], None),
 ];
 
 /// An AI account Setup connects (decision 45): a CLI the user signs in to,
@@ -180,6 +186,10 @@ pub struct SetupView {
     drag: Option<Slider>,
     /// Scrolled by hand: the list shows the section at the top.
     follow_scroll: bool,
+    /// Add agent: name, command line, and how it runs.
+    new_name: Entity<TextInput>,
+    new_command: Entity<TextInput>,
+    new_mode: Mode,
     _watch: Option<Task<()>>,
 }
 
@@ -187,9 +197,9 @@ impl EventEmitter<SetupEvent> for SetupView {}
 
 impl SetupView {
     pub fn new(current: Current, roster: &qur_agents::Roster, first_run: bool, cx: &mut Context<Self>) -> Self {
-        let agents = KNOWN
+        let mut agents: Vec<Found> = KNOWN
             .iter()
-            .map(|(id, label, mode, command, prompt)| {
+            .map(|(id, label, mode, command, args, prompt)| {
                 let existing = roster.get(id).cloned();
                 let path = qur_agents::which(existing.as_ref().map_or(*command, |d| d.command.as_str()));
                 Found {
@@ -203,7 +213,7 @@ impl SetupView {
                         label: label.to_string(),
                         mode: *mode,
                         command: command.to_string(),
-                        args: Vec::new(),
+                        args: args.iter().map(|a| a.to_string()).collect(),
                         accent: None,
                         prompt: prompt.map(str::to_string),
                     }),
@@ -212,6 +222,13 @@ impl SetupView {
                 }
             })
             .collect();
+        // Agents added in Settings or by hand: listed under Other agents.
+        agents.extend(roster.agents.iter().filter(|a| !KNOWN.iter().any(|k| k.0 == a.id)).map(|a| Found {
+            path: qur_agents::which(&a.command),
+            def: a.clone(),
+            enabled: true,
+            check: Check::NotRun,
+        }));
         let mut this = SetupView {
             focus: cx.focus_handle(),
             first_run,
@@ -227,8 +244,19 @@ impl SetupView {
             sliders: Rc::default(),
             drag: None,
             follow_scroll: false,
+            new_name: cx.new(|cx| TextInput::new("Name", cx)),
+            new_command: cx.new(|cx| TextInput::new("Command, e.g. gemini --acp", cx)),
+            new_mode: Mode::Acp,
             _watch: None,
         };
+        for input in [this.new_name.clone(), this.new_command.clone()] {
+            cx.subscribe(&input, |this, _, ev: &InputEvent, cx| {
+                if let InputEvent::Confirm { .. } = ev {
+                    this.add_agent(cx);
+                }
+            })
+            .detach();
+        }
         this.refresh(cx);
         this
     }
@@ -308,6 +336,17 @@ impl SetupView {
         if !agents.is_empty() {
             cx.emit(SetupEvent::Agents(agents));
         }
+    }
+
+    /// Add agent: a new ticked row from the name and command fields.
+    fn add_agent(&mut self, cx: &mut Context<Self>) {
+        let taken = |id: &str| self.agents.iter().any(|f| f.def.id == id);
+        let Some(def) = new_agent(&self.new_name.read(cx).text, &self.new_command.read(cx).text, self.new_mode, taken) else { return };
+        self.agents.push(Found { path: qur_agents::which(&def.command), def, enabled: true, check: Check::NotRun });
+        self.new_name.update(cx, |t, cx| t.set_text("", cx));
+        self.new_command.update(cx, |t, cx| t.set_text("", cx));
+        self.save_agents(cx);
+        cx.notify();
     }
 
     fn install(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -635,13 +674,51 @@ impl SetupView {
             .agents
             .iter()
             .enumerate()
-            .filter(|(_, f)| !SERVICES.iter().any(|s| s.agents.contains(&f.def.id.as_str())) && (f.path.is_some() || f.enabled))
+            .filter(|(_, f)| !SERVICES.iter().any(|s| s.agents.contains(&f.def.id.as_str())) && (f.path.is_some() || f.enabled || !KNOWN.iter().any(|k| k.0 == f.def.id)))
             .map(|(i, f)| agent_row(i, f))
             .collect::<Vec<_>>();
         section(look, "Agents")
             .child(div().mb(look.z(8.)).text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child("Connect an AI account. Qur's agents run on a subscription you already have: no API keys, nothing extra to pay. Connect at least one."))
             .children(cards)
-            .when(!others.is_empty(), |d| d.child(sub_heading(look, "Other agents")).children(others))
+            .child(sub_heading(look, "Other agents"))
+            .children(others)
+            .child(self.add_agent_row(look, cx))
+    }
+
+    /// Add agent: name, command line, Structured or Terminal, Add.
+    fn add_agent_row(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = &look.theme.ui;
+        let field = |input: &Entity<TextInput>, w: f32| {
+            let f = input.read(cx).focus.clone();
+            div()
+                .w(look.z(w))
+                .flex_none()
+                .px(look.z(6.))
+                .py(look.z(3.))
+                .rounded(look.z(4.))
+                .border_1()
+                .border_color(look.c(ui.border))
+                .bg(look.c(ui.editor_bg))
+                .text_size(look.text(-1.))
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| window.focus(&f, cx))
+                .child(input.clone())
+        };
+        let mode = |id: &'static str, label: &'static str, m: Mode| {
+            pill(look, id, label, self.new_mode == m).on_click(cx.listener(move |this, _, _, cx| {
+                this.new_mode = m;
+                cx.notify();
+            }))
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(look.z(6.))
+            .py(look.z(3.))
+            .child(field(&self.new_name, 140.))
+            .child(div().flex_1().min_w(px(0.)).child(field(&self.new_command, 220.).w_full()))
+            .child(mode("add-agent-acp", "Structured", Mode::Acp))
+            .child(mode("add-agent-terminal", "Terminal", Mode::Terminal))
+            .child(pill(look, "add-agent", "Add", false).on_click(cx.listener(|this, _, _, cx| this.add_agent(cx))))
     }
 
     fn appearance_section(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
@@ -857,6 +934,18 @@ pub fn section(look: &Look, title: &'static str) -> gpui::Div {
 
 fn sub_heading(look: &Look, title: &'static str) -> gpui::Div {
     div().mt(look.z(8.)).mb(look.z(4.)).text_size(look.text(-1.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(look.c(look.theme.ui.text)).child(title)
+}
+
+/// Add agent's row as an agents.toml entry: `None` without a command. The
+/// name defaults to the command; the id is the name's slug, made unique.
+fn new_agent(name: &str, command_line: &str, mode: Mode, taken: impl Fn(&str) -> bool) -> Option<AgentDef> {
+    // shortcut: split on spaces, no quoting; agents.toml takes args with spaces.
+    let mut words = command_line.split_whitespace().map(str::to_string);
+    let command = words.next()?;
+    let label = if name.trim().is_empty() { command.clone() } else { name.trim().to_string() };
+    let base = qur_worktree::slugify(&label);
+    let id = (1..).map(|n| if n == 1 { base.clone() } else { format!("{base}-{n}") }).find(|id| !taken(id))?;
+    Some(AgentDef { id, label, mode, command, args: words.collect(), accent: None, prompt: None })
 }
 
 /// One setting: its name (and a hint) on the left, the control on the right.
@@ -1208,6 +1297,16 @@ mod tests {
         assert_eq!(panel_size(&look(1.), size(700., 600.)), (px(668.), px(490.)));
         assert_eq!(panel_size(&look(1.5), size(3000., 2000.)), (px(1230.), px(960.)));
         assert_eq!(panel_size(&look(1.), size(200., 100.)), (px(360.), px(240.)));
+    }
+
+    #[test]
+    fn new_agent_parses_the_command_line() {
+        let a = new_agent("  ", "gemini --acp --model x", Mode::Acp, |_| false).unwrap();
+        assert_eq!((a.id.as_str(), a.label.as_str(), a.command.as_str()), ("gemini", "gemini", "gemini"));
+        assert_eq!(a.args, ["--acp", "--model", "x"]);
+        let b = new_agent("My Agent", "x", Mode::Terminal, |id| id == "my-agent").unwrap();
+        assert_eq!(b.id, "my-agent-2");
+        assert!(new_agent("Name", "   ", Mode::Acp, |_| false).is_none());
     }
 
     #[test]
