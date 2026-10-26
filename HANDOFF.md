@@ -24,7 +24,7 @@ Agents are first-class. The sidebar lists agents as buttons. Each agent works in
 
 ## Status: what's built
 
-All milestones are on `main`. There are 300 tests (`cargo test --release --workspace`), all passing; clippy is clean with `-D warnings`; `scripts/handcheck.sh` passes 58 scripted hand checks.
+All milestones are on `main`. There are 300 tests (`cargo test --release --workspace`), all passing; clippy is clean with `-D warnings`; `scripts/handcheck.sh` passes 84 scripted hand checks.
 
 | Milestone | What | Decisions |
 |---|---|---|
@@ -118,7 +118,7 @@ Where things are stored on the owner's Mac:
 source ~/.cargo/env
 cargo build --release -p qur_app && target/release/qur ~/some/project   # no argument = last project
 cargo test --release --workspace            # 300 tests
-scripts/handcheck.sh [check ...]            # 58 scripted hand checks (-l lists them); unlocked session
+scripts/handcheck.sh [check ...]            # 84 scripted hand checks (-l lists them); unlocked session
 target/release/qur doctor                   # setup checks, exit 1 on any problem
 scripts/bundle.sh [--zip]                   # target/release/Qur.app (ad-hoc signed); then cp -R to /Applications
 scripts/budget.sh 3                         # the budget, incl. glow and 3 real agents; unlocked screen
