@@ -91,6 +91,32 @@ check_git_commit() {  # Git panel: Commit Staged… focuses the message; type; C
   ok "field cleared, nothing left staged" state_has 'message="" '
 }
 
+check_commit_message() {  # an agent in the project folder: the Git panel offers a message from its work.
+  setup commit_message
+  drive "wait:1500,qur::NewAgentTerminal,wait:1500,qur::Quit"
+  echo four >> "$REPO/a.txt"; printf 'new\n' > "$REPO/b.txt"
+  drive "wait:2000,qur::GitPanel,wait:1500,state,qur::GitStageAll,wait:800,qur::GitCommit,wait:1000,state,qur::Quit"
+  ok "the empty commit box got a subject and a body" grep -qF 'message="Update 2 files" body="- a.txt (+1 -0)\n- b.txt (+1 -0)\n\n2 files changed, +2 -0"' "$LOG"
+  ok "Commit used both" test "$(git_ log -1 --format=%B)" = "$(printf 'Update 2 files\n\n- a.txt (+1 -0)\n- b.txt (+1 -0)\n\n2 files changed, +2 -0')"
+  ok "and cleared them" state_has 'message="" body="" '
+}
+
+check_merge_message() {  # Merge: the task's commit and the merge commit carry a message from its turns.
+  setup merge_message
+  local id wt base
+  id=$(git_ rev-list --max-parents=0 HEAD | cut -c1-12); wt="$QUR_HOME/worktrees/$id/dark-mode"; base=$(git_ rev-parse HEAD)
+  mkdir -p "$(dirname "$wt")"; git_ worktree add -q -b qur/dark-mode "$wt"
+  printf 'one\ntwo\nTHREE\n' > "$wt/a.txt"; printf 'pub fn theme() {}\n' > "$wt/theme.rs"
+  # An ACP task with one recorded turn; its agent never starts (it isn't sent anything).
+  printf '[[agent]]\nid = "fake"\nlabel = "Fake"\nmode = "acp"\ncommand = "/usr/bin/false"\n' >> "$QUR_HOME/agents.toml"
+  mkdir -p "$QUR_HOME/projects"
+  printf '[[task]]\nid = "dark-mode"\nagent = "fake"\ntitle = "can you add a dark mode toggle please"\nbranch = "qur/dark-mode"\nworktree = "%s"\nbase = "%s"\ncreated = 1\nmode = "acp"\n\n[[task.turns]]\nn = 1\nstart = "x"\nend = "y"\nfiles = 2\nadded = 2\nremoved = 1\n' "$wt" "$base" > "$QUR_HOME/projects/$id.tasks.toml"
+  QUR_DEBUG_PROMPT="1" drive "wait:2000,qur::NextAgent,wait:500,qur::Merge,wait:3000,qur::Quit"
+  ok "the task's work was committed with the generated message" test "$(git_ log -1 --format=%B qur/dark-mode)" = "$(printf 'Add a dark mode toggle\n\n- a.txt (+1 -1)\n- theme.rs (+1 -0)\n\n2 files changed, +2 -1')"
+  ok "the merge commit too, under Merge <branch>:" test "$(git_ log -1 --format=%B)" = "$(printf 'Merge qur/dark-mode: Add a dark mode toggle\n\n- a.txt (+1 -1)\n- theme.rs (+1 -0)\n\n2 files changed, +2 -1')"
+  git_ worktree remove --force "$wt" >/dev/null 2>&1
+}
+
 esc_closed_menu() { grep '^STATE' "$LOG" | grep -A1 -F 'overlay=agent_menu:root-1' | sed -n 2p | grep -qF 'overlay=none'; }
 check_rename_click() {  # right-click menu > Rename…, and double-click the button.
   setup rename_click
@@ -202,7 +228,7 @@ check_first_run() {  # QUR_DEBUG_SETUP=1: the first-run welcome; Done (or Skip f
   ok "Done closed it" state_has 'overlay=none'
 }
 
-ALL=(vim find_terminal rename rename_click dock cmd_click git_commit git_stage panels gaps gaps_terminal sidebar settings first_run)
+ALL=(vim find_terminal rename rename_click dock cmd_click git_commit git_stage commit_message merge_message panels gaps gaps_terminal sidebar settings first_run)
 [ "${1:-}" = "-l" ] && { printf '%s\n' "${ALL[@]}"; exit 0; }
 for c in "${@:-${ALL[@]}}"; do
   echo "$c"

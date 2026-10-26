@@ -3,6 +3,7 @@
 //! header, To-do strip, Chat, permission bar and prompt bar.
 
 mod chat;
+mod exchanges;
 mod find;
 mod second_opinion;
 mod session;
