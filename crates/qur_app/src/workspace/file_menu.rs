@@ -14,6 +14,7 @@ enum FileCmd {
 }
 
 impl Workspace {
+    #[allow(clippy::too_many_arguments)] // the row's facts, as the tree sent them
     pub(super) fn open_file_menu(&mut self, abs: PathBuf, rel: PathBuf, is_dir: bool, ghost: bool, at: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         self.close_overlays(window, cx);
         self.prev_focus = window.focused(cx);
@@ -21,6 +22,7 @@ impl Workspace {
         cx.notify();
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn file_menu(&self, abs: &Path, rel: &Path, is_dir: bool, ghost: bool, at: gpui::Point<Pixels>, look: &Look, cx: &mut Context<Self>) -> gpui::AnyElement {
         let ui = &look.theme.ui;
         // None is a separator. A deleted file's row is all greyed out: there is

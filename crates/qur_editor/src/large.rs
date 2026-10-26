@@ -232,7 +232,7 @@ pub fn scan<R: Read + Seek>(
     let mut n = 0u32;
     while it.offset < end {
         n = n.wrapping_add(1);
-        if n % 4096 == 0 && cancel.load(Ordering::Relaxed) {
+        if n.is_multiple_of(4096) && cancel.load(Ordering::Relaxed) {
             return Ok(false);
         }
         let Some(nl) = it.next_into(&mut buf, MAX_LINE, &mut cut)? else { break };
@@ -310,7 +310,7 @@ pub fn count<R: Read + Seek>(r: &mut R, re: &regex::bytes::Regex, len: u64, canc
     let mut n = 0u32;
     while it.offset < len {
         n = n.wrapping_add(1);
-        if n % 8192 == 0 {
+        if n.is_multiple_of(8192) {
             if cancel.load(Ordering::Relaxed) {
                 return Ok(None);
             }

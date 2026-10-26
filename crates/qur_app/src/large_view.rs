@@ -126,7 +126,7 @@ fn chars_of(bytes: &[u8], enc: Encoding, first_line: bool) -> Vec<(char, usize)>
             let bom = if first_line && (bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF])) { 2 } else { 0 };
             let start = skip.max(bom);
             let body = &bytes[start.min(bytes.len())..];
-            let units = body.chunks_exact(2).map(|p| if le { u16::from_le_bytes([p[0], p[1]]) } else { u16::from_be_bytes([p[0], p[1]]) });
+            let units = body.as_chunks::<2>().0.iter().map(|p| if le { u16::from_le_bytes([p[0], p[1]]) } else { u16::from_be_bytes([p[0], p[1]]) });
             let mut at = start;
             for c in char::decode_utf16(units) {
                 let c = c.unwrap_or(char::REPLACEMENT_CHARACTER);

@@ -109,7 +109,7 @@ fn utf16_without_bom(sample: &[u8]) -> Option<Encoding> {
         return None;
     }
     let (mut le, mut be) = (0, 0);
-    for p in sample.chunks_exact(2) {
+    for p in sample.as_chunks::<2>().0.iter() {
         match (p[0] == 0, p[1] == 0) {
             (false, true) => le += 1,
             (true, false) => be += 1,
@@ -159,8 +159,8 @@ pub fn decode(bytes: &[u8], enc: Encoding) -> (String, bool) {
         },
         Encoding::Utf16Le | Encoding::Utf16Be => {
             let le = enc == Encoding::Utf16Le;
-            let units = bytes.chunks_exact(2).map(|p| if le { u16::from_le_bytes([p[0], p[1]]) } else { u16::from_be_bytes([p[0], p[1]]) });
-            let mut ok = bytes.len() % 2 == 0;
+            let units = bytes.as_chunks::<2>().0.iter().map(|p| if le { u16::from_le_bytes([p[0], p[1]]) } else { u16::from_be_bytes([p[0], p[1]]) });
+            let mut ok = bytes.len().is_multiple_of(2);
             let mut s = String::with_capacity(bytes.len() / 2);
             for c in char::decode_utf16(units) {
                 s.push(c.unwrap_or_else(|_| {
