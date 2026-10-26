@@ -40,7 +40,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, AnyWindowHandle, App, AppContext, Bounds, ClipboardItem, Context, Entity, FocusHandle, MouseButton, Pixels, PromptLevel,
+    AnyElement, AnyWindowHandle, App, AppContext, Bounds, ClipboardItem, Context, Entity, FocusHandle, MouseButton, Pixels, PromptLevel,
     SharedString, Subscription, Task, Window, WindowAppearance, canvas, div, img, prelude::*, px, svg,
 };
 use qur_acp::PermissionKind;
@@ -200,7 +200,8 @@ enum Overlay {
     /// Qur > Appearance > Gaps…: window gaps, live while you drag.
     Gaps,
     /// `plan`: start the task in the agent's plan mode (Plan first).
-    NewTask { input: Entity<PromptInput>, agent: usize, plan: bool },
+    /// `open`: the agent dropdown is showing.
+    NewTask { input: Entity<PromptInput>, agent: usize, plan: bool, open: bool },
     /// Review Agent's Work… / Plan…: the reviewer (agent and model) for
     /// task `task`, and an optional instruction line.
     Review { input: Entity<TextInput>, task: String, subject: Subject, choices: Vec<review::Choice>, chosen: usize, touched: bool },
@@ -265,6 +266,8 @@ pub struct Workspace {
     /// `[ui] sidebar = "auto"`: the sidebar is slid in because the mouse
     /// reached its edge of the window.
     sidebar_shown: bool,
+    /// When the auto-hide sidebar last started sliding (in or out).
+    sidebar_since: Instant,
     /// `caffeinate` while Keep Awake is on (agents keep working with the lid
     /// open and the screen idle). It watches Qur's pid, so it ends with Qur.
     caffeinate: Option<std::process::Child>,
@@ -426,6 +429,7 @@ impl Workspace {
             sidebar,
             sidebar_w: SIDEBAR_DEFAULT_W,
             sidebar_shown: false,
+            sidebar_since: Instant::now().checked_sub(ZEN_SLIDE).unwrap_or_else(Instant::now),
             caffeinate: None,
             files_open: true,
             resizing: false,

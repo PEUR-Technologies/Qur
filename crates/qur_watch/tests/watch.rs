@@ -101,6 +101,9 @@ fn ignores_git_internals_and_gitignored() {
     fs::create_dir_all(d.join("target")).unwrap();
     fs::write(d.join(".gitignore"), "target/\n*.log\n").unwrap();
     let (_w, mut rx) = start(&d);
+    // FSEvents can still report the setup writes just after the stream starts
+    // (seen on CI as a stray .gitignore event); let them pass first.
+    collect(&mut rx, Duration::from_millis(300), |_| false);
 
     fs::write(d.join("target/out.o"), "x").unwrap();
     fs::write(d.join("debug.log"), "x").unwrap();

@@ -11,7 +11,7 @@ Everything the [README](../README.md) leaves out: requirements, every feature, c
 - For agents, on your own logins (Qur never sets an API key):
   - [Claude Code](https://claude.com/claude-code), logged in with your subscription (`claude` CLI). That's all Agent Terminals need.
   - For structured (ACP) agents, the adapter, pinned: `npm i -g @agentclientprotocol/claude-agent-acp@0.94.0` (don't use `npx` at runtime).
-  - Any other CLI agent (Aider, for example) as a terminal agent in `agents.toml`.
+  - Gemini CLI, opencode, GitHub Copilot and Cursor over ACP, Aider in a terminal: Settings > Agents lists them once installed. Any other CLI agent: Settings > Agents > **Add agent** (name, command, Structured or Terminal), or by hand in `agents.toml`.
 
 ### The app
 
@@ -62,7 +62,7 @@ One window is one project. There's no permanent editor area: the window is for a
 ### Agents
 
 - **Isolated worktrees.** Each task gets a git worktree outside your repo, on branch `qur/<agent>/<task>`, so your checkout stays untouched. Run several agents at once.
-- **Agent Terminals** (`Cmd+Shift+T`): the interactive `claude` CLI in its own worktree, with the sidebar button, heatmap, review and merge like any other task. Any other CLI agent works too: add it to `agents.toml` with `mode = "terminal"`.
+- **Agent Terminals** (`Cmd+Shift+T`): the interactive `claude` CLI in its own worktree, with the sidebar button, heatmap, review and merge like any other task. Any other CLI agent works too: add it in Settings > Agents (**Add agent**, Terminal) or in `agents.toml` with `mode = "terminal"`.
 - **Agents name their own work.** A button shows what the agent says it's doing (Claude Code's terminal title), unless you rename it (Agent > Rename Agent…, or double-click).
 - **Terminal comforts:** Find (`Cmd+F`, regex, through the scrollback) and `Cmd`-click to open URLs and `file:line` paths.
 - **Structured sessions** over the [Agent Client Protocol](https://agentclientprotocol.com):
@@ -119,7 +119,7 @@ One window is one project. There's no permanent editor area: the window is for a
 - **Expand / Shrink Selection** (`Ctrl+Shift+Cmd+→` / `←`): grows every cursor's selection to the enclosing syntax node (word, call, statement, block, function…), and shrinks back one step at a time. Files Qur doesn't parse grow by word, line, then the whole file.
 - With soft wrap on, `End` / `Cmd+→` stops at the end of the visual row first, then the line; `Home` / `Cmd+←` likewise.
 - Input methods (Japanese, Chinese, Korean, press-and-hold accents): the text being composed shows underlined at the cursor until you commit it.
-- **Settings** (`Cmd+,`): one screen with a section list. Agents (install, sign in, which agents to use), Appearance (theme for this project or all, accent color and brightness, transparency and blur, top bar, traffic lights in full screen), Editor (Vim mode, keys), Layout (the agent stage presets as diagrams), and Files (open config.toml, keymap.toml, agents.toml). Changes apply and save as you make them; Esc closes. It also opens by itself on first launch.
+- **Settings** (`Cmd+,`): one screen with a section list. Agents (install, sign in, which agents to use, Add agent for any other CLI; unticking one removes it from agents.toml), Appearance (theme for this project or all, accent color and brightness, transparency and blur, top bar, traffic lights in full screen), Editor (Vim mode, keys), Layout (the agent stage presets as diagrams), and Files (open config.toml, keymap.toml, agents.toml). Changes apply and save as you make them; Esc closes. It also opens by itself on first launch.
 - 17 built-in themes plus Auto (follows macOS), a theme per project, and window transparency with blur. Every theme passes a contrast test.
 - Every command is in the macOS menu bar and the command palette (`Cmd+Shift+P`). No toolbars; the one settings screen is Qur > Settings…, and its settings are also menu commands (View > Appearance, Edit > Vim Mode).
 

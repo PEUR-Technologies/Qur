@@ -165,11 +165,7 @@ impl Workspace {
             _ => None,
         };
         if let Some(tid) = tid {
-            self.terms.update(cx, |p, cx| {
-                if let Some(ix) = p.sessions.iter().position(|s| s.id == tid) {
-                    p.close(ix, cx);
-                }
-            });
+            self.terms.update(cx, |p, cx| p.close_newest(tid, cx));
         }
     }
 

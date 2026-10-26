@@ -502,9 +502,11 @@ impl Workspace {
             )),
             Overlay::Transparency { project_scope } => Some(self.transparency_popover(*project_scope, look, cx)),
             Overlay::Gaps => Some(self.gaps_popover(look, cx)),
-            Overlay::NewTask { input, agent, plan } => {
+            Overlay::NewTask { input, agent, plan, open } => {
                 let agents = self.roster.agents.clone();
                 let chosen = *agent;
+                let open = *open;
+                let name = |a: &AgentDef| if a.mode == Mode::Terminal && !a.label.to_lowercase().contains("terminal") { format!("{} (terminal)", a.label) } else { a.label.clone() };
                 // Plan first (Cmd+Opt+P here too): structured agents only.
                 let plan_chip = agents.get(chosen).filter(|a| a.mode == Mode::Acp).map(|_| {
                     let on = *plan;
@@ -522,28 +524,80 @@ impl Workspace {
                         .child(if on { "✓ Plan first" } else { "Plan first" })
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_plan_first(cx)))
                 });
-                let chips: Vec<_> = agents
+                let rows: Vec<_> = agents
                     .iter()
                     .enumerate()
                     .map(|(i, a)| {
                         div()
                             .id(("agent-chip", i))
-                            .px(look.z(8.))
-                            .py(look.z(2.))
+                            .mx(look.z(4.))
+                            .px(look.z(10.))
+                            .py(look.z(4.))
                             .rounded(look.z(4.))
                             .cursor_pointer()
                             .text_size(look.text(-1.))
-                            .text_color(look.c(if i == chosen { ui.text } else { ui.text_muted }))
+                            .text_color(look.c(ui.text))
                             .when(i == chosen, |d| d.bg(look.c(ui.active_bg)))
-                            .child(if a.mode == Mode::Terminal && !a.label.to_lowercase().contains("terminal") { format!("{} (terminal)", a.label) } else { a.label.clone() })
+                            .hover(|d| d.bg(look.c(ui.hover_bg)))
+                            .child(name(a))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(Overlay::NewTask { agent, .. }) = &mut this.overlay {
+                                if let Some(Overlay::NewTask { agent, open, .. }) = &mut this.overlay {
                                     *agent = i;
+                                    *open = false;
                                     cx.notify();
                                 }
                             }))
                     })
                     .collect();
+                let dropdown = div()
+                    .relative()
+                    // Keep the dialog's close-on-click below from firing first.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .id("agent-dropdown")
+                            .flex()
+                            .items_center()
+                            .gap(look.z(4.))
+                            .px(look.z(8.))
+                            .py(look.z(2.))
+                            .rounded(look.z(4.))
+                            .cursor_pointer()
+                            .text_size(look.text(-1.))
+                            .border_1()
+                            .border_color(look.c(ui.border))
+                            .text_color(look.c(ui.text))
+                            .hover(|d| d.bg(look.c(ui.hover_bg)))
+                            .child(agents.get(chosen).map(name).unwrap_or_default())
+                            .child(svg().path(icon::CHEVRON_DOWN).size(look.z(12.)).text_color(look.c(ui.text_muted)))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(Overlay::NewTask { open, .. }) = &mut this.overlay {
+                                    *open = !*open;
+                                    cx.notify();
+                                }
+                            })),
+                    )
+                    .when(open, |d| {
+                        d.child(
+                            div()
+                                .id("agent-dropdown-list")
+                                .occlude()
+                                .absolute()
+                                .top_full()
+                                .right_0()
+                                .mt(look.z(4.))
+                                .min_w(look.z(180.))
+                                .py(look.z(4.))
+                                .flex()
+                                .flex_col()
+                                .bg(look.c(ui.overlay_bg))
+                                .border_1()
+                                .border_color(look.c(ui.border_strong))
+                                .rounded(look.z(6.))
+                                .shadow_md()
+                                .children(rows),
+                        )
+                    });
                 let mention = self.mention_over_dialog.clone();
                 let agent_id = agents.get(chosen).map(|a| a.id.clone()).unwrap_or_else(|| "agent".into());
                 Some(
@@ -559,6 +613,15 @@ impl Workspace {
                         .child(
                             div()
                                 .occlude()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        if let Some(Overlay::NewTask { open: open @ true, .. }) = &mut this.overlay {
+                                            *open = false;
+                                            cx.notify();
+                                        }
+                                    }),
+                                )
                                 .w(look.z(600.))
                                 .p(look.z(12.))
                                 .flex()
@@ -576,7 +639,7 @@ impl Workspace {
                                         .child(div().font_weight(gpui::FontWeight::MEDIUM).child("New agent task"))
                                         .child(div().flex_1())
                                         .children(plan_chip)
-                                        .children(chips),
+                                        .child(dropdown),
                                 )
                                 .child(
                                     div()
