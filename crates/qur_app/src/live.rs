@@ -95,6 +95,12 @@ impl LivePane {
     }
 
     fn show(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        // Binaries and huge files (build output, a growing log) stay out of
+        // Live: any bytes now open as text, but Live would read them whole.
+        const LIVE_MAX: u64 = 50 << 20;
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > LIVE_MAX) || qur_editor::encoding::file_is_binary(&path).unwrap_or(true) {
+            return;
+        }
         match EditorView::load(&path) {
             Ok(loaded) => {
                 let (wrap, tab) = (self.wrap, self.tab);

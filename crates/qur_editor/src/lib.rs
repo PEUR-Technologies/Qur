@@ -307,6 +307,12 @@ impl Editor {
         self.forced
     }
 
+    /// Decode as this on the next reload (`open_with(.., forced_encoding())`);
+    /// None detects again.
+    pub fn force_encoding(&mut self, forced: Option<(Encoding, bool)>) {
+        self.forced = forced;
+    }
+
     /// Saving wouldn't reproduce the bytes read: keep the buffer read-only.
     pub fn is_lossy(&self) -> bool {
         self.lossy

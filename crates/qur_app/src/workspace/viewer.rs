@@ -12,18 +12,21 @@ pub(super) struct Viewer {
     title: String,
     /// The task whose worktree the file is in.
     owner: Option<String>,
-    path: Option<PathBuf>,
+    pub(super) path: Option<PathBuf>,
     /// None: a file Qur can't show.
     image: Option<Arc<gpui::Image>>,
+    /// Not an image: the hex view, or a large file's paged text (file_ops.rs).
+    pub(super) body: Option<super::file_ops::FileBody>,
     /// "1280 × 800 · 245.1 KB".
     detail: String,
     prev_focus: Option<FocusHandle>,
 }
 
 impl Viewer {
-    /// Scripted runs' `state` line: "title (image|file) detail".
-    pub(super) fn debug_state(&self) -> String {
-        format!("{} ({}) {}", self.title, if self.image.is_some() { "image" } else { "file" }, self.detail)
+    /// Scripted runs' `state` line: "title (image|file) detail [body]".
+    pub(super) fn debug_state(&self, cx: &App) -> String {
+        let body = self.body.as_ref().map(|b| format!(" [{}]", b.debug_state(cx))).unwrap_or_default();
+        format!("{} ({}) {}{body}", self.title, if self.image.is_some() { "image" } else { "file" }, self.detail)
     }
 }
 
@@ -35,7 +38,7 @@ impl Workspace {
             Preview::Image { label, image } => {
                 let size = files::image_size(image.bytes());
                 let detail = detail(size, image.bytes().len() as u64);
-                self.show_viewer(Viewer { title: label.to_string(), owner: None, path: None, image: Some(image), detail, prev_focus: None }, window, cx);
+                self.show_viewer(Viewer { title: label.to_string(), owner: None, path: None, image: Some(image), body: None, detail, prev_focus: None }, window, cx);
             }
         }
     }
@@ -50,8 +53,10 @@ impl Workspace {
         let image = files::viewable(path).and_then(|format| Some(Arc::new(gpui::Image::from_bytes(format, std::fs::read(path).ok()?))));
         let size = image.as_ref().and_then(|i| files::image_size(i.bytes()));
         let (title, owner) = self.where_is(path, cx);
-        let detail = if image.is_some() { detail(size, len) } else { format!("{} · not a text file", files::human_size(len)) };
-        self.show_viewer(Viewer { title, owner, path: Some(path.to_path_buf()), image, detail, prev_focus: None }, window, cx);
+        let body = if image.is_none() { self.file_body(path, len, window, cx) } else { None };
+        let detail = if image.is_some() { detail(size, len) } else { Self::body_detail(body.as_ref(), len) };
+        self.show_viewer(Viewer { title, owner, path: Some(path.to_path_buf()), image, body, detail, prev_focus: None }, window, cx);
+        self.focus_viewer_body(window, cx);
     }
 
     fn show_viewer(&mut self, mut v: Viewer, window: &mut Window, cx: &mut Context<Self>) {
@@ -100,6 +105,7 @@ impl Workspace {
         let body = match &v.image {
             // Never larger than its own size; scaled down to fit the modal.
             Some(image) => div().size_full().p(look.z(16.)).child(img(image.clone()).size_full().object_fit(gpui::ObjectFit::ScaleDown)).into_any_element(),
+            None if v.body.is_some() => v.body.as_ref().map(|b| b.element()).unwrap_or_else(|| div().into_any_element()),
             None => div()
                 .size_full()
                 .flex()
@@ -150,6 +156,7 @@ impl Workspace {
                                 .children(v.owner.clone().map(|w| div().flex_none().text_color(look.c(ui.text_muted)).child(format!("in {w}"))))
                                 .child(div().flex_none().text_color(look.c(ui.text_muted)).child(v.detail.clone()))
                                 .child(div().flex_1())
+                                .children(self.viewer_buttons(look, cx))
                                 .children(buttons)
                                 .child(div().flex_none().text_color(look.c(ui.text_muted)).child("esc to close")),
                         )

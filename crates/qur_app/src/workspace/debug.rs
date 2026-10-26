@@ -37,7 +37,7 @@ impl Workspace {
                 let p = e.cursor();
                 let mode = e.vim.as_ref().and_then(|v| v.mode).map(|m| m.label()).unwrap_or("-");
                 let text: String = e.model.rope().to_string().chars().take(200).collect();
-                format!("{}@{}:{} vim={mode} dirty={} text={text:?}", e.title(), p.line + 1, p.col + 1, e.is_dirty())
+                format!("{}@{}:{} vim={mode} dirty={} format={:?} text={text:?}", e.title(), p.line + 1, p.col + 1, e.is_dirty(), Self::code_status(e))
             }
             None => "none".into(),
         };
@@ -46,7 +46,7 @@ impl Workspace {
         let u = &self.config.ui;
         let gaps = format!("on={} gap={} rounded={} radius={} border={} sidebar_w={}", u.gaps, u.gap, u.rounded, u.radius, u.tile_border, self.sidebar_w);
         let sidebar = format!("on={} mode={} side={} shown={} visible={} sections={}", self.sidebar, u.sidebar, u.sidebar_side, self.sidebar_shown, self.sidebar_visible(), u.sidebar_sections.join(","));
-        let viewer = self.viewer.as_ref().map_or_else(|| "none".into(), |v| v.debug_state());
+        let viewer = self.viewer.as_ref().map_or_else(|| "none".into(), |v| v.debug_state(cx));
         format!(
             "overlay={overlay} selected={selected} code={code} viewer={viewer} term={{{}}} git={{{vc}}} docks={{{docks}}} gaps={{{gaps}}} sidebar={{{sidebar}}}",
             self.terms.read(cx).debug_state(cx)

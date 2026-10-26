@@ -96,6 +96,10 @@ pub struct EditorConfig {
     pub line_height: f32,
     pub soft_wrap: bool,
     pub tab_width: usize,
+    /// Draw spaces as ·, tabs as → and line ends as ¬ in the code modal.
+    pub show_whitespace: bool,
+    /// Files bigger than this (MB) open read-only, paged from disk.
+    pub large_file_mb: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -188,7 +192,7 @@ impl Default for WindowConfig {
 
 impl Default for EditorConfig {
     fn default() -> Self {
-        EditorConfig { font_family: String::new(), font_size: 13.0, line_height: 1.5, soft_wrap: true, tab_width: 4 }
+        EditorConfig { font_family: String::new(), font_size: 13.0, line_height: 1.5, soft_wrap: true, tab_width: 4, show_whitespace: false, large_file_mb: 50 }
     }
 }
 
@@ -247,6 +251,7 @@ impl Config {
         self.editor.font_size = self.editor.font_size.clamp(6.0, 72.0);
         self.editor.line_height = self.editor.line_height.clamp(1.0, 3.0);
         self.editor.tab_width = self.editor.tab_width.clamp(1, 16);
+        self.editor.large_file_mb = self.editor.large_file_mb.max(1);
         self.window.opacity = self.window.opacity.clamp(0.0, 1.0);
         if !matches!(self.ui.sidebar.as_str(), "show" | "auto" | "hidden") {
             self.ui.sidebar = "show".into();

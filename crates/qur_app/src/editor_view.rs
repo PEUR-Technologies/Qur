@@ -143,6 +143,8 @@ impl EditorView {
 
     pub fn new(loaded: Loaded, soft_wrap: bool, tab_width: usize, cx: &mut Context<Self>) -> Self {
         let Loaded { model, language, syntax } = loaded;
+        // Bytes that didn't decode (or a binary's stray CRs) can't be saved back.
+        let read_only = model.is_lossy();
         let bench = Bench {
             autoscroll: std::env::var("QUR_BENCH").as_deref() == Ok("scroll"),
             autotype: std::env::var("QUR_BENCH").as_deref() == Ok("type"),
@@ -168,7 +170,7 @@ impl EditorView {
             find: None,
             dragging: false,
             last_user_input: None,
-            read_only: false,
+            read_only,
             vim: None,
             agent_mark: None,
             disk_changed: false,
@@ -243,10 +245,9 @@ impl EditorView {
             cx.notify();
             return None;
         }
-        let path = self.path()?.to_path_buf();
-        let new = std::fs::read_to_string(&path).ok()?;
+        let new = self.model.read_disk_text().ok()?;
         let old = self.model.rope().to_string();
-        if new.replace("\r\n", "\n") == old {
+        if new == old {
             return None;
         }
         let range = changed_lines(&old, &new);
@@ -339,7 +340,7 @@ impl EditorView {
     pub fn reload_from_disk(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.path().map(Path::to_path_buf) else { return };
         let indent = self.language.map(|l| l.indent_unit()).unwrap_or("    ");
-        match Editor::open(&path, indent) {
+        match Editor::open_with(&path, indent, self.model.forced_encoding()) {
             Ok(m) => {
                 let cursor = self.cursor();
                 self.model = m;
@@ -1299,6 +1300,8 @@ impl Element for EditorElement {
         let primary_line = v.model.primary().head.line;
         let primary_head = v.model.primary().head;
         let tab_w = v.tab_width.max(1);
+        // View > Show Whitespace: spaces as ·, tabs as →, line ends as ¬.
+        let (ws, ws_color) = (look.show_whitespace, look.c(theme.editor.whitespace));
 
         let mut out = Vec::with_capacity(rows.len());
         let mut span_ix = 0;
@@ -1365,12 +1368,14 @@ impl Element for EditorElement {
                     .unwrap_or_default();
                 let (piece, w): (std::borrow::Cow<str>, usize) = if c == '\t' {
                     let n = tab_w - (vcol % tab_w);
-                    (" ".repeat(n).into(), n)
+                    (if ws { format!("→{}", " ".repeat(n - 1)).into() } else { " ".repeat(n).into() }, n)
+                } else if let Some(sym) = control_picture(c, ws) {
+                    (sym.into(), 1)
                 } else {
                     let mut b = [0u8; 4];
                     (c.encode_utf8(&mut b).to_string().into(), char_width(c))
                 };
-                let color = style.color.map(|c| look.c(c)).unwrap_or(default_color);
+                let color = if ws && (c == ' ' || c == '\t') { ws_color } else { style.color.map(|c| look.c(c)).unwrap_or(default_color) };
                 let weight = if style.bold { gpui::FontWeight::BOLD } else { gpui::FontWeight::NORMAL };
                 let fstyle = if style.italic { gpui::FontStyle::Italic } else { gpui::FontStyle::Normal };
                 match runs.last_mut() {
@@ -1395,6 +1400,10 @@ impl Element for EditorElement {
             }
             vcols.push(vcol);
             max_vcol = max_vcol.max(vcol);
+            if ws && line_end && has_nl {
+                text.push('¬');
+                runs.push(TextRun { len: '¬'.len_utf8(), font: code_font.clone(), color: ws_color, background_color: None, underline: None, strikethrough: None });
+            }
             let shaped = ts.shape_line(SharedString::from(text), fs, &runs, None);
             let gutter = r.first.then(|| {
                 let num = SharedString::from(format!("{:>w$}", r.line + 1, w = digits));
@@ -1554,6 +1563,21 @@ fn changed_lines(old: &str, new: &str) -> Range<usize> {
     let bottom = a.iter().rev().zip(b.iter().rev()).take_while(|(x, y)| x == y).count();
     let end = b.len().saturating_sub(bottom).max(top + 1).min(b.len().max(1));
     top.min(end.saturating_sub(1))..end
+}
+
+/// What a char is drawn as when it isn't itself: a space as · (Show
+/// Whitespace), control characters (a binary opened as text) as their
+/// Control Pictures symbol, one cell wide.
+fn control_picture(c: char, ws: bool) -> Option<&'static str> {
+    const C0: [&str; 32] = [
+        "␀", "␁", "␂", "␃", "␄", "␅", "␆", "␇", "␈", "␉", "␊", "␋", "␌", "␍", "␎", "␏", "␐", "␑", "␒", "␓", "␔", "␕", "␖", "␗", "␘", "␙", "␚", "␛", "␜", "␝", "␞", "␟",
+    ];
+    match c {
+        ' ' if ws => Some("·"),
+        '\0'..='\x1F' => Some(C0[c as usize]),
+        '\x7F' => Some("␡"),
+        _ => None,
+    }
 }
 
 /// Display width in cells (CJK and emoji are 2 wide).

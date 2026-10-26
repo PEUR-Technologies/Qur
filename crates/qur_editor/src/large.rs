@@ -8,6 +8,8 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+pub use regex::bytes::Regex;
+
 pub const LINES_PER_ENTRY: u64 = 1024;
 pub const BYTES_PER_ENTRY: u64 = 256 << 10;
 /// Bytes of one line kept for display (and searched); the rest is skipped.

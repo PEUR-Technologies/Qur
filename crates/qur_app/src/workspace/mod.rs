@@ -8,6 +8,7 @@ mod actions;
 mod checks;
 mod code;
 mod debug;
+mod file_ops;
 mod merge;
 mod overlays;
 mod pickers;
@@ -143,6 +144,8 @@ enum PickKind {
     /// Go to Symbol in the code modal: each symbol's name (bytes), and the
     /// selections to put back on Esc (highlighting previews a symbol).
     Symbols { targets: Vec<std::ops::Range<usize>>, restore: (Vec<qur_editor::Selection>, usize) },
+    /// Reopen with / Convert to Encoding… (`encoding::CHOICES`).
+    Encoding(file_ops::EncodingAction),
 }
 
 enum Overlay {
@@ -313,6 +316,7 @@ impl Workspace {
                         t.update(cx, |t, cx| t.refresh(cx));
                     }
                     this.file_lists.clear();
+                    this.check_outside_files(cx);
                 }
             }),
         ];
@@ -445,6 +449,7 @@ impl Workspace {
             sidebar_auto: self.config.ui.sidebar == "auto",
             sidebar_right: self.sidebar_right(),
             soft_wrap: self.code.as_ref().map(|e| e.read(cx).soft_wrap()).unwrap_or(self.config.editor.soft_wrap),
+            show_whitespace: self.config.editor.show_whitespace,
             recent: qur_config::State::load().recent_projects,
             merging: self.merge.is_some(),
             turns: self.selected_last_turn(cx).is_some(),
@@ -826,6 +831,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_inspect))
             .on_action(cx.listener(Self::follow_agent))
             .on_action(cx.listener(Self::take_over))
+            .map(|d| Self::file_actions(d, cx))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::Transparency { .. } | Overlay::Gaps)) {
                     this.save_popover_transparency(cx);
@@ -837,7 +843,9 @@ impl Render for Workspace {
             .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                 // The file viewer sits over everything: Esc is its own.
                 if ev.keystroke.key == "escape" && this.viewer.is_some() {
-                    this.close_viewer(window, cx);
+                    if !this.viewer_escape(window, cx) {
+                        this.close_viewer(window, cx);
+                    }
                     return cx.stop_propagation();
                 }
                 if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::AgentMenu { .. } | Overlay::About)) {
