@@ -1,7 +1,8 @@
 //! Qur: a lightweight agentic code editor for macOS.
 //!
 //! `qur [path]` opens a folder as a project, or a file in its project.
-//! Without a path it reopens the most recent project, else asks for a folder.
+//! Without a path it reopens the most recent project, else shows the empty
+//! window (no project: recent projects, Open Folder…, terminals).
 
 mod assets;
 mod agent_view;
@@ -48,6 +49,8 @@ use look::Look;
 use workspace::Workspace;
 
 static START: OnceLock<Instant> = OnceLock::new();
+/// Set once Qur is quitting: windows closing then don't bring up the empty window.
+static QUITTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// QUR_BENCH: print a startup timestamp (ms since main).
 pub fn mark(label: &str) {
@@ -74,7 +77,12 @@ pub fn first_frame(handle: AnyWindowHandle, cx: &mut App) {
     // Dev scripting for screenshots/tests: QUR_DEBUG_ACTIONS="qur::ThemePicker,wait:300,qur::ToggleTerminal"
     // dispatches commands by name after the first frame; `type:`, `key:`,
     // `click:` and `drag:` steps inject input (see `script`).
-    if let Ok(list) = std::env::var("QUR_DEBUG_ACTIONS") {
+    // The first window only: a project opened from the empty window would
+    // otherwise run the steps again.
+    static SCRIPTED: OnceLock<()> = OnceLock::new();
+    if let Ok(list) = std::env::var("QUR_DEBUG_ACTIONS")
+        && SCRIPTED.set(()).is_ok()
+    {
         script::run(handle, &list, cx);
     }
     if std::env::var_os("QUR_BENCH").is_some() {
@@ -103,59 +111,152 @@ fn project_root_for(path: &Path) -> PathBuf {
     }
 }
 
+/// Folders that are never opened as a project: the home folder and `/` (a
+/// file tree, watcher and search over all of it would only be slow). They
+/// get the empty window, whose terminals start in the home folder.
+fn too_broad(root: &Path) -> bool {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let home = std::fs::canonicalize(&home).unwrap_or(home);
+    root == home || root.parent().is_none()
+}
+
+/// What to do in a project's window once it's open (or focused).
+pub type Then = Box<dyn FnOnce(&mut Workspace, &mut gpui::Window, &mut gpui::Context<Workspace>)>;
+
 /// Focus the window already showing `root`, else open a new one. Then open `file`.
 pub fn open_project(root: PathBuf, file: Option<PathBuf>, cx: &mut App) {
+    let then: Option<Then> = file.map(|f| -> Then { Box::new(move |ws, window, cx| ws.open_path(&f, window, cx)) });
+    open_project_then(root, then, cx)
+}
+
+/// Open (or focus) `root`'s window and run `then` in it. A folder that's gone
+/// or too broad to be a project gets the empty window instead.
+pub fn open_project_then(root: PathBuf, then: Option<Then>, cx: &mut App) {
     let root = std::fs::canonicalize(&root).unwrap_or(root);
+    if !root.is_dir() || too_broad(&root) {
+        let missing = (!root.is_dir()).then(|| format!("{} isn't there any more", root.display()));
+        return open_home(missing, then, cx);
+    }
     for handle in cx.windows() {
         if let Some(ws) = handle.downcast::<Workspace>() {
-            let mine = ws.read(cx).map(|w| w.root == root).unwrap_or(false);
+            let mine = ws.read(cx).map(|w| w.has_project() && w.root == root).unwrap_or(false);
             if mine {
                 let _ = ws.update(cx, |ws, window, cx| {
                     window.activate_window();
-                    if let Some(f) = &file {
-                        ws.open_path(f, window, cx);
+                    if let Some(then) = then {
+                        then(ws, window, cx);
                     }
                 });
+                cx.defer(retire_empty_windows);
                 return;
             }
         }
     }
-    let window = open_window(root, cx);
+    log(&format!("open project {}", root.display()));
+    let window = open_window(Some(root), cx);
     mark("window_open");
-    if let Some(f) = file {
-        let _ = window.update(cx, |ws, window, cx| ws.open_path(&f, window, cx));
+    if let Some(then) = then {
+        let _ = window.update(cx, |ws, window, cx| then(ws, window, cx));
         mark("file_open");
+    }
+    // The empty window has done its job once a project opens from it (it's
+    // kept while it has terminals or unsaved files).
+    cx.defer(retire_empty_windows);
+}
+
+/// The empty window: no project, for when Qur has none to show (launched
+/// without one, the last one gone, `qur ~`, the last project window closed)
+/// or File > New Window. An idle one is reused. `note` shows in its bar.
+pub fn open_home(note: Option<String>, then: Option<Then>, cx: &mut App) {
+    let idle = cx.windows().into_iter().filter_map(|h| h.downcast::<Workspace>()).find(|ws| ws.read(cx).is_ok_and(|w| w.idle_home(cx)));
+    let window = match idle {
+        Some(w) => {
+            let _ = w.update(cx, |_, window, _| window.activate_window());
+            w
+        }
+        None => {
+            log("open the empty window");
+            let w = open_window(None, cx);
+            mark("window_open");
+            w
+        }
+    };
+    let _ = window.update(cx, |ws, window, cx| {
+        if let Some(n) = note {
+            ws.note(n, cx);
+        }
+        if let Some(then) = then {
+            then(ws, window, cx);
+        }
+    });
+}
+
+/// Close empty windows that are idle (no terminals, no unsaved files): a
+/// project has opened, so they're not needed.
+fn retire_empty_windows(cx: &mut App) {
+    for h in cx.windows() {
+        let Some(ws) = h.downcast::<Workspace>() else { continue };
+        if ws.read(cx).is_ok_and(|w| w.idle_home(cx)) && cx.windows().len() > 1 {
+            let _ = ws.update(cx, |ws, window, cx| {
+                ws.shutdown(cx);
+                window.remove_window();
+            });
+        }
     }
 }
 
-pub fn prompt_open_folder(cx: &mut App) {
-    // One panel at a time: a second Cmd+N (or Cmd+N reaching us twice from a
+/// Ask for a folder (Open Folder…, New Agent… in the empty window).
+/// Dev/test: QUR_DEBUG_OPEN=<folder> answers the panel (logged as `OPEN_PANEL`).
+pub fn pick_folder(prompt: &str, then: impl FnOnce(PathBuf, &mut App) + 'static, cx: &mut App) {
+    // One panel at a time: a second Cmd+O (or Cmd+O reaching us twice from a
     // terminal) stacked another panel under the first, so Cancel seemed to
     // leave it open.
     static OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if let Some(p) = std::env::var_os("QUR_DEBUG_OPEN").map(PathBuf::from) {
+        println!("OPEN_PANEL {}", p.display());
+        return then(p, cx);
+    }
     if OPEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Open".into()) });
+    let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some(prompt.to_string().into()) });
     cx.spawn(async move |cx| {
         let res = rx.await;
         OPEN.store(false, std::sync::atomic::Ordering::SeqCst);
         if let Ok(Ok(Some(paths))) = res
             && let Some(p) = paths.into_iter().next()
         {
-            cx.update(|cx| open_project(p, None, cx));
+            cx.update(|cx| then(p, cx));
         }
     })
     .detach();
 }
 
-fn open_window(root: PathBuf, cx: &mut App) -> WindowHandle<Workspace> {
+pub fn prompt_open_folder(cx: &mut App) {
+    pick_folder("Open", |p, cx| open_project(p, None, cx), cx);
+}
+
+/// Windows showing no project (the empty window), so closing the last
+/// project window can tell them apart.
+#[derive(Default)]
+struct EmptyWindows(std::collections::HashSet<gpui::WindowId>);
+impl gpui::Global for EmptyWindows {}
+
+fn open_window(root: Option<PathBuf>, cx: &mut App) -> WindowHandle<Workspace> {
     let bench = std::env::var_os("QUR_BENCH").is_some();
     // Cascade new windows a little so they don't stack exactly.
     let n = cx.windows().len() as f32;
     let mut bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
     bounds.origin = point(bounds.origin.x + px(24. * n), bounds.origin.y + px(24. * n));
-    let title = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let title = match &root {
+        Some(r) => r.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        None => "Qur".to_string(),
+    };
+    let empty = root.is_none();
+    // Scripted runs check which windows opened.
+    if script::on() {
+        println!("WINDOW {}", root.as_ref().map_or_else(|| "empty".to_string(), |r| r.display().to_string()));
+    }
     let window = cx
         .open_window(
             WindowOptions {
@@ -184,6 +285,9 @@ fn open_window(root: PathBuf, cx: &mut App) -> WindowHandle<Workspace> {
             },
         )
         .expect("open window");
+    if empty {
+        cx.default_global::<EmptyWindows>().0.insert(window.window_id());
+    }
     let _ = window.update(cx, |_, window, _| window.activate_window());
     window
 }
@@ -236,23 +340,38 @@ fn main() {
         match arg {
             Some(p) => {
                 let p = std::fs::canonicalize(&p).unwrap_or(p);
-                let file = p.is_file().then(|| p.clone());
-                open_project(project_root_for(&p), file, cx);
+                if !p.exists() {
+                    open_home(Some(format!("{} doesn't exist", p.display())), None, cx);
+                } else {
+                    let file = p.is_file().then(|| p.clone());
+                    open_project(project_root_for(&p), file, cx);
+                }
             }
-            None => match qur_config::State::load().recent_projects.into_iter().find(|p| p.is_dir()) {
-                Some(p) => open_project(p, None, cx),
-                None => prompt_open_folder(cx),
+            // The most recent project, if it's still there; else the empty
+            // window (which lists the others).
+            None => match qur_config::State::load().recent_projects.into_iter().next() {
+                Some(p) if p.is_dir() => open_project(p, None, cx),
+                Some(p) => open_home(Some(format!("{} isn't there any more", p.display())), None, cx),
+                None => open_home(None, None, cx),
             },
         }
 
         cx.on_window_closed(|cx, id| {
             Look::remove(id, cx);
-            if cx.windows().is_empty() {
-                cx.quit();
+            let was_empty = cx.default_global::<EmptyWindows>().0.remove(&id);
+            if script::on() {
+                println!("WINDOW closed{} ({} left)", if was_empty { " empty" } else { "" }, cx.windows().len());
             }
+            if !cx.windows().is_empty() || QUITTING.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            // Closing the last project window leaves the empty window; closing
+            // that one quits.
+            if was_empty { cx.quit() } else { open_home(None, None, cx) }
         })
         .detach();
         cx.on_app_quit(|cx| {
+            QUITTING.store(true, std::sync::atomic::Ordering::SeqCst);
             for h in cx.windows() {
                 if let Some(ws) = h.downcast::<Workspace>() {
                     let _ = ws.update(cx, |ws, _, cx| ws.shutdown(cx));

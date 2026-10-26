@@ -217,12 +217,22 @@ pub fn run(handle: AnyWindowHandle, list: &str, cx: &mut App) {
     let bg = cx.background_executor().clone();
     cx.spawn(async move |cx| {
         let pause = |ms| bg.timer(Duration::from_millis(ms));
+        let mut handle = handle;
         for step in steps {
             if let Step::Wait(ms) = step {
                 pause(ms).await;
                 continue;
             }
             pause(200).await;
+            // Its window closed (a project opened from the empty window, or
+            // the last project window closed): carry on in the newest one.
+            if let Some(next) = cx.update(|cx| {
+                let wins = cx.windows();
+                (!wins.contains(&handle)).then(|| wins.last().copied()).flatten()
+            }) {
+                println!("SCRIPT follows window {}", next.window_id().as_u64());
+                handle = next;
+            }
             let t = crate::START.get().map(|s| s.elapsed().as_millis()).unwrap_or(0);
             match step {
                 Step::Action(name) => {

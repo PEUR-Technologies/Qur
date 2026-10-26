@@ -725,7 +725,7 @@ impl Workspace {
             .rounded(look.z(6.))
             .text_size(look.text(-1.))
             .text_color(look.c(ui.text))
-            .child(div().flex().gap(look.z(4.)).child(scope("This project", project_scope, "scope-project", true)).child(scope("All projects", !project_scope, "scope-all", false)))
+            .when(!self.home, |d| d.child(div().flex().gap(look.z(4.)).child(scope("This project", project_scope, "scope-project", true)).child(scope("All projects", !project_scope, "scope-all", false))))
             .child(div().flex().justify_between().child("Window opacity").child(div().text_color(look.c(ui.text_muted)).child(format!("{pct}%"))))
             .child(
                 div()

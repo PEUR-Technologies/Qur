@@ -18,11 +18,17 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - ---
 - Quit Qur `Cmd+Q`
 
+## The empty window (no project)
+
+Qur opens a window without a project when it has none to show: launched (from Finder or the Dock) with no last project, the last project moved or deleted, `qur ~` or `qur /`, the last project window closed, or File > New Window. Its stage lists recent projects and Open Folder…, New Terminal, New Agent Terminal in… and New Agent Task in…; its terminals start in the home folder, and files open in the code modal. Commands that need a project are disabled there: Quick Open, Files Dropdown, Use Default Theme for This Project, Find/Replace in Project, Search, Source Control and its Git items, the whole Agent menu except New Agent Task… and New Agent Terminal (which ask for the folder to work in and open it as a project), Peek Layout, Peek, Inspect Element and Follow Agent. Theme and Transparency changes there apply to all projects. Opening a project closes the empty window unless it has terminals or unsaved files; closing the empty window when it's the last one quits Qur.
+
+A folder that isn't a git repository opens as a project without git: Source Control, its Git items and Merge Conflicts are disabled. Its first Agent Terminal works in the folder itself; New Agent Task… and further Agent Terminals need a worktree, so they first offer **Initialize Git** (`git init` and a first commit of the folder's files, minus anything `.gitignore`d).
+
 ## File
-- New Agent Task… `Cmd+Shift+N`
+- New Agent Task… `Cmd+Shift+N` (in the empty window: asks for the folder first)
 - New Terminal `Cmd+T`
-- New Agent Terminal `Cmd+Shift+T`
-- New Window `Cmd+N`
+- New Agent Terminal `Cmd+Shift+T` (in the empty window: asks for the folder first)
+- New Window `Cmd+N` (the empty window; an idle one is brought forward)
 - ---
 - Open Folder… `Cmd+O`
 - Open Recent ▸ (projects)
