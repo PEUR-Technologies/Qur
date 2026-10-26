@@ -112,6 +112,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - ---
 - Open Task Worktree in Terminal
 - Reveal Worktree in Finder
+- Clean Up Worktrees… (per project: each Qur worktree, `qur/*` branch without a worktree, worktree whose folder is gone and leftover turn checkpoints, with its size on disk, the task that owns it, unmerged commits and uncommitted changes. Leftovers with no task, nothing unmerged and nothing uncommitted come selected; removing anything with unmerged commits or uncommitted changes asks again and names them. A task's own worktree is removed with Discard Task…; `qur doctor` shows the total)
 
 ## Terminal
 - New Terminal `Cmd+T` · New Agent Terminal `Cmd+Shift+T`

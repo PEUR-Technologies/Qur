@@ -20,6 +20,7 @@ impl Workspace {
             Some(Overlay::Gaps) => "gaps".into(),
             Some(Overlay::NewTask { .. }) => "new_task".into(),
             Some(Overlay::Review { input, .. }) => format!("review:{:?}", input.read(cx).text),
+            Some(Overlay::Cleanup(c)) => c.debug(),
         };
         let selected = match &self.selected {
             Some(Selected::Agent(id) | Selected::TermTask(id)) => {

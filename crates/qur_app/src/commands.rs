@@ -28,6 +28,7 @@ pub mod qur {
             RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge, Caffeinate, ShowKeepAwake, SwitchSession, ZenMode,
             Gaps, ToggleGaps, AutoHideSidebar, SidebarOnRight,
             ShowLastTurn, RewindLastTurn, ReviewWork, ReviewPlan, SendReviewFindings,
+            CleanUpWorktrees,
         ]
     );
 
@@ -352,6 +353,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::RunChecks, "Agent", "Run Checks Now", "", W, R),
     cmd!(qur::RunProject, "Agent", "Run Project in Worktree", "", W, R),
     cmd!(qur::DiscardTask, "Agent", "Discard Task…", "", W, R),
+    cmd!(qur::CleanUpWorktrees, "Agent", "Clean Up Worktrees…", "", W, R),
     cmd!(qur::NextConflict, "Merge", "Next Conflict", "", W, R),
     cmd!(qur::PrevConflict, "Merge", "Previous Conflict", "", W, R),
     cmd!(qur::AcceptOurs, "Merge", "Accept Ours", "", W, R),
@@ -795,6 +797,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             sep(),
             item(qur::OpenWorktreeInTerminal),
             item(qur::RevealWorktree),
+            item(qur::CleanUpWorktrees),
         ]),
         Menu::new("Terminal").items([
             item(qur::NewTerminal),

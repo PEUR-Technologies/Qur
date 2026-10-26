@@ -202,7 +202,35 @@ check_first_run() {  # QUR_DEBUG_SETUP=1: the first-run welcome; Done (or Skip f
   ok "Done closed it" state_has 'overlay=none'
 }
 
-ALL=(vim find_terminal rename rename_click dock cmd_click git_commit git_stage panels gaps gaps_terminal sidebar settings first_run)
+check_cleanup() {  # Clean Up Worktrees…: orphans preselected and removed; unmerged/dirty only after a second yes; a task's own kept.
+  setup cleanup
+  local W="$QUR_HOME/worktrees/$(git_ rev-list --max-parents=0 HEAD | cut -c1-12)"
+  mkdir -p "$W" "$QUR_HOME/worktrees/ffffffffffff/stray"
+  git_ worktree add -q -b qur/claude/orphan "$W/orphan"
+  git_ worktree add -q -b qur/claude/work "$W/work"
+  echo w > "$W/work/w.txt"; git -C "$W/work" add -A; git -C "$W/work" -c user.name=hc -c user.email=hc@localhost -c commit.gpgsign=false commit -qm work
+  git_ worktree add -q -b qur/claude/wip "$W/wip"; echo edited > "$W/wip/a.txt"
+  git_ worktree add -q -b qur/claude/gone "$W/gone"; rm -rf "${W:?}/gone"
+  git_ branch qur/claude/left
+  git_ update-ref refs/qur/turns/dead/1/start "$(git_ rev-parse 'HEAD^{tree}')"
+  echo x > "$QUR_HOME/worktrees/ffffffffffff/stray/x.txt"
+  touch -t 202601010000 "$W"/* "$QUR_HOME/worktrees/ffffffffffff/stray"  # old enough to preselect
+  # Two Agent Terminals: the second works in its own (owned, brand-new) worktree.
+  QUR_DEBUG_PROMPT="1,0" drive "wait:1500,qur::NewAgentTerminal,wait:800,qur::NewAgentTerminal,wait:1500,qur::CleanUpWorktrees,wait:2500,state,click:@cleanup:remove,wait:2500,state,click:@cleanup:row:qur/claude/work,click:@cleanup:row:qur/claude/wip,click:@cleanup:remove,wait:2000,state,click:@cleanup:remove,wait:2500,state,key:escape,state,qur::Quit"
+  ok "orphans listed and preselected" grep -qE '^CLEANUP qur/claude/orphan \| no task · merged · clean \| .* \| picked' "$LOG"
+  ok "the folder-gone worktree, the lone branch and dead turn refs too" test "$(grep -cE '^CLEANUP (qur/claude/gone \(folder gone\)|qur/claude/left \(no worktree\)|turn checkpoints of “dead”).*\| picked$' "$LOG")" -eq 3
+  ok "unmerged, dirty and the unknown folder are not preselected" test "$(grep -cE '^CLEANUP (qur/claude/work \| 1 unmerged commit|qur/claude/wip \| uncommitted changes|stray \(unknown folder\)).*\| -$' "$LOG")" -ge 3
+  ok "the live task's worktree shows its task and isn't selected" grep -qE '^CLEANUP .*\| task “.*\| -$' "$LOG"
+  ok "the first Remove took the 4 orphans" has 'FLASH Removed 4,'
+  ok "Keep Them left the unmerged and dirty ones" grep -qE '^PROMPT Remove 2 items with unsaved work\? -> 1' "$LOG"
+  ok "Remove Them Too removed them" has 'FLASH Removed 2,'
+  ok "git agrees: only the task's branch is left" test "$(git_ for-each-ref --format='%(refname)' refs/heads/qur refs/qur | tr '\n' ' ')" = "refs/heads/qur/claude/term-2 "
+  ok "the stray folder stays (it asks first)" test -d "$QUR_HOME/worktrees/ffffffffffff/stray"
+  ok "the project folder is untouched" test "$(git_ status --porcelain)" = ""
+  ok "Esc closed it" state_has 'overlay=none'
+}
+
+ALL=(vim find_terminal rename rename_click dock cmd_click git_commit git_stage panels gaps gaps_terminal sidebar settings first_run cleanup)
 [ "${1:-}" = "-l" ] && { printf '%s\n' "${ALL[@]}"; exit 0; }
 for c in "${@:-${ALL[@]}}"; do
   echo "$c"
