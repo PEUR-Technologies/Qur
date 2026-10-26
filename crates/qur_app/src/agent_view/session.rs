@@ -795,7 +795,7 @@ impl AgentTask {
                 }
                 SessionUpdate::ToolCall(t) => {
                     let id = t.id.clone();
-                    let paths: Vec<PathBuf> = t.locations.iter().map(|l| l.path.clone()).collect();
+                    let paths = crate::monitor::tool_paths(&t.locations, &t.content);
                     let (k, st) = (heat_kind(t.kind), heat_status(t.status));
                     let lines: Vec<(PathBuf, u32)> = t.locations.iter().filter_map(|l| Some((l.path.clone(), l.line?))).collect();
                     // A reviewer's reads aren't the task agent's work: no heat.
@@ -813,7 +813,7 @@ impl AgentTask {
                 }
                 SessionUpdate::ToolCallUpdate(u) => {
                     let id = u.id.clone();
-                    let paths: Vec<PathBuf> = u.locations.iter().flatten().map(|l| l.path.clone()).collect();
+                    let paths = crate::monitor::tool_paths(u.locations.iter().flatten(), u.content.iter().flatten());
                     let (k, st) = (u.kind.map(heat_kind), u.status.map(heat_status));
                     let lines: Vec<(PathBuf, u32)> = u.locations.iter().flatten().filter_map(|l| Some((l.path.clone(), l.line?))).collect();
                     if self.review.is_none() {

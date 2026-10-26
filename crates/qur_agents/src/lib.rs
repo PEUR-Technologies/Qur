@@ -274,6 +274,15 @@ pub struct Turn {
 }
 
 impl TaskRecord {
+    /// What its changes are measured against. A worktree task: the commit it started
+    /// from (its branch is what Merge brings over). A project-folder agent: your current
+    /// `HEAD`, resolved at each diff, since you commit its work yourself and a commit made
+    /// since it started is no longer a change. One turn's own changes come from that
+    /// turn's checkpoints (`turns`), not from this.
+    pub fn diff_base(&self) -> &str {
+        if self.in_root { "HEAD" } else { &self.base }
+    }
+
     /// The newest turn that can still be rewound or viewed.
     pub fn last_turn(&self) -> Option<&Turn> {
         self.turns.iter().rev().find(|t| !t.rewound)

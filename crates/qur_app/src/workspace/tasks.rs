@@ -22,10 +22,12 @@ impl Workspace {
         let todo_id = record.id.clone();
         let accent = Look::of(window, cx).theme.accents[0].base;
         let monitor = cx.new(|cx| {
-            let mut m = TaskMonitor::new(record.worktree.clone(), record.base.clone(), accent, record.in_root, cx);
+            let shared = if record.in_root { qur_heat::Shared::Busy } else { qur_heat::Shared::No };
+            let mut m = TaskMonitor::new(record.worktree.clone(), record.diff_base().to_string(), accent, shared, cx);
             // No turns in a terminal: in its own worktree every write counts as the
             // agent's edit. In the project folder, only while it's busy (writing output;
-            // see terminal_activity), so your edits there stay yours.
+            // see terminal_activity) and never to a file you have open with unsaved
+            // changes, so your edits there stay yours.
             m.set_turn_active(!record.in_root);
             m
         });
@@ -39,7 +41,7 @@ impl Workspace {
             }
         });
         self._subs.push(sub);
-        let changes = cx.new(|cx| ChangesView::new(self.root.clone(), record.worktree.clone(), record.base.clone(), record.branch.clone(), cx));
+        let changes = cx.new(|cx| ChangesView::new(self.root.clone(), record.worktree.clone(), record.diff_base().to_string(), record.branch.clone(), cx));
         let id = record.id.clone();
         let sub = cx.subscribe_in(&changes, window, move |this, _, ev: &ChangesEvent, window, cx| this.on_changes_event(&id, ev, window, cx));
         self._subs.push(sub);
@@ -133,6 +135,13 @@ impl Workspace {
                 this.files_changed(&root, &paths, window, cx);
             }
             MonitorEvent::Changed => cx.notify(),
+            // You committed in the project folder: its Agent Terminal's diff is stale.
+            MonitorEvent::BaseMoved => {
+                let root = m.read(cx).worktree.clone();
+                if let Some(t) = this.term_tasks.iter().find(|t| t.record.worktree == root) {
+                    t.changes.update(cx, |c, cx| c.refresh(cx));
+                }
+            }
         });
         self._subs.push(sub);
     }

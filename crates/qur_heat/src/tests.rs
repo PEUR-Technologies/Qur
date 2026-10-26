@@ -398,7 +398,7 @@ fn deleted_files_are_listed_until_they_come_back() {
 fn shared_folder_shows_only_what_the_agent_touched() {
     let c = clock();
     let mut h = hm();
-    h.set_shared(true);
+    h.set_shared(Shared::Tools);
     // Your uncommitted work, found by the first full scan.
     h.set_stat(Path::new("mine.rs"), Some(CHANGED));
     h.set_stat(Path::new("mine_gone.rs"), Some(DELETED));
@@ -419,46 +419,134 @@ fn shared_folder_shows_only_what_the_agent_touched() {
     assert_eq!(h.folder_state(Path::new(""), now), Some(HeatState::Deleted));
 
     // A separate checkout (not shared) shows everything that differs from base.
-    h.set_shared(false);
+    h.set_shared(Shared::No);
     assert_eq!(state(&h, "mine.rs", now), HeatState::Changed);
     assert_eq!(h.deleted(), vec![p("mine_gone.rs"), p("theirs_gone.rs")]);
 }
 
 #[test]
-fn shared_folder_attributes_writes_only_while_the_agent_works() {
+fn shared_folder_terminal_writes_count_while_busy_unless_yours() {
     let c = clock();
     let mut h = hm();
-    h.set_shared(true);
-    // An Agent Terminal (no tool calls): the turn flag alone decides.
+    h.set_shared(Shared::Busy);
+    // An Agent Terminal (no tool calls): the busy flag decides.
     h.on_fs_change(&[abs("a.rs")], true, c.at(0));
     assert_eq!(state(&h, "a.rs", c.at(10)), HeatState::Editing);
     h.on_fs_change(&[abs("b.rs")], false, c.at(0));
     assert_eq!(state(&h, "b.rs", c.at(10)), HeatState::Idle);
     assert_eq!(h.cell(Path::new("b.rs"), c.at(10)).level, 0);
-
-    // An ACP agent mid-turn: writes count while a tool runs and shortly after.
-    h.on_tool("r", Some(ToolKind::Read), Some(ToolStatus::InProgress), &[abs("a.rs")], c.at(1000));
-    h.on_fs_change(&[abs("c.rs")], true, c.at(1100));
-    assert_eq!(state(&h, "c.rs", c.at(1200)), HeatState::Editing);
-    h.on_tool("r", None, Some(ToolStatus::Completed), &[], c.at(2000));
-    h.on_fs_change(&[abs("d.rs")], true, c.at(2000 + TOOL_GRACE.as_millis() as u64 - 1));
-    assert_eq!(h.cell(Path::new("d.rs"), c.at(4000)).level, 1, "within the grace");
-    // Thinking for a while with no tool running: that write was yours (another editor).
-    let later = 2000 + TOOL_GRACE.as_millis() as u64 + 1;
-    h.on_fs_change(&[abs("e.rs")], true, c.at(later));
-    let cell = h.cell(Path::new("e.rs"), c.at(later + 10));
+    // A file open with unsaved changes in Qur is yours, busy or not.
+    let yours = |p: &Path| p == abs("open.rs");
+    h.on_fs_change_with(&[abs("open.rs"), abs("c.rs")], true, yours, c.at(100));
+    let cell = h.cell(Path::new("open.rs"), c.at(110));
     assert_eq!((cell.state, cell.level), (HeatState::Idle, 0));
-    h.set_stat(Path::new("e.rs"), Some(CHANGED));
-    assert_eq!(state(&h, "e.rs", c.at(later + 500)), HeatState::Idle);
-    assert!(!h.changed().contains(&p("e.rs")));
+    assert_eq!(state(&h, "c.rs", c.at(110)), HeatState::Editing);
+    h.set_stat(Path::new("open.rs"), Some(CHANGED));
+    assert!(!h.changed().contains(&p("open.rs")));
     // Every write still gets its diff stat recomputed.
-    assert!(h.take_due(c.at(later + 200)).contains(&p("e.rs")));
-
-    // The same write in a task worktree (not shared) would be the agent's.
+    assert!(h.take_due(c.at(300)).contains(&p("open.rs")));
+    // In a task worktree nothing is yours: the agent owns the folder.
     let mut w = hm();
-    w.on_tool("r", Some(ToolKind::Read), Some(ToolStatus::Completed), &[], c.at(0));
-    w.on_fs_change(&[abs("e.rs")], true, c.at(later));
-    assert_eq!(state(&w, "e.rs", c.at(later + 10)), HeatState::Editing);
+    w.on_fs_change_with(&[abs("open.rs")], true, yours, c.at(0));
+    assert_eq!(state(&w, "open.rs", c.at(10)), HeatState::Editing);
+}
+
+#[test]
+fn shared_folder_acp_writes_are_attributed_by_tool_paths() {
+    let c = clock();
+    let mut h = hm();
+    h.set_shared(Shared::Tools);
+    // A turn with no tool call yet (the agent is thinking): your write is yours.
+    h.on_fs_change(&[abs("early.rs")], true, c.at(0));
+    assert_eq!(h.cell(Path::new("early.rs"), c.at(10)).level, 0);
+    // A read running isn't a writer either (the old timing rule took this one).
+    h.on_tool("r", Some(ToolKind::Read), Some(ToolStatus::InProgress), &[abs("a.rs")], c.at(100));
+    h.on_fs_change(&[abs("mine.rs")], true, c.at(200));
+    assert_eq!(state(&h, "mine.rs", c.at(210)), HeatState::Idle);
+    // An edit naming its file: that file is the agent's, others written meanwhile aren't.
+    h.on_tool("e", Some(ToolKind::Edit), Some(ToolStatus::InProgress), &[abs("e.rs")], c.at(300));
+    h.on_fs_change(&[abs("e.rs"), abs("other.rs")], true, c.at(350));
+    h.on_tool("e", None, Some(ToolStatus::Completed), &[], c.at(400));
+    let cell = h.cell(Path::new("e.rs"), c.at(500));
+    assert_eq!((cell.state, cell.level), (HeatState::Editing, 1), "the edit's write is one touch");
+    assert_eq!(h.cell(Path::new("other.rs"), c.at(500)).level, 0);
+    // The watcher reports the edit's write after the tool finished: still its, still one touch.
+    h.on_fs_change(&[abs("e.rs")], true, c.at(1000));
+    assert_eq!(h.cell(Path::new("e.rs"), c.at(1010)).level, 1);
+    // Even when the file is open dirty in Qur: the agent's edit tool named it.
+    h.on_fs_change_with(&[abs("e.rs")], true, |_| true, c.at(1100));
+    assert_eq!(state(&h, "e.rs", c.at(1110)), HeatState::Editing);
+    // Past the grace, a write to the same file is yours (another editor).
+    let later = 400 + TOOL_GRACE.as_millis() as u64 + 1;
+    h.on_fs_change(&[abs("e.rs"), abs("late.rs")], true, c.at(later + 3000));
+    assert_eq!(h.cell(Path::new("e.rs"), c.at(later + 3010)).level, 1);
+    assert_eq!(h.cell(Path::new("late.rs"), c.at(later + 3010)).level, 0);
+    h.set_stat(Path::new("late.rs"), Some(CHANGED));
+    assert!(!h.changed().contains(&p("late.rs")));
+}
+
+#[test]
+fn shared_folder_shell_commands_write_anywhere_but_not_yours() {
+    let c = clock();
+    let mut h = hm();
+    h.set_shared(Shared::Tools);
+    h.on_tool("x", Some(ToolKind::Execute), Some(ToolStatus::InProgress), &[], c.at(0));
+    h.on_fs_change_with(&[abs("gen.rs"), abs("open.rs")], true, |p| p == abs("open.rs"), c.at(100));
+    assert_eq!(state(&h, "gen.rs", c.at(110)), HeatState::Editing);
+    assert_eq!(h.cell(Path::new("open.rs"), c.at(110)).level, 0, "open dirty in Qur: yours");
+    h.on_tool("x", None, Some(ToolStatus::Completed), &[], c.at(1000));
+    h.on_fs_change(&[abs("tail.rs")], true, c.at(1000 + TOOL_GRACE.as_millis() as u64 - 1));
+    assert_eq!(h.cell(Path::new("tail.rs"), c.at(4500)).level, 1, "within the grace");
+    let later = 1000 + TOOL_GRACE.as_millis() as u64 + 1;
+    h.on_fs_change(&[abs("after.rs")], true, c.at(later));
+    assert_eq!(h.cell(Path::new("after.rs"), c.at(later + 10)).level, 0);
+    // Outside a turn nothing is the agent's.
+    h.on_tool("y", Some(ToolKind::Execute), Some(ToolStatus::InProgress), &[], c.at(later));
+    h.on_fs_change(&[abs("idle.rs")], false, c.at(later + 100));
+    assert_eq!(h.cell(Path::new("idle.rs"), c.at(later + 110)).level, 0);
+}
+
+#[test]
+fn shared_folder_late_edit_paths_claim_a_held_write() {
+    let c = clock();
+    let mut h = hm();
+    h.set_shared(Shared::Tools);
+    // Claude: tool_call with no locations, the write lands, the path comes ~0.7 s later.
+    h.on_tool("e", Some(ToolKind::Edit), Some(ToolStatus::Pending), &[], c.at(0));
+    h.on_fs_change(&[abs("a.rs"), abs("yours.rs")], true, c.at(300));
+    assert_eq!(state(&h, "a.rs", c.at(310)), HeatState::Idle, "not attributed yet");
+    h.on_tool("e", None, Some(ToolStatus::Completed), &[abs("a.rs")], c.at(700));
+    let cell = h.cell(Path::new("a.rs"), c.at(800));
+    assert_eq!((cell.state, cell.level), (HeatState::Editing, 1), "claimed: glows from the write");
+    assert_eq!(state(&h, "a.rs", c.at(300 + FADE.as_millis() as u64 + 1)), HeatState::Idle);
+    assert_eq!(h.cell(Path::new("yours.rs"), c.at(800)).level, 0, "the edit never named it");
+    // A held write expires: a path naming it much later doesn't claim it.
+    h.on_tool("f", Some(ToolKind::Edit), Some(ToolStatus::Pending), &[], c.at(10_000));
+    h.on_fs_change(&[abs("b.rs")], true, c.at(10_100));
+    h.on_fs_change(&[], true, c.at(10_100 + TOOL_GRACE.as_millis() as u64 + 1));
+    h.on_tool("f", None, Some(ToolStatus::Completed), &[abs("b.rs")], c.at(14_000));
+    assert_eq!(state(&h, "b.rs", c.at(14_000)), HeatState::Idle);
+}
+
+#[test]
+fn replace_stats_clears_what_no_longer_differs() {
+    let mut h = hm();
+    h.set_stat(Path::new("a.rs"), Some(CHANGED));
+    h.set_stat(Path::new("b.rs"), Some(CHANGED));
+    // You committed a.rs: a scan against the new HEAD finds only b.rs.
+    h.replace_stats(vec![(p("b.rs"), CHANGED), (p("c.rs"), CHANGED)]);
+    assert_eq!(h.changed(), vec![p("b.rs"), p("c.rs")]);
+}
+
+#[test]
+fn own_writes_know_your_dirty_files() {
+    let mut own = OwnWrites::default();
+    assert!(!own.is_yours(Path::new("/w/a.rs")));
+    own.set_dirty(Path::new("/w/a.rs"), true);
+    assert!(own.is_yours(Path::new("/w/a.rs")));
+    assert!(!own.is_yours(Path::new("/w/b.rs")));
+    own.set_dirty(Path::new("/w/a.rs"), false);
+    assert!(!own.is_yours(Path::new("/w/a.rs")));
 }
 
 #[test]
@@ -485,7 +573,7 @@ fn own_writes_are_split_out_of_watcher_batches() {
 
     // Fed to the heatmap as non-turn writes: a recompute, but no glow and no touch.
     let mut h = Heatmap::new(dir.clone(), "base".into());
-    h.set_shared(true);
+    h.set_shared(Shared::Busy);
     let mut own = OwnWrites::default();
     own.note(&dir.join("saved.rs"), c.at(0));
     let (mine, rest) = own.split(batch, c.at(100));

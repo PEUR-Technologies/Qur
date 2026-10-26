@@ -1,8 +1,11 @@
 //! Writes Qur itself made (an editor save, Replace All). The watcher reports them like
 //! any other change; the heatmap must not count them as the agent's edits, or saving a
 //! file from Qur's editor would glow as agent heat in a project-folder agent's tree.
+//! It also knows which files are open with unsaved changes in Qur: you're working on
+//! those, so in the project folder a write to one isn't taken as the agent's on timing
+//! alone (`Heatmap::on_fs_change_with`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -15,6 +18,8 @@ pub const OWN_WINDOW: Duration = Duration::from_secs(2);
 pub struct OwnWrites {
     /// Absolute path (as given, and canonical) -> when Qur wrote it.
     at: HashMap<PathBuf, Instant>,
+    /// Files open with unsaved changes in Qur (as given, and canonical).
+    dirty: HashSet<PathBuf>,
 }
 
 impl OwnWrites {
@@ -35,6 +40,23 @@ impl OwnWrites {
             return false;
         }
         fresh(abs) || abs.canonicalize().is_ok_and(|c| fresh(&c))
+    }
+
+    /// `abs` is open in Qur with unsaved changes (`on`), or no longer is.
+    pub fn set_dirty(&mut self, abs: &Path, on: bool) {
+        let keys = [Some(abs.to_path_buf()), abs.canonicalize().ok()];
+        for k in keys.into_iter().flatten() {
+            if on {
+                self.dirty.insert(k);
+            } else {
+                self.dirty.remove(&k);
+            }
+        }
+    }
+
+    /// Is `abs` yours right now: open with unsaved changes in Qur?
+    pub fn is_yours(&self, abs: &Path) -> bool {
+        !self.dirty.is_empty() && (self.dirty.contains(abs) || abs.canonicalize().is_ok_and(|c| self.dirty.contains(&c)))
     }
 
     /// Splits a watcher batch into (Qur's own writes, everything else).
