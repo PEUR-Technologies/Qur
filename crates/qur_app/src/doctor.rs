@@ -30,6 +30,7 @@ pub fn run() -> Vec<Check> {
         Ok(()) => check(Level::Ok, "Settings folder", qur_config::qur_home().display().to_string()),
         Err(e) => check(Level::Fail, "Settings folder", format!("{}: {e}", qur_config::qur_home().display())),
     });
+    out.push(worktrees());
     out.push(match qur_config::Config::load().1 {
         None => check(Level::Ok, "config.toml", "reads fine"),
         Some(e) => check(Level::Fail, "config.toml", e),
@@ -58,6 +59,17 @@ pub fn run() -> Vec<Check> {
         });
     }
     out
+}
+
+/// What Qur's task worktrees take on disk (`<qur home>/worktrees`).
+fn worktrees() -> Check {
+    let dir = qur_config::qur_home().join("worktrees");
+    let folders: usize = std::fs::read_dir(&dir).map(|rd| rd.filter_map(Result::ok).filter_map(|p| std::fs::read_dir(p.path()).ok()).map(|rd| rd.count()).sum()).unwrap_or(0);
+    if folders == 0 {
+        return check(Level::Ok, "Worktrees", "none on disk");
+    }
+    let size = crate::files::human_size(qur_worktree::cleanup::disk_use(&dir));
+    check(Level::Ok, "Worktrees", format!("{size} in {folders} folder{} (Agent > Clean Up Worktrees… frees leftovers)", if folders == 1 { "" } else { "s" }))
 }
 
 /// A CLI's own sign-in, as Qur's agents will see it (API keys removed).

@@ -6,6 +6,7 @@
 
 mod actions;
 mod checks;
+mod cleanup;
 mod code;
 mod debug;
 mod diff_review;
@@ -186,6 +187,8 @@ enum Overlay {
     /// Review Agent's Work… / Plan…: the reviewer (agent and model) for
     /// task `task`, and an optional instruction line.
     Review { input: Entity<TextInput>, task: String, subject: Subject, choices: Vec<review::Choice>, chosen: usize, touched: bool },
+    /// Agent > Clean Up Worktrees…: what Qur's worktrees take, and removing leftovers.
+    Cleanup(cleanup::Cleanup),
 }
 
 pub struct Workspace {
@@ -798,6 +801,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::reveal_worktree))
             .on_action(cx.listener(Self::worktree_terminal))
             .on_action(cx.listener(Self::discard_task))
+            .on_action(cx.listener(Self::clean_up_worktrees))
             .on_action(cx.listener(Self::show_git))
             .on_action(cx.listener(Self::merge_action))
             .on_action(cx.listener(Self::push_pull_request_action))
@@ -878,7 +882,7 @@ impl Render for Workspace {
                     this.close_viewer(window, cx);
                     return cx.stop_propagation();
                 }
-                if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::AgentMenu { .. } | Overlay::About(_))) {
+                if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::AgentMenu { .. } | Overlay::About(_) | Overlay::Cleanup(_))) {
                     this.close_overlays(window, cx);
                     cx.stop_propagation();
                 }

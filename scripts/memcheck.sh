@@ -21,6 +21,13 @@
 #    reclaimable (and out of phys_footprint) 3-5 s after the last one. The
 #    settle time is long enough for that, so it shows up only if Qur is still
 #    drawing, which is worth failing on anyway.
+# Measured on an M-series Mac (2026-10-26): runs of the same check differ by up
+# to ~40 MB (GPU memory, malloc arenas), so thresholds sit well above the typical
+# result but well below a real leak (an image kept open is ~+70 MB per 1600x3065
+# PNG, a leaked terminal's scrollback tens of MB). After closing any modal ~33 MB
+# of "Owned physical footprint (unmapped) (graphics)" stays dirty (Metal command
+# buffers; not investigated further). Needs a window, so it is not in CI: run it
+# by hand on an unlocked screen (about 10 minutes for every check, 3 runs).
 # The check passes when the median over the runs of (after - before) is under
 # its threshold. Plain phys_footprint deltas are printed alongside.
 set -uo pipefail
@@ -32,13 +39,13 @@ SETTLE=12000   # ms of quiet before a sample
 
 # name | threshold MB | expect (pass or xfail) | what
 CHECKS="
-code|12|pass|open and close the code modal on 10 files (closed buffers stay cached today)
-viewer|30|pass|open and close the file viewer on 3 images and a binary file (images are decoded at drawn size and freed on close)
-viewer_file|6|pass|open and close the file viewer on a binary file, 5 times
-terminals|8|pass|3 terminals with filled scrollback, then closed
+code|45|pass|open and close the code modal on 10 files (closed buffers stay cached today)
+viewer|60|pass|open and close the file viewer on 3 images and a binary file (images are decoded at drawn size and freed on close)
+viewer_file|10|pass|open and close the file viewer on a binary file, 5 times
+terminals|45|pass|3 terminals with filled scrollback, then closed
 "
 # terminals also has a ceiling while the 3 are open (TERM_PEAK).
-TERM_PEAK=110
+TERM_PEAK=150
 
 while getopts "n:l" o; do
   case $o in

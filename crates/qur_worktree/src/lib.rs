@@ -6,6 +6,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub mod cleanup;
+
 pub fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new("git").arg("-C").arg(root).args(args).output().map_err(|e| format!("git: {e}"))?;
     if out.status.success() {
