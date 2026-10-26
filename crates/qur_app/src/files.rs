@@ -1,6 +1,11 @@
 //! Files pasted or dropped into a prompt, and what Qur shows of a file that
 //! isn't text (the file viewer). Images go to the agent as images; any
 //! other file as a link to it, which the agent reads itself.
+//!
+//! Qur decodes the images it draws itself (`thumbnail`): GPUI keeps every
+//! `gpui::Image` handed to `img()` decoded at full size until told to drop
+//! it, and a 1600×3065 screenshot is 20 MB of pixels. An `Arc<RenderImage>`
+//! skips that cache, so Qur decodes at about the size it's drawn.
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -13,6 +18,9 @@ const MAX_SEND: usize = 3_700_000;
 const MAX_SIDE: u32 = 2048;
 /// An image file bigger than this is attached as a plain file link.
 const MAX_READ: u64 = 64 << 20;
+/// The box an attachment's thumbnail is decoded to: twice the largest it's
+/// drawn (under a sent message, at most 320 × 96).
+pub const THUMB: (u32, u32) = (640, 192);
 
 /// Something clicked to look at: a file (an image or binary opens in the
 /// viewer, text in the code modal), or an image that only lives in memory
@@ -76,6 +84,61 @@ pub fn sendable_image(bytes: Vec<u8>) -> Option<Arc<gpui::Image>> {
     out.clear();
     image::DynamicImage::ImageRgb8(img.to_rgb8()).write_to(&mut Cursor::new(&mut out), I::Jpeg).ok()?;
     Some(Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Jpeg, out)))
+}
+
+/// Image bytes decoded to fit `max_w` × `max_h` pixels (never scaled up),
+/// turned upright, in GPUI's BGRA order. Passed to `img()`, it's drawn
+/// without GPUI's asset cache; `cx.drop_image` frees its texture once it's
+/// gone for good. None if it doesn't decode. Decoding holds the full image
+/// for a moment: call it off the main thread.
+pub fn thumbnail(bytes: &[u8], max_w: u32, max_h: u32) -> Option<Arc<gpui::RenderImage>> {
+    use image::ImageDecoder;
+    let mut decoder = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?.into_decoder().ok()?;
+    let orientation = decoder.orientation().ok()?;
+    let mut img = image::DynamicImage::from_decoder(decoder).ok()?;
+    img.apply_orientation(orientation);
+    let (max_w, max_h) = (max_w.max(1), max_h.max(1));
+    let big = u64::from(img.width()) * u64::from(img.height()) > 1 << 20;
+    if img.width() > max_w || img.height() > max_h {
+        img = img.thumbnail(max_w, max_h);
+    }
+    let mut buf = img.into_rgba8();
+    for px in buf.as_chunks_mut::<4>().0 {
+        px.swap(0, 2);
+    }
+    let out = Arc::new(gpui::RenderImage::new(vec![image::Frame::new(buf)]));
+    if big {
+        trim_memory();
+    }
+    Some(out)
+}
+
+/// Hand freed memory back to the system. A decoded image is tens of MB for
+/// a moment; macOS's allocator keeps such freed blocks in a cache that still
+/// counts toward the app's footprint, so this is called after a big decode
+/// (and once the image viewer closes).
+pub fn trim_memory() {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+            fn malloc_default_zone() -> *mut std::ffi::c_void;
+        }
+        let r = unsafe { malloc_zone_pressure_relief(malloc_default_zone(), 1 << 30) };
+        eprintln!("relief {r}");
+        // SAFETY: a null zone means every zone; a goal of 0 means as much as possible.
+        unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+    }
+}
+
+/// Where an image that only lives in memory (pasted, or sent by the agent)
+/// is saved so it opens as a file: `qur-<kind>-<ms>-<n>.<ext>` in the temp
+/// folder.
+pub fn temp_image_path(kind: &str, format: gpui::ImageFormat) -> PathBuf {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    std::env::temp_dir().join(format!("qur-{kind}-{ms}-{n}.{}", format.extension()))
 }
 
 /// Width and height in pixels, read from the header (None for SVG or junk).
@@ -150,11 +213,71 @@ mod tests {
     }
 
     #[test]
+    fn thumbnails_fit_the_box_and_never_grow() {
+        let size = |t: &gpui::RenderImage| (t.size(0).width.0, t.size(0).height.0);
+        let big = png(1600, 3065);
+        assert_eq!(size(&thumbnail(&big, THUMB.0, THUMB.1).unwrap()), (100, 192));
+        assert_eq!(size(&thumbnail(&big, 4000, 1000).unwrap()).1, 1000);
+        assert_eq!(size(&thumbnail(&big, 500, 4000).unwrap()).0, 500);
+        assert_eq!(size(&thumbnail(&png(3, 2), THUMB.0, THUMB.1).unwrap()), (3, 2));
+        assert!(thumbnail(b"not an image", 10, 10).is_none());
+    }
+
+    #[test]
+    fn thumbnails_are_bgra() {
+        let mut out = Vec::new();
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255])).write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        let t = thumbnail(&out, 64, 64).unwrap();
+        assert_eq!(&t.as_bytes(0).unwrap()[..4], &[30, 20, 10, 255]);
+    }
+
+    #[test]
+    fn temp_paths_never_repeat() {
+        let a = temp_image_path("paste", gpui::ImageFormat::Png);
+        assert_ne!(a, temp_image_path("paste", gpui::ImageFormat::Png));
+        assert_eq!(a.extension().unwrap(), "png");
+    }
+
+    #[test]
     fn viewable_by_extension() {
         assert_eq!(viewable(Path::new("a/B.PNG")), Some(gpui::ImageFormat::Png));
         assert_eq!(viewable(Path::new("logo.svg")), Some(gpui::ImageFormat::Svg));
         assert_eq!(viewable(Path::new("main.rs")), None);
         assert_eq!(human_size(999), "999 B");
         assert_eq!(human_size(14_200), "14.2 KB");
+    }
+}
+#[cfg(test)]
+mod tmp_probe {
+    #[test]
+    fn probe() {
+        let fp = |l: &str| {
+            let o = std::process::Command::new("footprint").arg(std::process::id().to_string()).output().unwrap();
+            let s = String::from_utf8_lossy(&o.stdout).to_string();
+            let g: Vec<&str> = s.lines().filter(|x| x.contains("Malloc Large") || x.contains("Footprint:")).collect();
+            eprintln!("{l}: {g:?}");
+        };
+        let bytes = std::fs::read("/Users/yobi/qur/assets/brand/qur-brand-board.png").unwrap();
+        fp("start");
+        let v = vec![7u8; 20 << 20];
+        fp("vec");
+        drop(std::hint::black_box(v));
+        fp("vec dropped");
+        let d = image::load_from_memory(&bytes).unwrap();
+        fp("decoded");
+        drop(d);
+        fp("dropped");
+        let d = image::load_from_memory(&bytes).unwrap();
+        let t8 = d.into_rgba8();
+        fp("rgba");
+        drop(t8);
+        fp("rgba dropped");
+        let t = super::thumbnail(&bytes, 1200, 1500).unwrap();
+        fp("after thumb");
+        super::trim_memory();
+        fp("after trim");
+        drop(t);
+        super::trim_memory();
+        fp("after drop");
     }
 }

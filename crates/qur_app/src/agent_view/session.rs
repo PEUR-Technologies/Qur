@@ -324,7 +324,7 @@ impl AgentTask {
                 out.context.push(a.context);
             }
             match (a.image, a.path) {
-                (Some(img), path) => out.images.push((img, path)),
+                (Some(image), path) => out.images.push(OutImage { image, thumb: a.thumb, path }),
                 (None, Some(path)) => out.files.push(path),
                 (None, None) => {}
             }
@@ -393,9 +393,9 @@ impl AgentTask {
             .enumerate()
             .map(|(i, c)| Attachment::pick(if named { o.labels[i].clone().into() } else { "Context".into() }, c.clone(), None))
             .collect();
-        atts.extend(o.images.into_iter().map(|(img, path)| {
-            let label = path.as_deref().map_or_else(|| "Image".into(), crate::files::chip_name);
-            Attachment::image(label.into(), img, path)
+        atts.extend(o.images.into_iter().map(|i| {
+            let label = i.path.as_deref().map_or_else(|| "Image".into(), crate::files::chip_name);
+            Attachment::image(label.into(), i.image, i.thumb, i.path)
         }));
         atts.extend(o.files.into_iter().map(Attachment::file));
         self.prompt.update(cx, |p, cx| {
@@ -422,7 +422,7 @@ impl AgentTask {
                 context: o.context.clone(),
                 labels: o.labels.clone(),
                 // An image file comes back as a link to it (images aren't saved).
-                files: o.images.iter().filter_map(|(_, p)| p.clone()).chain(o.files.iter().cloned()).collect(),
+                files: o.images.iter().filter_map(|i| i.path.clone()).chain(o.files.iter().cloned()).collect(),
             })
             .collect();
         cx.emit(AgentEvent::Changed);
@@ -479,7 +479,7 @@ impl AgentTask {
         let (Some(client), Some(session)) = (self.client.clone(), self.session_id.clone()) else {
             self.queued = Some(out.clone());
             self.push(ChatItem::User(shown));
-            self.push_sent(&out);
+            self.push_sent(&out, cx);
             self.start(cx);
             return;
         };
@@ -487,7 +487,7 @@ impl AgentTask {
         let last = self.chat.iter().rev().find(|c| !matches!(c, ChatItem::Files(_)));
         if self.queued.is_none() && !matches!(last, Some(ChatItem::User(t)) if *t == shown) {
             self.push(ChatItem::User(shown));
-            self.push_sent(&out);
+            self.push_sent(&out, cx);
         }
         // Kept for Retry / Edit & resend, and re-queued if a sign-in is needed.
         self.last_sent = Some(out.clone());
@@ -500,7 +500,7 @@ impl AgentTask {
         // An image file also says where it is (the agent may want to use it);
         // an agent that takes no images gets just the link.
         let mut links = Vec::new();
-        for (img, path) in images {
+        for OutImage { image: img, path, .. } in images {
             if self.images_ok {
                 blocks.push(PromptBlock::Image { mime: img.format.mime_type().into(), data_base64: base64(img.bytes()) });
                 if let Some(p) = path {
@@ -770,7 +770,7 @@ impl AgentTask {
                 cx.notify();
             }
             Event::Update { update, .. } => match update {
-                SessionUpdate::AgentMessage(c) | SessionUpdate::UserMessage(c) if c.media.is_some() => self.push_media(c.media),
+                SessionUpdate::AgentMessage(c) | SessionUpdate::UserMessage(c) if c.media.is_some() => self.push_media(c.media, cx),
                 SessionUpdate::AgentMessage(c) => self.append(false, &c.text),
                 SessionUpdate::AgentThought(c) => self.append(true, &c.text),
                 // The agent named the session: the task's title follows unless

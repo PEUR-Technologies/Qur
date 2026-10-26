@@ -34,6 +34,9 @@ pub struct Attachment {
     pub context: String,
     /// An image to send (a screenshot, a pasted image, an image file).
     pub image: Option<Arc<gpui::Image>>,
+    /// The image decoded small (`files::THUMB`), for its chip and the row
+    /// under the sent message. The prompt fills it in when it's missing.
+    pub thumb: Option<Arc<gpui::RenderImage>>,
     /// The file it came from: sent as a link when it isn't an image.
     pub path: Option<PathBuf>,
 }
@@ -41,15 +44,15 @@ pub struct Attachment {
 impl Attachment {
     pub fn pick(label: SharedString, context: String, png: Option<Vec<u8>>) -> Self {
         let image = png.filter(|p| !p.is_empty()).map(|p| Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, p)));
-        Attachment { label, context, image, path: None }
+        Attachment { label, context, image, thumb: None, path: None }
     }
 
-    pub fn image(label: SharedString, image: Arc<gpui::Image>, path: Option<PathBuf>) -> Self {
-        Attachment { label, context: String::new(), image: Some(image), path }
+    pub fn image(label: SharedString, image: Arc<gpui::Image>, thumb: Option<Arc<gpui::RenderImage>>, path: Option<PathBuf>) -> Self {
+        Attachment { label, context: String::new(), image: Some(image), thumb, path }
     }
 
     pub fn file(path: PathBuf) -> Self {
-        Attachment { label: crate::files::chip_name(&path).into(), context: String::new(), image: None, path: Some(path) }
+        Attachment { label: crate::files::chip_name(&path).into(), context: String::new(), image: None, thumb: None, path: Some(path) }
     }
 }
 
