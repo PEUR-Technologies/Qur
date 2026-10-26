@@ -529,6 +529,23 @@ impl EditorView {
         cx.notify();
     }
 
+    /// Where the view was left: reopening a freed buffer lands here (`restore`).
+    pub fn spot(&self) -> Spot {
+        let row = if self.line_h > px(0.) { (self.scroll_y / self.line_h).floor() as usize } else { 0 };
+        Spot { at: self.cursor(), top: self.model.wrap().row_to_point(self.model.rope(), row, 0).line }
+    }
+
+    /// Put the cursor and the scroll back where `spot` left them. (A new view
+    /// isn't laid out yet; its first prepaint keeps the top line in place.)
+    pub fn restore(&mut self, spot: Spot, cx: &mut Context<Self>) {
+        let p = self.model.clamp(spot.at);
+        self.model.set_selections(vec![Selection::caret(p)], 0);
+        let top = self.model.clamp(Point { line: spot.top, col: 0 });
+        let (row, _) = self.model.wrap().point_to_row(self.model.rope(), top);
+        self.scroll_y = self.line_h * row as f32;
+        cx.notify();
+    }
+
     pub fn set_cursor(&mut self, p: Point, cx: &mut Context<Self>) {
         let p = self.model.clamp(p);
         self.model.set_selections(vec![Selection::caret(p)], 0);
@@ -1878,34 +1895,184 @@ impl Render for EditorView {
     }
 }
 
-/// Opened files kept in memory (no tabs: the editor area shows one; Quick
-/// Open and Ctrl+Tab switch). Most recent first.
-pub struct Buffers {
-    pub list: Vec<Entity<EditorView>>,
+/// Where a file was left: the cursor and the line at the top of the view.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Spot {
+    pub at: Point,
+    pub top: usize,
+}
+
+/// The code modal's open files (no tabs: it shows one; Go to File and
+/// Recent File switch), most recent first. A file's buffer stays loaded only
+/// while it's showing or has unsaved edits; otherwise only its path and
+/// `Spot` are kept, and opening it loads it again. A buffer is mostly its
+/// syntax tree: 10k lines of TypeScript take ~12 MB of tree and under 1 MB
+/// of text, and reload and reparse in about 40 ms.
+pub struct OpenFiles<B> {
+    entries: Vec<OpenEntry<B>>,
+}
+
+struct OpenEntry<B> {
+    path: PathBuf,
+    spot: Spot,
+    buf: Option<B>,
+}
+
+pub type Buffers = OpenFiles<Entity<EditorView>>;
+
+impl<B> Default for OpenFiles<B> {
+    fn default() -> Self {
+        OpenFiles { entries: Vec::new() }
+    }
+}
+
+impl<B: Clone> OpenFiles<B> {
+    /// The loaded buffer for `path`, if any.
+    pub fn find(&self, path: &Path) -> Option<B> {
+        self.entries.iter().find(|e| e.path == path).and_then(|e| e.buf.clone())
+    }
+
+    /// Where `path` was left, if it's in the list.
+    pub fn spot(&self, path: &Path) -> Option<Spot> {
+        self.entries.iter().find(|e| e.path == path).map(|e| e.spot)
+    }
+
+    /// `path` is showing in `buf`: first in the list, loaded.
+    pub fn touch(&mut self, path: &Path, buf: B) {
+        let spot = self.spot(path).unwrap_or_default();
+        self.entries.retain(|e| e.path != path);
+        self.entries.insert(0, OpenEntry { path: path.to_path_buf(), spot, buf: Some(buf) });
+    }
+
+    /// Add a file without loading it, after the ones already listed (the
+    /// list restored at startup, most recent first). Listed already: no change.
+    pub fn remember(&mut self, path: PathBuf, spot: Spot) {
+        if !self.entries.iter().any(|e| e.path == path) {
+            self.entries.push(OpenEntry { path, spot, buf: None });
+        }
+    }
+
+    /// Drop `path` from the list (it couldn't be opened).
+    pub fn forget(&mut self, path: &Path) {
+        self.entries.retain(|e| e.path != path);
+    }
+
+    /// Every open file, most recent first, loaded or not.
+    pub fn paths(&self) -> Vec<PathBuf> {
+        self.entries.iter().map(|e| e.path.clone()).collect()
+    }
+
+    /// Every open file with where it was left (`spot_of` asks loaded buffers).
+    pub fn spots(&self, spot_of: impl Fn(&B) -> Spot) -> Vec<(PathBuf, Spot)> {
+        self.entries.iter().map(|e| (e.path.clone(), e.buf.as_ref().map_or(e.spot, &spot_of))).collect()
+    }
+
+    pub fn loaded(&self) -> impl Iterator<Item = &B> {
+        self.entries.iter().filter_map(|e| e.buf.as_ref())
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Unload the buffers `free` gives a `Spot` for (reopening lands there),
+    /// then forget unloaded files past `qur_config::MAX_OPEN_FILES`. Returns
+    /// how many were unloaded.
+    pub fn free(&mut self, mut free: impl FnMut(&B) -> Option<Spot>) -> usize {
+        let mut freed = 0;
+        for e in &mut self.entries {
+            if let Some(spot) = e.buf.as_ref().and_then(&mut free) {
+                e.spot = spot;
+                e.buf = None;
+                freed += 1;
+            }
+        }
+        let mut n = 0;
+        self.entries.retain(|e| {
+            n += 1;
+            n <= qur_config::MAX_OPEN_FILES || e.buf.is_some()
+        });
+        freed
+    }
+}
+
+/// Give the system back the pages that freed buffers leave empty. macOS's
+/// malloc keeps them (still counted in the footprint) until memory runs
+/// short, and a syntax tree is ~100k small allocations: without this, a
+/// closed 10k-line file stays ~12 MB in the footprint after it's freed.
+pub fn return_free_pages() {
+    unsafe extern "C" {
+        fn malloc_zone_pressure_relief(zone: *mut libc::c_void, goal: usize) -> usize;
+    }
+    // No zone: all of them; goal 0: as much as possible.
+    unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
 }
 
 impl Buffers {
-    pub fn find(&self, path: &Path, cx: &App) -> Option<Entity<EditorView>> {
-        self.list.iter().find(|b| b.read(cx).path() == Some(path)).cloned()
-    }
-
-    pub fn touch(&mut self, b: &Entity<EditorView>) {
-        self.list.retain(|x| x != b);
-        self.list.insert(0, b.clone());
-    }
-
-    pub fn paths(&self, cx: &App) -> Vec<PathBuf> {
-        self.list.iter().filter_map(|b| b.read(cx).path().map(Path::to_path_buf)).collect()
-    }
-
     pub fn dirty(&self, cx: &App) -> Vec<Entity<EditorView>> {
-        self.list.iter().filter(|b| b.read(cx).is_dirty()).cloned().collect()
+        self.loaded().filter(|b| b.read(cx).is_dirty()).cloned().collect()
+    }
+
+    /// The loaded buffers, cloned (to update them while borrowing their owner).
+    pub fn loaded_vec(&self) -> Vec<Entity<EditorView>> {
+        self.loaded().cloned().collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::changed_lines;
+    use super::{OpenFiles, Point, Spot, changed_lines};
+    use std::path::{Path, PathBuf};
+
+    fn spot(line: usize) -> Spot {
+        Spot { at: Point { line, col: 0 }, top: line.saturating_sub(5) }
+    }
+
+    #[test]
+    fn open_files_free_clean_hidden_buffers() {
+        // Buffers are ids here; odd ids have unsaved edits.
+        let mut f: OpenFiles<u32> = OpenFiles::default();
+        f.remember("/p/c".into(), spot(30));
+        f.touch(Path::new("/p/a"), 1);
+        f.touch(Path::new("/p/b"), 2);
+        f.touch(Path::new("/p/d"), 4);
+        assert_eq!(f.paths(), ["/p/d", "/p/b", "/p/a", "/p/c"].map(PathBuf::from));
+        assert_eq!(f.loaded().count(), 3);
+        // 4 is showing and 1 is dirty: only 2 is freed, keeping where it was left.
+        assert_eq!(f.free(|&b| (b != 4 && b % 2 == 0).then(|| spot(b as usize * 10))), 1);
+        assert_eq!(f.loaded().copied().collect::<Vec<_>>(), [4, 1]);
+        assert_eq!(f.find(Path::new("/p/b")), None);
+        assert_eq!(f.spot(Path::new("/p/b")), Some(spot(20)));
+        assert_eq!(f.spot(Path::new("/p/c")), Some(spot(30)));
+        // Reopening keeps the spot and moves the file first.
+        f.touch(Path::new("/p/b"), 6);
+        assert_eq!(f.find(Path::new("/p/b")), Some(6));
+        assert_eq!(f.spot(Path::new("/p/b")), Some(spot(20)));
+        assert_eq!(f.paths(), ["/p/b", "/p/d", "/p/a", "/p/c"].map(PathBuf::from));
+        // Loaded buffers report their own spot, the others the saved one.
+        let spots = f.spots(|&b| spot(b as usize));
+        assert_eq!(spots[0], (PathBuf::from("/p/b"), spot(6)));
+        assert_eq!(spots[3], (PathBuf::from("/p/c"), spot(30)));
+        f.forget(Path::new("/p/c"));
+        assert_eq!(f.len(), 3);
+    }
+
+    #[test]
+    fn open_files_cap_never_drops_loaded_buffers() {
+        let n = qur_config::MAX_OPEN_FILES;
+        let mut f: OpenFiles<u32> = OpenFiles::default();
+        // A dirty buffer (1) opened first ends up last.
+        f.touch(Path::new("/p/dirty"), 1);
+        for i in 0..n + 5 {
+            f.touch(&PathBuf::from(format!("/p/{i}")), 0);
+        }
+        f.remember("/p/0".into(), spot(9));
+        assert_eq!(f.len(), n + 6);
+        f.free(|&b| (b == 0).then(Spot::default));
+        assert_eq!(f.len(), n + 1);
+        assert_eq!(f.paths().last(), Some(&PathBuf::from("/p/dirty")));
+        assert_eq!(f.loaded().copied().collect::<Vec<_>>(), [1]);
+    }
 
     #[test]
     fn changed_line_ranges() {

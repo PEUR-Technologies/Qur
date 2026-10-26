@@ -49,7 +49,7 @@ use crate::monitor::{MonitorEvent, TaskMonitor};
 use crate::assets::{self, icon};
 use crate::browser_view::{Attachment, BrowserPane, BrowserPaneEvent};
 use crate::commands::{self, MenuState, agent as aa, edit, editor as ea, qur, terminal as ta};
-use crate::editor_view::{Buffers, EditorEvent, EditorView};
+use crate::editor_view::{Buffers, EditorEvent, EditorView, Spot};
 use crate::input::{InputEvent, TextInput};
 use crate::look::Look;
 use crate::picker::{PickItem, Picker, PickerEvent};
@@ -226,6 +226,8 @@ pub struct Workspace {
     /// One file tree per root (main checkout and each worktree).
     trees: HashMap<PathBuf, Entity<TreeView>>,
     buffers: Buffers,
+    /// Hands freed buffers' memory back to the system, shortly after.
+    buffers_relief: Option<Task<()>>,
     /// The code modal (decision 18).
     code: Option<Entity<EditorView>>,
     code_prev_focus: Option<FocusHandle>,
@@ -377,7 +379,8 @@ impl Workspace {
             alerted: HashMap::new(),
             runs: HashMap::new(),
             trees: HashMap::new(),
-            buffers: Buffers { list: Vec::new() },
+            buffers: Buffers::default(),
+            buffers_relief: None,
             code: None,
             code_prev_focus: None,
             diff_last_turn: false,

@@ -229,7 +229,7 @@ impl Workspace {
                 .collect()
         });
         for p in changed {
-            if let Some(b) = self.buffers.find(&p, cx) {
+            if let Some(b) = self.buffers.find(&p) {
                 b.update(cx, |b, cx| {
                     b.disk_change(cx);
                 });

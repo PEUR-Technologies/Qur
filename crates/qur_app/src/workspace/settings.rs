@@ -69,7 +69,7 @@ impl Workspace {
             self.flash(e, cx);
         }
         let wrap = self.config.editor.soft_wrap;
-        for b in &self.buffers.list {
+        for b in self.buffers.loaded_vec() {
             b.update(cx, |b, cx| b.set_soft_wrap(wrap, cx));
             let vim = self.config.keys.vim;
             b.update(cx, |b, cx| b.set_vim(vim, cx));

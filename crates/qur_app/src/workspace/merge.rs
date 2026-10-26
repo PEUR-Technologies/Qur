@@ -175,7 +175,7 @@ impl Workspace {
                 Ok(sha) => {
                     let title = this.merge.take().map(|m| m.title).unwrap_or_default();
                     this.sync_menus(cx);
-                    for b in &this.buffers.list {
+                    for b in this.buffers.loaded_vec() {
                         b.update(cx, |b, _| b.merge_conflicts = false);
                     }
                     if let Some((_, _, _, changes)) = this.task_parts(&id, cx) {
@@ -246,7 +246,7 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 this.merge = None;
                 this.sync_menus(cx);
-                for b in this.buffers.list.clone() {
+                for b in this.buffers.loaded_vec() {
                     b.update(cx, |b, cx| {
                         b.merge_conflicts = false;
                         b.disk_change(cx);

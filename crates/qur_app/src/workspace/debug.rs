@@ -41,6 +41,7 @@ impl Workspace {
             }
             None => "none".into(),
         };
+        let buffers = format!("{}/{}", self.buffers.loaded().count(), self.buffers.len());
         let vc = self.git.as_ref().map(|g| g.read(cx).debug_state(cx)).unwrap_or_else(|| "none".into());
         let docks = format!("acp={} terminal={}", Docks::get(cx, dock::Kind::Acp).serialize(), Docks::get(cx, dock::Kind::Terminal).serialize());
         let u = &self.config.ui;
@@ -60,7 +61,7 @@ impl Workspace {
             _ => "none".into(),
         };
         format!(
-            "overlay={overlay} selected={selected} agents={{{agents}}} work={{{work}}} code={code} viewer={viewer} term={{{}}} git={{{vc}}} docks={{{docks}}} gaps={{{gaps}}} sidebar={{{sidebar}}}",
+            "overlay={overlay} selected={selected} agents={{{agents}}} work={{{work}}} code={code} buffers={buffers} viewer={viewer} term={{{}}} git={{{vc}}} docks={{{docks}}} gaps={{{gaps}}} sidebar={{{sidebar}}}",
             self.terms.read(cx).debug_state(cx)
         )
     }

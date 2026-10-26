@@ -82,7 +82,7 @@ impl Workspace {
     pub(super) fn open_path_at(&mut self, path: &Path, at: Option<Point>, window: &mut Window, cx: &mut Context<Self>) {
         // Images, binaries and large files show in the viewer (hex, paged
         // text), unless they're already open as text.
-        if self.buffers.find(path, cx).is_none() && self.wants_viewer(path) {
+        if self.buffers.find(path).is_none() && self.wants_viewer(path) {
             return self.view_file(path, window, cx);
         }
         self.open_text_at(path, at, window, cx)
@@ -91,19 +91,22 @@ impl Workspace {
     /// The code modal for `path` whatever it holds (Open as Text).
     pub(super) fn open_text_at(&mut self, path: &Path, at: Option<Point>, window: &mut Window, cx: &mut Context<Self>) {
         self.record_nav(cx);
-        let buf = match self.buffers.find(path, cx) {
+        let buf = match self.buffers.find(path) {
             Some(b) => b,
             None => match self.load_buffer(path, window, cx) {
                 Ok(b) => b,
-                // Not text: the viewer says what it is and offers to open it elsewhere.
-                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => return self.view_file(path, window, cx),
                 Err(e) => {
+                    self.buffers.forget(path);
+                    // Not text: the viewer says what it is and offers to open it elsewhere.
+                    if e.kind() == std::io::ErrorKind::InvalidData {
+                        return self.view_file(path, window, cx);
+                    }
                     self.flash(format!("Couldn't open {}: {e}", path.display()), cx);
                     return;
                 }
             },
         };
-        self.buffers.touch(&buf);
+        self.buffers.touch(path, buf.clone());
         if self.code.is_none() {
             self.code_prev_focus = window.focused(cx);
         }
@@ -119,57 +122,79 @@ impl Workspace {
             });
         }
         self.push_nav(cx);
+        // The file showing before, if clean, is freed.
+        self.free_hidden(cx);
         let f = buf.read(cx).focus.clone();
         window.focus(&f, cx);
         self.sync_menus(cx);
         cx.notify();
     }
 
+    /// Load `path` into a new buffer, back where it was left if it was open
+    /// before, and in conflict mode if it's part of the merge in progress.
     fn load_buffer(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) -> std::io::Result<Entity<EditorView>> {
         let (wrap, tab, vim) = (self.config.editor.soft_wrap, self.config.editor.tab_width, self.config.keys.vim);
         let loaded = EditorView::load(path)?;
+        let spot = self.buffers.spot(path);
+        let conflicted = self.merge.as_ref().is_some_and(|m| m.files.iter().any(|f| self.root.join(f) == path));
         let view = cx.new(|cx| {
             let mut v = EditorView::new(loaded, wrap, tab, cx);
             v.set_vim(vim, cx);
+            if let Some(s) = spot {
+                v.restore(s, cx);
+            }
+            v.merge_conflicts = conflicted;
             v
         });
-        let sub = cx.subscribe_in(&view, window, Self::on_editor_event);
-        self._subs.push(sub);
+        // Lives as long as the buffer.
+        cx.subscribe_in(&view, window, Self::on_editor_event).detach();
         Ok(view)
     }
 
-    /// Reopen the files the project had open last time (quietly: a file that's
-    /// gone is skipped). The code view comes back if it was showing. Clones and
-    /// worktrees share a project id, so files outside this root are skipped too.
+    /// Free the buffers that aren't showing and have no unsaved edits; the
+    /// list keeps their paths and where they were left. Reopening one reloads
+    /// it (a 10k-line file reads and highlights in ~40 ms), so this runs as
+    /// soon as a file stops showing.
+    fn free_hidden(&mut self, cx: &mut Context<Self>) {
+        let showing = self.code.as_ref().map(|c| c.entity_id());
+        let freed = self.buffers.free(|b| {
+            let v = b.read(cx);
+            (Some(b.entity_id()) != showing && !v.is_dirty()).then(|| v.spot())
+        });
+        if freed > 0 {
+            // After the views are released (end of this update).
+            let bg = cx.background_executor().clone();
+            self.buffers_relief = Some(cx.spawn(async move |_, _| {
+                bg.timer(Duration::from_millis(500)).await;
+                bg.spawn(async { crate::editor_view::return_free_pages() }).await;
+            }));
+        }
+    }
+
+    /// The files the project had open last time come back in the list
+    /// without loading (a file that's gone is skipped); the code view comes
+    /// back if it was showing. Clones and worktrees share a project id, so
+    /// files outside this root are skipped too.
     pub(super) fn restore_open_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let state = qur_config::ProjectState::load(&self.project_id);
-        // Oldest first, so the list ends up most recent first.
-        for f in state.files.iter().take(qur_config::MAX_OPEN_FILES).rev() {
-            if !f.path.starts_with(&self.root) || !f.path.is_file() || self.buffers.find(&f.path, cx).is_some() {
-                continue;
+        for f in state.files.iter().take(qur_config::MAX_OPEN_FILES) {
+            if f.path.starts_with(&self.root) && f.path.is_file() {
+                self.buffers.remember(f.path.clone(), Spot { at: Point { line: f.line, col: f.col }, top: f.top });
             }
-            let Ok(buf) = self.load_buffer(&f.path, window, cx) else { continue };
-            let at = Point { line: f.line, col: f.col };
-            buf.update(cx, |b, cx| b.set_cursor(at, cx));
-            self.buffers.touch(&buf);
         }
         if state.code_open
-            && let Some(p) = self.buffers.list.first().and_then(|b| b.read(cx).path().map(Path::to_path_buf))
+            && let Some(p) = self.buffers.paths().first()
         {
-            self.open_path(&p, window, cx);
+            self.open_path(p, window, cx);
         }
     }
 
     pub(super) fn save_open_files(&self, cx: &App) {
         let files = self
             .buffers
-            .list
-            .iter()
-            .filter_map(|b| {
-                let b = b.read(cx);
-                let at = b.cursor();
-                b.path().map(|p| qur_config::OpenFile { path: p.to_path_buf(), line: at.line, col: at.col })
-            })
+            .spots(|b| b.read(cx).spot())
+            .into_iter()
+            .map(|(path, s)| qur_config::OpenFile { path, line: s.at.line, col: s.at.col, top: s.top })
             .collect();
         let state = qur_config::ProjectState { files, code_open: self.code.is_some() };
         if let Err(e) = state.save(&self.project_id) {
@@ -179,6 +204,7 @@ impl Workspace {
 
     fn close_code(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.code.take().is_some() {
+            self.free_hidden(cx);
             match self.code_prev_focus.take() {
                 Some(f) => window.focus(&f, cx),
                 None => self.focus_stage(window, cx),
@@ -212,6 +238,10 @@ impl Workspace {
                     if let Some(e) = err {
                         self.flash(e, cx);
                     }
+                }
+                // Saved while hidden (Save All, a merge): nothing keeps it loaded.
+                if clean && self.code.as_ref() != Some(view) {
+                    self.free_hidden(cx);
                 }
                 cx.notify();
             }
@@ -265,8 +295,8 @@ impl Workspace {
     }
     pub(super) fn recent_file(&mut self, _: &qur::RecentFile, window: &mut Window, cx: &mut Context<Self>) {
         let skip = usize::from(self.code.is_some());
-        if let Some(p) = self.buffers.list.get(skip).and_then(|b| b.read(cx).path().map(Path::to_path_buf)) {
-            self.open_path(&p, window, cx);
+        if let Some(p) = self.buffers.paths().get(skip) {
+            self.open_path(p, window, cx);
         }
     }
     pub(super) fn nav_back(&mut self, _: &qur::NavBack, window: &mut Window, cx: &mut Context<Self>) {
