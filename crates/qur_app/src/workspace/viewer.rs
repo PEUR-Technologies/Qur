@@ -13,17 +13,51 @@ pub(super) struct Viewer {
     /// The task whose worktree the file is in.
     owner: Option<String>,
     path: Option<PathBuf>,
-    /// None: a file Qur can't show.
-    image: Option<Arc<gpui::Image>>,
+    shown: Shown,
     /// "1280 × 800 · 245.1 KB".
     detail: String,
     prev_focus: Option<FocusHandle>,
+    /// Reading and decoding the image; dropped (cancelled) with the viewer.
+    _load: Option<Task<()>>,
+}
+
+/// What the viewer's body shows.
+enum Shown {
+    /// A file Qur can't show (or an image that didn't decode).
+    File,
+    Loading,
+    /// Decoded by Qur to fit the modal: never in GPUI's asset cache, and its
+    /// texture is freed when the viewer closes.
+    Pixels(Arc<gpui::RenderImage>),
+    /// SVG (drawn sharp at any size) and GIF (animated): GPUI decodes them;
+    /// dropped from its cache when the viewer closes.
+    Gpui(Arc<gpui::Image>),
 }
 
 impl Viewer {
-    /// Scripted runs' `state` line: "title (image|file) detail".
+    /// Scripted runs' `state` line: "title (image|loading|file) detail".
     pub(super) fn debug_state(&self) -> String {
-        format!("{} ({}) {}", self.title, if self.image.is_some() { "image" } else { "file" }, self.detail)
+        let kind = match self.shown {
+            Shown::Pixels(_) | Shown::Gpui(_) => "image",
+            Shown::Loading => "loading",
+            Shown::File => "file",
+        };
+        format!("{} ({kind}) {}", self.title, self.detail)
+    }
+
+    /// Give back the image's memory: its texture, and GPUI's decoded copy.
+    fn free(self, window: &mut Window, cx: &mut App) {
+        match self.shown {
+            Shown::Pixels(r) => cx.drop_image(r, Some(window)),
+            Shown::Gpui(image) => {
+                if let Some(r) = image.clone().get_render_image(window, cx) {
+                    cx.drop_image(r, Some(window));
+                }
+                image.remove_asset(cx);
+            }
+            Shown::File | Shown::Loading => {}
+        }
+        files::trim_memory();
     }
 }
 
@@ -33,9 +67,10 @@ impl Workspace {
         match p {
             Preview::File(path) => self.open_path(&path, window, cx),
             Preview::Image { label, image } => {
-                let size = files::image_size(image.bytes());
-                let detail = detail(size, image.bytes().len() as u64);
-                self.show_viewer(Viewer { title: label.to_string(), owner: None, path: None, image: Some(image), detail, prev_focus: None }, window, cx);
+                let detail = detail(files::image_size(image.bytes()), image.bytes().len() as u64);
+                let v = Viewer { title: label.to_string(), owner: None, path: None, shown: Shown::Loading, detail, prev_focus: None, _load: None };
+                self.show_viewer(v, window, cx);
+                self.load_viewer(move || Some(image), window, cx);
             }
         }
     }
@@ -47,16 +82,65 @@ impl Workspace {
             Ok(_) => return self.flash(format!("{} isn't a file", path.display()), cx),
             Err(e) => return self.flash(format!("Couldn't open {}: {e}", path.display()), cx),
         };
-        let image = files::viewable(path).and_then(|format| Some(Arc::new(gpui::Image::from_bytes(format, std::fs::read(path).ok()?))));
-        let size = image.as_ref().and_then(|i| files::image_size(i.bytes()));
+        let format = files::viewable(path);
         let (title, owner) = self.where_is(path, cx);
-        let detail = if image.is_some() { detail(size, len) } else { format!("{} · not a text file", files::human_size(len)) };
-        self.show_viewer(Viewer { title, owner, path: Some(path.to_path_buf()), image, detail, prev_focus: None }, window, cx);
+        let (shown, detail) = match format {
+            Some(_) => (Shown::Loading, files::human_size(len)),
+            None => (Shown::File, format!("{} · not a text file", files::human_size(len))),
+        };
+        self.show_viewer(Viewer { title, owner, path: Some(path.to_path_buf()), shown, detail, prev_focus: None, _load: None }, window, cx);
+        if let Some(format) = format {
+            let path = path.to_path_buf();
+            self.load_viewer(move || Some(Arc::new(gpui::Image::from_bytes(format, std::fs::read(&path).ok()?))), window, cx);
+        }
+    }
+
+    /// Read and decode the open viewer's image off the main thread, to fit
+    /// the modal's pixels (86% × 88% of the window), then show it.
+    fn load_viewer(&mut self, read: impl FnOnce() -> Option<Arc<gpui::Image>> + Send + 'static, window: &mut Window, cx: &mut Context<Self>) {
+        let (vp, scale) = (window.viewport_size(), window.scale_factor());
+        let max = ((f32::from(vp.width) * scale * 0.86) as u32, (f32::from(vp.height) * scale * 0.88) as u32);
+        let work = cx.background_executor().spawn(async move {
+            let image = read()?;
+            let size = files::image_size(image.bytes());
+            let len = image.bytes().len() as u64;
+            let shown = match image.format {
+                gpui::ImageFormat::Svg | gpui::ImageFormat::Gif => Shown::Gpui(image),
+                _ => Shown::Pixels(files::thumbnail(image.bytes(), max.0, max.1)?),
+            };
+            Some((shown, detail(size, len)))
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let loaded = work.await;
+            this.update(cx, |ws, cx| {
+                let Some(v) = &mut ws.viewer else { return };
+                match loaded {
+                    Some((shown, detail)) => {
+                        v.shown = shown;
+                        v.detail = detail;
+                    }
+                    None => {
+                        v.shown = Shown::File;
+                        v.detail = format!("{} · couldn't be read", v.detail);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        if let Some(v) = &mut self.viewer {
+            v._load = Some(task);
+        }
     }
 
     fn show_viewer(&mut self, mut v: Viewer, window: &mut Window, cx: &mut Context<Self>) {
-        // Opened from another viewer: back to where that one came from.
-        v.prev_focus = self.viewer.take().and_then(|o| o.prev_focus).or_else(|| window.focused(cx));
+        // Opened from another viewer: back to where that one came from, and
+        // that one's image is freed.
+        let old = self.viewer.take();
+        v.prev_focus = old.as_ref().and_then(|o| o.prev_focus.clone()).or_else(|| window.focused(cx));
+        if let Some(o) = old {
+            o.free(window, cx);
+        }
         self.viewer = Some(v);
         // The keyboard leaves the prompt or terminal behind (Esc closes).
         window.focus(&self.focus, cx);
@@ -64,11 +148,12 @@ impl Workspace {
     }
 
     pub(super) fn close_viewer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(v) = self.viewer.take() {
-            match v.prev_focus {
+        if let Some(mut v) = self.viewer.take() {
+            match v.prev_focus.take() {
                 Some(f) => window.focus(&f, cx),
                 None => self.focus_stage(window, cx),
             }
+            v.free(window, cx);
             cx.notify();
         }
     }
@@ -97,10 +182,12 @@ impl Workspace {
                 .child(button("viewer-open", "Open in Default App").on_click(cx.listener(move |_, _, _, cx| cx.open_with_system(&p))))
                 .child(button("viewer-reveal", "Reveal in Finder").on_click(cx.listener(move |_, _, _, cx| cx.reveal_path(&q))))
         });
-        let body = match &v.image {
+        let body = match &v.shown {
             // Never larger than its own size; scaled down to fit the modal.
-            Some(image) => div().size_full().p(look.z(16.)).child(img(image.clone()).size_full().object_fit(gpui::ObjectFit::ScaleDown)).into_any_element(),
-            None => div()
+            Shown::Pixels(r) => div().size_full().p(look.z(16.)).child(img(r.clone()).size_full().object_fit(gpui::ObjectFit::ScaleDown)).into_any_element(),
+            Shown::Gpui(image) => div().size_full().p(look.z(16.)).child(img(image.clone()).size_full().object_fit(gpui::ObjectFit::ScaleDown)).into_any_element(),
+            Shown::Loading => div().size_full().flex().items_center().justify_center().text_color(look.c(ui.text_muted)).child("Loading…").into_any_element(),
+            Shown::File => div()
                 .size_full()
                 .flex()
                 .flex_col()

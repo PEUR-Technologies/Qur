@@ -1093,11 +1093,9 @@ fn alert_tag(window: &Window, id: &str) -> String {
     format!("qur:{}:{id}", window.window_handle().window_id().as_u64())
 }
 
-/// A pasted image saved where an agent can read it (`qur-paste-<ms>.png`).
+/// A pasted image saved where an agent can read it (`qur-paste-…`).
 fn pasted_image_file(img: &gpui::Image) -> Option<PathBuf> {
-    let ext = img.format.extension();
-    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
-    let path = std::env::temp_dir().join(format!("qur-paste-{ms}.{ext}"));
+    let path = crate::files::temp_image_path("paste", img.format);
     std::fs::write(&path, img.bytes()).ok().map(|_| path)
 }
 

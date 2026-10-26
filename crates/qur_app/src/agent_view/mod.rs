@@ -154,8 +154,9 @@ enum ChatItem {
     Notice(String),
     /// Command output (worktree setup), shown in the code font.
     Output(String),
-    /// An image in a message, and its size in pixels.
-    Image(Arc<gpui::Image>, (u32, u32)),
+    /// An image in a message: decoded small (None until it is), its size in
+    /// pixels, and the temp file it's saved to (click opens it).
+    Image(Option<Arc<gpui::RenderImage>>, (u32, u32), PathBuf),
     /// A file or web link in a message: click opens it.
     Link { uri: String, name: String },
     /// What you attached to the message above: images and files, shown
@@ -170,8 +171,9 @@ enum ChatItem {
 /// One attachment shown under a sent message.
 #[derive(Clone)]
 enum Sent {
-    /// With its size in pixels (None for SVG), and the file it came from.
-    Image(Arc<gpui::Image>, Option<(u32, u32)>, Option<PathBuf>),
+    /// Its thumbnail, its size in pixels (None for SVG), and its file (a
+    /// pasted image's is in the temp folder). The image itself isn't kept.
+    Image(Option<Arc<gpui::RenderImage>>, Option<(u32, u32)>, PathBuf),
     File(PathBuf),
 }
 
@@ -281,21 +283,25 @@ struct Outgoing {
     /// Browser picks: context text for the agent, and their chip labels.
     context: Vec<String>,
     labels: Vec<String>,
-    /// Screenshots, pasted images and image files (with the file's path).
-    images: Vec<(Arc<gpui::Image>, Option<PathBuf>)>,
+    /// Screenshots, pasted images and image files.
+    images: Vec<OutImage>,
     /// Other files pasted or dropped in: sent as links.
     files: Vec<PathBuf>,
+}
+
+/// An image going out with a message.
+#[derive(Clone)]
+struct OutImage {
+    /// As it's sent (`files::sendable_image`).
+    image: Arc<gpui::Image>,
+    thumb: Option<Arc<gpui::RenderImage>>,
+    /// The file it came from; None for a pasted image or a screenshot.
+    path: Option<PathBuf>,
 }
 
 impl Outgoing {
     fn plain(text: String, mentions: Vec<PathBuf>) -> Self {
         Outgoing { text, mentions, context: Vec::new(), labels: Vec::new(), images: Vec::new(), files: Vec::new() }
-    }
-    /// The chat row of what was attached, if anything was.
-    fn sent(&self) -> Option<ChatItem> {
-        let images = self.images.iter().map(|(img, path)| Sent::Image(img.clone(), crate::files::image_size(img.bytes()), path.clone()));
-        let all: Vec<Sent> = images.chain(self.files.iter().cloned().map(Sent::File)).collect();
-        (!all.is_empty()).then_some(ChatItem::Files(all))
     }
     fn shown(&self) -> String {
         if self.labels.is_empty() { self.text.clone() } else { format!("{}\n\n＋ {}", self.text, self.labels.join(", ")) }
@@ -824,14 +830,13 @@ fn chat_markdown(title: &str, agent: &str, chat: &[ChatItem], tools: &HashMap<To
                 let fence = if t.contains("```") { "````" } else { "```" };
                 add(&mut out, &format!("{fence}\n{}\n{fence}", t.trim_end()), false, &mut prev_tool);
             }
-            ChatItem::Image(_, (w, h)) => add(&mut out, &format!("*[image {w}×{h}]*"), false, &mut prev_tool),
+            ChatItem::Image(_, (w, h), _) => add(&mut out, &format!("*[image {w}×{h}]*"), false, &mut prev_tool),
             ChatItem::Link { uri, name } => add(&mut out, &format!("[{name}]({uri})"), false, &mut prev_tool),
             ChatItem::Files(files) => {
                 let names: Vec<String> = files
                     .iter()
                     .map(|f| match f {
-                        Sent::Image(_, _, Some(p)) | Sent::File(p) => format!("[{}](file://{})", crate::files::chip_name(p), p.display()),
-                        Sent::Image(..) => "*[image]*".into(),
+                        Sent::Image(_, _, p) | Sent::File(p) => format!("[{}](file://{})", crate::files::chip_name(p), p.display()),
                     })
                     .collect();
                 add(&mut out, &format!("> ＋ {}", names.join(", ")), false, &mut prev_tool);

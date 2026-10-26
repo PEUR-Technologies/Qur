@@ -66,16 +66,39 @@ impl AgentTask {
         self.chat_changed();
     }
 
-    /// An image or link block from a message: its own chat row.
-    pub(super) fn push_media(&mut self, media: Option<Media>) {
+    /// An image or link block from a message: its own chat row. An image
+    /// is saved to the temp folder (click opens it) and decoded at twice
+    /// the size it's drawn, both off the main thread; the chat keeps only
+    /// that and the file's path.
+    pub(super) fn push_media(&mut self, media: Option<Media>, cx: &mut Context<Self>) {
         match media {
             Some(Media::Image { mime, data }) => match gpui::ImageFormat::from_mime_type(&mime) {
                 Some(f) => {
-                    // The size now: GPUI decodes later, after the row is measured.
-                    match crate::files::image_size(&data) {
-                        Some(size) => self.push(ChatItem::Image(Arc::new(gpui::Image::from_bytes(f, data)), size)),
-                        None => self.push(ChatItem::Notice("[image that couldn't be read]".into())),
-                    }
+                    // The size now, from the header: the row is measured once.
+                    let Some((w, h)) = crate::files::image_size(&data) else {
+                        return self.push(ChatItem::Notice("[image that couldn't be read]".into()));
+                    };
+                    let path = crate::files::temp_image_path("image", f);
+                    self.push(ChatItem::Image(None, (w, h), path.clone()));
+                    // Drawn at most 480 high (see `render_item`).
+                    let drawn_w = w as f32 * (480. / h as f32).min(1.);
+                    let (max_w, max_h) = ((drawn_w * 2.).ceil() as u32, 960);
+                    let to = path.clone();
+                    let work = cx.background_executor().spawn(async move {
+                        std::fs::write(&to, &data).ok();
+                        crate::files::thumbnail(&data, max_w, max_h)
+                    });
+                    cx.spawn(async move |this, cx| {
+                        let Some(thumb) = work.await else { return };
+                        this.update(cx, |t, cx| {
+                            if let Some(ChatItem::Image(slot, ..)) = t.chat.iter_mut().find(|c| matches!(c, ChatItem::Image(None, _, p) if *p == path)) {
+                                *slot = Some(thumb);
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
                 }
                 None => self.push(ChatItem::Notice(format!("[{mime} image]"))),
             },
@@ -84,10 +107,27 @@ impl AgentTask {
         }
     }
 
-    /// The images and files attached to a message, as a row under it.
-    pub(super) fn push_sent(&mut self, out: &Outgoing) {
-        if let Some(row) = out.sent() {
-            self.push(row);
+    /// The images and files attached to a message, as a row under it. The
+    /// row keeps thumbnails and paths, not the images: a pasted image or a
+    /// screenshot is written to the temp folder (off the main thread) so
+    /// clicking it opens the file.
+    pub(super) fn push_sent(&mut self, out: &Outgoing, cx: &mut Context<Self>) {
+        let mut row = Vec::new();
+        for i in &out.images {
+            let path = match &i.path {
+                Some(p) => p.clone(),
+                None => {
+                    let p = crate::files::temp_image_path("paste", i.image.format);
+                    let (img, to) = (i.image.clone(), p.clone());
+                    cx.background_executor().spawn(async move { std::fs::write(to, img.bytes()).ok() }).detach();
+                    p
+                }
+            };
+            row.push(Sent::Image(i.thumb.clone(), crate::files::image_size(i.image.bytes()), path));
+        }
+        row.extend(out.files.iter().cloned().map(Sent::File));
+        if !row.is_empty() {
+            self.push(ChatItem::Files(row));
         }
     }
 
@@ -220,11 +260,16 @@ impl AgentTask {
                 .into_any_element(),
             // At its own size, at most 480 high and never wider than the
             // chat; the aspect ratio keeps the height right when it shrinks.
-            // Click shows it full size.
-            ChatItem::Image(image, (w, h)) => {
+            // Click shows it full size. A blank frame of its size until
+            // it's decoded.
+            ChatItem::Image(thumb, (w, h), path) => {
                 let (w, h) = (*w as f32, *h as f32);
                 let width = w * (480. / h).min(1.);
-                let preview = Preview::Image { label: "Image".into(), image: image.clone() };
+                let preview = Preview::File(path.clone());
+                let frame = match thumb {
+                    Some(t) => img(t.clone()).w_full().aspect_ratio(w / h).rounded(look.z(4.)).border_1().border_color(look.c(ui.border)).into_any_element(),
+                    None => div().w_full().aspect_ratio(w / h).rounded(look.z(4.)).border_1().border_color(look.c(ui.border)).bg(look.c(ui.panel_bg)).into_any_element(),
+                };
                 pad(div())
                     .child(
                         div()
@@ -232,7 +277,7 @@ impl AgentTask {
                             .w(look.z(width))
                             .max_w_full()
                             .cursor_pointer()
-                            .child(img(image.clone()).w_full().aspect_ratio(w / h).rounded(look.z(4.)).border_1().border_color(look.c(ui.border)))
+                            .child(frame)
                             .on_click(cx.listener(move |_, _, _, cx| cx.emit(AgentEvent::Preview(preview.clone())))),
                     )
                     .into_any_element()
@@ -290,23 +335,22 @@ impl AgentTask {
         let ui = &look.theme.ui;
         div().flex().flex_wrap().gap(look.z(6.)).children(files.iter().enumerate().map(|(i, f)| {
             let (preview, el) = match f {
-                Sent::Image(image, size, path) => {
+                Sent::Image(thumb, size, path) => {
                     let (w, h) = size.map_or((96., 96.), |(w, h)| (w as f32, h as f32));
                     let height = h.min(96.);
                     let width = (w * height / h).min(320.);
-                    let preview = match path {
-                        Some(p) => Preview::File(p.clone()),
-                        None => Preview::Image { label: "Image".into(), image: image.clone() },
+                    let el = match thumb {
+                        Some(t) => img(t.clone())
+                            .w(look.z(width))
+                            .h(look.z(height))
+                            .object_fit(gpui::ObjectFit::Cover)
+                            .rounded(look.z(4.))
+                            .border_1()
+                            .border_color(look.c(ui.border))
+                            .into_any_element(),
+                        None => div().w(look.z(width)).h(look.z(height)).rounded(look.z(4.)).border_1().border_color(look.c(ui.border)).bg(look.c(ui.panel_bg)).into_any_element(),
                     };
-                    let el = img(image.clone())
-                        .w(look.z(width))
-                        .h(look.z(height))
-                        .object_fit(gpui::ObjectFit::Cover)
-                        .rounded(look.z(4.))
-                        .border_1()
-                        .border_color(look.c(ui.border))
-                        .into_any_element();
-                    (preview, el)
+                    (Preview::File(path.clone()), el)
                 }
                 Sent::File(p) => {
                     let el = div()

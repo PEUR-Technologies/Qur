@@ -8,6 +8,7 @@
 
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
@@ -24,6 +25,12 @@ use crate::look::Look;
 use crate::undo::{History, Kind, insert_kind};
 
 const MAX_LINES: usize = 10;
+
+/// An image as it's sent, with its thumbnail (decoded from the sent bytes).
+fn with_thumb(img: Arc<gpui::Image>) -> (Arc<gpui::Image>, Option<Arc<gpui::RenderImage>>) {
+    let thumb = files::thumbnail(img.bytes(), files::THUMB.0, files::THUMB.1);
+    (img, thumb)
+}
 
 pub enum PromptEvent {
     Submit,
@@ -159,6 +166,22 @@ impl PromptInput {
     }
 
     pub fn attach(&mut self, a: Attachment, cx: &mut Context<Self>) {
+        // An image without its thumbnail (a Browser pick's screenshot):
+        // decoded off the main thread, the chip shows it once it's ready.
+        if let (Some(img), None) = (a.image.clone(), &a.thumb) {
+            cx.spawn(async move |this, cx| {
+                let bytes = img.clone();
+                let Some(thumb) = cx.background_executor().spawn(async move { files::thumbnail(bytes.bytes(), files::THUMB.0, files::THUMB.1) }).await else { return };
+                this.update(cx, |t, cx| {
+                    if let Some(a) = t.attachments.iter_mut().find(|a| a.image.as_ref().is_some_and(|i| Arc::ptr_eq(i, &img))) {
+                        a.thumb = Some(thumb);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
         self.attachments.push(a);
         cx.emit(PromptEvent::Changed);
         cx.notify();
@@ -169,7 +192,8 @@ impl PromptInput {
     }
 
     /// Files pasted or dropped from Finder: an image file is read (off the
-    /// main thread) and sent as an image, anything else as a link to it.
+    /// main thread, with its thumbnail) and sent as an image, anything else
+    /// as a link to it.
     pub fn attach_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         for p in paths {
             if self.attachments.iter().any(|a| a.path.as_ref() == Some(p)) {
@@ -182,10 +206,10 @@ impl PromptInput {
             let p = p.clone();
             cx.spawn(async move |this, cx| {
                 let read = p.clone();
-                let image = cx.background_executor().spawn(async move { std::fs::read(&read).ok().and_then(files::sendable_image) }).await;
+                let image = cx.background_executor().spawn(async move { std::fs::read(&read).ok().and_then(files::sendable_image).map(with_thumb) }).await;
                 this.update(cx, |t, cx| {
                     let a = match image {
-                        Some(img) => Attachment::image(files::chip_name(&p).into(), img, Some(p)),
+                        Some((img, thumb)) => Attachment::image(files::chip_name(&p).into(), img, thumb, Some(p)),
                         None => Attachment::file(p),
                     };
                     t.attach(a, cx);
@@ -199,8 +223,8 @@ impl PromptInput {
     /// A pasted image, fitted to what the agent takes (off the main thread).
     fn attach_image_bytes(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            let Some(img) = cx.background_executor().spawn(async move { files::sendable_image(bytes) }).await else { return };
-            this.update(cx, |t, cx| t.attach(Attachment::image("Pasted image".into(), img, None), cx)).ok();
+            let Some((img, thumb)) = cx.background_executor().spawn(async move { files::sendable_image(bytes).map(with_thumb) }).await else { return };
+            this.update(cx, |t, cx| t.attach(Attachment::image("Pasted image".into(), img, thumb, None), cx)).ok();
         })
         .detach();
     }
@@ -600,9 +624,11 @@ impl Render for PromptInput {
                     (None, Some(img)) => Some(Preview::Image { label: a.label.clone(), image: img.clone() }),
                     _ => None,
                 };
-                let icon = match (&a.image, &a.path) {
-                    (Some(img), _) => gpui::img(img.clone()).size(look.z(14.)).flex_none().rounded(look.z(2.)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
-                    (None, Some(_)) => div().flex_none().child("▤").into_any_element(),
+                let icon = match (&a.thumb, &a.image, &a.path) {
+                    (Some(t), ..) => gpui::img(t.clone()).size(look.z(14.)).flex_none().rounded(look.z(2.)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
+                    // Its thumbnail is still being decoded.
+                    (None, Some(_), _) => div().size(look.z(14.)).flex_none().rounded(look.z(2.)).bg(look.c(ui.hover_bg)).into_any_element(),
+                    (None, None, Some(_)) => div().flex_none().child("▤").into_any_element(),
                     _ => div().flex_none().child("❝").into_any_element(),
                 };
                 div()

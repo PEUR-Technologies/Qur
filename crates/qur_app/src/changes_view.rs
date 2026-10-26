@@ -655,7 +655,7 @@ impl Render for ChangesView {
 
 #[cfg(test)]
 mod tests {
-    use super::turn_chip_label;
+    use super::*;
 
     #[test]
     fn turn_chips() {
@@ -665,11 +665,6 @@ mod tests {
         assert_eq!(turn_chip_label(&t), "#3 · 2 files +12 −4");
         assert_eq!(turn_chip_label(&qur_agents::Turn { rewound: true, ..t }), "#3 rewound");
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 
     #[test]
     fn comments_go_as_one_numbered_message() {
