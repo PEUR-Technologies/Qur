@@ -125,8 +125,13 @@ impl Workspace {
         self.sync_menus(cx);
         cx.notify();
     }
-    pub(super) fn new_window(&mut self, _: &qur::NewWindow, _: &mut Window, cx: &mut Context<Self>) {
-        crate::prompt_open_folder(cx);
+    /// File > New Window: the empty window (an idle one is brought forward).
+    pub(super) fn new_window(&mut self, _: &qur::NewWindow, window: &mut Window, cx: &mut Context<Self>) {
+        // This window can't be looked at from inside its own update.
+        if self.idle_home(cx) {
+            return window.activate_window();
+        }
+        crate::open_home(None, None, cx);
     }
     pub(super) fn open_folder(&mut self, _: &qur::OpenFolder, _: &mut Window, cx: &mut Context<Self>) {
         crate::prompt_open_folder(cx);

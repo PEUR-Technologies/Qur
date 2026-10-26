@@ -16,11 +16,12 @@ impl Workspace {
             Some(Overlay::AgentMenu { id, .. }) => format!("agent_menu:{id}"),
             Some(Overlay::FileMenu { rel, .. }) => format!("file_menu:{}", rel.display()),
             Some(Overlay::Layouts) => "layouts".into(),
-            Some(Overlay::About) => "about".into(),
+            Some(Overlay::About(_)) => "about".into(),
             Some(Overlay::Transparency { .. }) => "transparency".into(),
             Some(Overlay::Gaps) => "gaps".into(),
             Some(Overlay::NewTask { .. }) => "new_task".into(),
             Some(Overlay::Review { input, .. }) => format!("review:{:?}", input.read(cx).text),
+            Some(Overlay::Cleanup(c)) => c.debug(),
         };
         let selected = match &self.selected {
             Some(Selected::Agent(id) | Selected::TermTask(id)) => {
@@ -50,6 +51,11 @@ impl Workspace {
         let sidebar = format!("on={} mode={} side={} shown={} visible={} sections={}", self.sidebar, u.sidebar, u.sidebar_side, self.sidebar_shown, self.sidebar_visible(), u.sidebar_sections.join(","));
         let viewer = self.viewer.as_ref().map_or_else(|| "none".into(), |v| v.debug_state(cx));
         let crash = self.crash_notice.as_ref().and_then(|p| p.file_name()).map_or_else(|| "none".into(), |n| n.to_string_lossy().into_owned());
+        let project = match (self.home, self.repo) {
+            (true, _) => "none".to_string(),
+            (false, true) => format!("repo:{}", self.project_name()),
+            (false, false) => format!("folder:{}", self.project_name()),
+        };
         let agents = self.agents.iter().map(|a| a.read(cx).debug_state()).collect::<Vec<_>>().join(" ");
         // The selected task's Changes view, and the changed files its heat counts as the agent's.
         let work = match &self.selected {
@@ -63,7 +69,7 @@ impl Workspace {
             _ => "none".into(),
         };
         format!(
-            "overlay={overlay} selected={selected} crash={crash} agents={{{agents}}} work={{{work}}} code={code} buffers={buffers} viewer={viewer} term={{{}}} git={{{vc}}} docks={{{docks}}} gaps={{{gaps}}} sidebar={{{sidebar}}}",
+            "project={project} overlay={overlay} selected={selected} crash={crash} agents={{{agents}}} work={{{work}}} code={code} buffers={buffers} viewer={viewer} term={{{}}} git={{{vc}}} docks={{{docks}}} gaps={{{gaps}}} sidebar={{{sidebar}}}",
             self.terms.read(cx).debug_state(cx)
         )
     }

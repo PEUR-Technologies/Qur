@@ -17,8 +17,11 @@ impl Workspace {
             }
             _ => {}
         }
-        let root = self.current_root(cx);
-        self.tree_for(&root, window, cx);
+        // The empty window has no file tree (it would list the home folder).
+        if !self.home {
+            let root = self.current_root(cx);
+            self.tree_for(&root, window, cx);
+        }
         match &self.selected {
             Some(Selected::Agent(id)) => {
                 if let Some(a) = self.agent(id).cloned() {
@@ -445,6 +448,7 @@ impl Workspace {
                     return Self::stage_tile(look, ui.editor_bg, s.clone().into_any_element());
                 }
             }
+            None if self.home => return self.home_stage(look, cx),
             None => {}
         }
         let hint = |label: &'static str, keys: &str| {

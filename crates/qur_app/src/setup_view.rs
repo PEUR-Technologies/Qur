@@ -101,6 +101,7 @@ struct Found {
 /// The settings in effect, as the workspace sees them (previews included).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Current {
+    /// The project's name; empty in the empty window.
     pub project: String,
     pub theme: String,
     pub theme_is_project: bool,
@@ -774,7 +775,11 @@ impl SetupView {
     }
 
     /// This project / All projects, for Theme and Transparency (decision 13).
+    /// None in the empty window (no project): changes there go to all projects.
     fn scope_pills(&self, look: &Look, id: &'static str, project: bool, set: fn(&mut SetupView, bool), cx: &Context<Self>) -> gpui::Div {
+        if self.current.project.is_empty() {
+            return div();
+        }
         div()
             .flex()
             .flex_wrap()

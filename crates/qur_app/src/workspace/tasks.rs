@@ -535,6 +535,10 @@ impl Workspace {
         // itself. While one does, more get their own worktree so two agents
         // never edit the same files.
         let root_busy = self.term_tasks.iter().any(|t| t.record.in_root) || self.agents.iter().any(|a| a.read(cx).record.in_root);
+        // More need their own worktree: a folder without git gets offered one.
+        if root_busy && self.offer_git(|ws, window, cx| ws.new_agent_terminal(&qur::NewAgentTerminal, window, cx), window, cx) {
+            return;
+        }
         if !root_busy {
             let root = self.root.clone();
             let git = |args: &[&str]| qur_worktree::git(&root, args).ok();
@@ -1005,6 +1009,10 @@ impl Workspace {
     }
 
     pub(super) fn new_agent_task(&mut self, _: &qur::NewAgentTask, window: &mut Window, cx: &mut Context<Self>) {
+        // A task works in its own worktree: a folder without git gets offered one first.
+        if self.offer_git(|ws, window, cx| ws.new_agent_task(&qur::NewAgentTask, window, cx), window, cx) {
+            return;
+        }
         self.close_overlays(window, cx);
         self.prev_focus = window.focused(cx);
         let input = cx.new(|cx| PromptInput::new("Describe the task…  (@ to mention a file, ⇧↩ for a new line)", self.root.clone(), cx));

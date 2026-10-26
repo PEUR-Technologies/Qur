@@ -318,6 +318,11 @@ impl Session {
         }
     }
 
+    /// The shell's pid (it leads the terminal's session).
+    pub fn pid(&self) -> i32 {
+        self.pid
+    }
+
     /// What the agent says it's working on (its terminal title), when that's
     /// a real description rather than the program's or shell's name.
     pub fn agent_title(&self) -> Option<String> {
