@@ -1070,7 +1070,7 @@ impl Workspace {
         self._subs.push(sub);
         let f = input.read(cx).focus.clone();
         window.focus(&f, cx);
-        self.overlay = Some(Overlay::NewTask { input, agent: 0, plan: false });
+        self.overlay = Some(Overlay::NewTask { input, agent: 0, plan: false, open: false });
         cx.notify();
     }
 }

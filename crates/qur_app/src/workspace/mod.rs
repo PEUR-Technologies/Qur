@@ -200,7 +200,8 @@ enum Overlay {
     /// Qur > Appearance > Gaps…: window gaps, live while you drag.
     Gaps,
     /// `plan`: start the task in the agent's plan mode (Plan first).
-    NewTask { input: Entity<PromptInput>, agent: usize, plan: bool },
+    /// `open`: the agent dropdown is showing.
+    NewTask { input: Entity<PromptInput>, agent: usize, plan: bool, open: bool },
     /// Review Agent's Work… / Plan…: the reviewer (agent and model) for
     /// task `task`, and an optional instruction line.
     Review { input: Entity<TextInput>, task: String, subject: Subject, choices: Vec<review::Choice>, chosen: usize, touched: bool },
