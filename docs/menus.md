@@ -101,6 +101,8 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - ---
 - Find in Chat `Cmd+F` (in a structured agent's view) · Copy Chat as Markdown (also in the sidebar's right-click menu, with Allow All Pending)
 - ---
+- Plan Mode `Cmd+Opt+P` (checkmark; the selected agent's plan or read-only mode, or back to the mode it was in; in the New Agent Task dialog it toggles **Plan first**) · Comment on Plan… (shows the plan the agent proposed, or in plan mode its latest reply; click a line to comment) · Approve Plan · Send Plan Comments (disabled when there's no plan, or no comments). Structured agents only.
+- ---
 - Next Agent · Previous Agent · Switch Agent or Terminal… `Ctrl+T` · Agent 1–9 `Ctrl+1..9`
 - ---
 - Review Changes `Cmd+4` · Merge into My Branch · Keep Working · Discard Task…

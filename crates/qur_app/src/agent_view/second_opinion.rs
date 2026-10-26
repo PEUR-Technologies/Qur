@@ -21,8 +21,12 @@ impl AgentTask {
             .collect()
     }
 
-    /// The agent's plan (its To-do), one line per step; None without one.
+    /// The plan waiting for your approval (plan mode), else the agent's
+    /// To-do, one line per step; None without either.
     pub fn plan_text(&self) -> Option<String> {
+        if let Some(p) = self.proposed_plan_text() {
+            return Some(p);
+        }
         (!self.plan.is_empty()).then(|| {
             self.plan
                 .iter()

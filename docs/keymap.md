@@ -128,6 +128,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Up` (empty prompt) | Pull the last queued message back into the prompt to edit it (each queued message also has Send now / Edit / ✕) | ✅ |
 | `Cmd+Z` / `Shift+Cmd+Z` (prompt, text fields) | Undo / redo in the prompt and the one-line fields (find, replace, go to line, pickers, address bar); typing groups into one step until a pause or a caret move | ✅ |
 | `Shift+Tab` (chat agent) | Next mode (Default / Accept Edits / Plan…), from the agent's session settings; click the Mode or Model chip above the prompt to choose | ✅ |
+| `Cmd+Opt+P` | Plan Mode: the selected chat agent into its plan (read-only) mode, or back to the mode it was in; in the New Agent Task dialog, Plan first (the task's first message goes in plan mode). When the agent proposes a plan it opens in place of the chat: click a line to comment, then **Send comments** (it keeps planning) or **Approve** (it starts, back in its earlier mode). Agent menu: Comment on Plan…, Approve Plan, Send Plan Comments (no default keys) | ✅ |
 | Agent menu | Discard Task…, Reveal Worktree in Finder, Open Task Worktree in Terminal | M2 ✅ |
 | `Cmd+K Cmd+L` | Cycle peek layout | M3 ✅ |
 | `Cmd+1..4` | Live / To-do / Chat / Changes (layout B) | M3 ✅ |

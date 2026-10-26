@@ -163,7 +163,8 @@ enum Overlay {
     Transparency { project_scope: bool },
     /// Qur > Appearance > Gaps…: window gaps, live while you drag.
     Gaps,
-    NewTask { input: Entity<PromptInput>, agent: usize },
+    /// `plan`: start the task in the agent's plan mode (Plan first).
+    NewTask { input: Entity<PromptInput>, agent: usize, plan: bool },
     /// Review Agent's Work… / Plan…: the reviewer (agent and model) for
     /// task `task`, and an optional instruction line.
     Review { input: Entity<TextInput>, task: String, subject: Subject, choices: Vec<review::Choice>, chosen: usize, touched: bool },
@@ -450,6 +451,7 @@ impl Workspace {
             turns: self.selected_last_turn(cx).is_some(),
             pending: self.agents.iter().any(|a| a.read(cx).has_permission()),
             review: self.review_state(cx),
+            plan: self.plan_state(cx),
             vim: self.config.keys.vim,
             keep_awake: self.config.ui.keep_awake,
             zen: self.config.ui.zen,
@@ -611,10 +613,12 @@ impl Render for Workspace {
                     ws.watch_root(window, cx);
                 });
             });
-            // Dev/test: QUR_DEBUG_TASKS="prompt one|prompt two" starts agent tasks at launch.
+            // Dev/test: QUR_DEBUG_TASKS="prompt one|plan:prompt two" starts agent
+            // tasks at launch (`plan:`: in plan mode).
             if let Ok(list) = std::env::var("QUR_DEBUG_TASKS") {
                 for p in list.split('|').map(str::trim).filter(|p| !p.is_empty()) {
-                    self.start_task(0, p.to_string(), Vec::new(), window, cx);
+                    let (plan, p) = p.strip_prefix("plan:").map_or((false, p), |p| (true, p.trim()));
+                    self.start_task(0, p.to_string(), Vec::new(), plan, window, cx);
                 }
             }
             if std::env::var("QUR_BENCH").as_deref() == Ok("glow") {
@@ -813,6 +817,10 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::review_work))
             .on_action(cx.listener(Self::review_plan))
             .on_action(cx.listener(Self::send_review_findings))
+            .on_action(cx.listener(Self::plan_mode))
+            .on_action(cx.listener(Self::comment_on_plan))
+            .on_action(cx.listener(Self::approve_plan))
+            .on_action(cx.listener(Self::send_plan_comments))
             .on_action(cx.listener(Self::keep_working))
             .on_action(cx.listener(Self::cycle_layout))
             .on_action(cx.listener(Self::layout_a))

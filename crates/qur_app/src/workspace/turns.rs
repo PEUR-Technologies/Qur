@@ -316,4 +316,64 @@ Commits stay; {label} is told with your next message."));
             a.update(cx, |a, cx| a.answer_permission(kind, cx));
         }
     }
+
+    // -- plan mode -----------------------------------------------------------------
+
+    pub(super) fn plan_state(&self, cx: &App) -> commands::PlanState {
+        if let Some(Overlay::NewTask { plan, agent, .. }) = &self.overlay {
+            let acp = self.roster.agents.get(*agent).is_some_and(|a| a.mode == Mode::Acp);
+            return commands::PlanState { agent: acp, on: *plan && acp, ..Default::default() };
+        }
+        let Some(a) = self.selected_agent() else { return commands::PlanState::default() };
+        let a = a.read(cx);
+        let plan = a.has_plan_to_review();
+        commands::PlanState { agent: a.review.is_none(), on: a.in_plan_mode(), plan, comments: plan && a.plan_comments() > 0 }
+    }
+
+    /// The New Agent Task dialog's Plan first.
+    pub(super) fn toggle_plan_first(&mut self, cx: &mut Context<Self>) {
+        if let Some(Overlay::NewTask { plan, .. }) = &mut self.overlay {
+            *plan = !*plan;
+        }
+        self.sync_menus(cx);
+        cx.notify();
+    }
+
+    /// Plan Mode (Cmd+Opt+P): the selected agent into its plan mode or back
+    /// out; in the New Agent Task dialog, Plan first.
+    pub(super) fn plan_mode(&mut self, _: &qur::PlanMode, _: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.overlay, Some(Overlay::NewTask { .. })) {
+            return self.toggle_plan_first(cx);
+        }
+        let Some(a) = self.selected_agent() else {
+            let msg = match self.selected {
+                Some(Selected::TermTask(_)) => "In an Agent Terminal, press Shift+Tab to cycle Claude Code's modes",
+                _ => "Select a chat agent first",
+            };
+            return self.flash(msg, cx);
+        };
+        let on = a.update(cx, |a, cx| {
+            a.toggle_plan_mode(cx);
+            a.in_plan_mode()
+        });
+        self.flash(if on { "Plan mode: the agent plans and asks before it changes anything" } else { "Plan mode off" }, cx);
+        self.sync_menus(cx);
+    }
+
+    pub(super) fn comment_on_plan(&mut self, _: &qur::CommentOnPlan, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(a) = self.selected_agent() else { return self.flash("Select a chat agent first", cx) };
+        if !a.update(cx, |a, cx| a.show_plan(cx)) {
+            self.flash("No plan to comment on yet: turn on Plan Mode (Cmd+Opt+P) and ask for one", cx);
+        }
+    }
+
+    pub(super) fn approve_plan(&mut self, _: &qur::ApprovePlan, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(a) = self.selected_agent().filter(|a| a.read(cx).has_plan_to_review()) else { return self.flash("No plan is waiting for approval", cx) };
+        a.update(cx, |a, cx| a.approve_plan(cx));
+    }
+
+    pub(super) fn send_plan_comments(&mut self, _: &qur::SendPlanComments, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(a) = self.selected_agent().filter(|a| a.read(cx).plan_comments() > 0) else { return self.flash("No plan comments to send: click a line of the plan to comment", cx) };
+        a.update(cx, |a, cx| a.send_plan_comments(cx));
+    }
 }

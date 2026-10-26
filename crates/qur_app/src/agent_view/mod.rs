@@ -4,6 +4,7 @@
 
 mod chat;
 mod find;
+mod plan;
 mod second_opinion;
 mod session;
 mod stage;
@@ -124,6 +125,8 @@ pub enum AgentEvent {
     PermissionsChanged,
     /// The task's reviewer started, changed state or went away (save, sidebar).
     Review,
+    /// Plan mode went on or off, or a plan's comments changed (menus).
+    PlanChanged,
 }
 
 /// What makes an `AgentTask` a reviewer: a second-opinion session on
@@ -347,6 +350,14 @@ pub struct AgentTask {
     toggled: HashSet<String>,
     /// Context tokens used / window, and session cost (USD) if known.
     usage: Option<(u64, u64, Option<f64>)>,
+    /// Tokens this task's turns used since Qur started it (`TurnUsage`).
+    tokens: u64,
+    /// Plan mode: the plan shown and your comments on it (plan.rs).
+    plan_review: plan::PlanReview,
+    /// The mode the task was in before Qur put it in plan mode.
+    pre_plan_mode: Option<String>,
+    /// Put the session in plan mode as soon as it opens (Plan first).
+    pub plan_first: bool,
     /// Subagents this agent started, oldest first (shown under it in the sidebar).
     pub subagents: Vec<Subagent>,
     /// The subagent shown in place of the chat (clicked in the sidebar).
@@ -541,6 +552,10 @@ impl AgentTask {
             settings: Vec::new(),
             toggled: HashSet::new(),
             usage: None,
+            tokens: 0,
+            plan_review: plan::PlanReview::default(),
+            pre_plan_mode: None,
+            plan_first: false,
             subagents: Vec::new(),
             open_subagent: None,
             setting_up: false,
@@ -902,6 +917,7 @@ impl Render for AgentTask {
             self.measured_at = sizes;
             self.list.remeasure();
         }
+        self.sync_plan();
         let ui = look.theme.ui.clone();
         // A reviewer is shown inside its task's chat panel (`review_view`):
         // just its chat and prompt.
@@ -1102,6 +1118,17 @@ You're welcome.
 ";
         assert_eq!(md, want);
         assert!(!md.contains("secret"), "thoughts are left out");
+    }
+
+    #[test]
+    fn usage_in_the_header() {
+        use stage::usage_readout;
+        assert_eq!(usage_readout(121_175, Some(0.11930126)).as_deref(), Some("121.2k tokens · $0.12"));
+        assert_eq!(usage_readout(640, None).as_deref(), Some("640 tokens"));
+        assert_eq!(usage_readout(2_350_000, Some(1.5)).as_deref(), Some("2.4M tokens · $1.50"));
+        assert_eq!(usage_readout(0, Some(0.04)).as_deref(), Some("$0.04"));
+        assert_eq!(usage_readout(0, None), None, "nothing reported, nothing shown");
+        assert_eq!(usage_readout(0, Some(0.)), None);
     }
 
     #[test]

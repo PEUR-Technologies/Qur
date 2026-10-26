@@ -486,9 +486,26 @@ impl Workspace {
             )),
             Overlay::Transparency { project_scope } => Some(self.transparency_popover(*project_scope, look, cx)),
             Overlay::Gaps => Some(self.gaps_popover(look, cx)),
-            Overlay::NewTask { input, agent } => {
+            Overlay::NewTask { input, agent, plan } => {
                 let agents = self.roster.agents.clone();
                 let chosen = *agent;
+                // Plan first (Cmd+Opt+P here too): structured agents only.
+                let plan_chip = agents.get(chosen).filter(|a| a.mode == Mode::Acp).map(|_| {
+                    let on = *plan;
+                    div()
+                        .id("plan-first")
+                        .px(look.z(8.))
+                        .py(look.z(2.))
+                        .rounded(look.z(4.))
+                        .cursor_pointer()
+                        .text_size(look.text(-1.))
+                        .border_1()
+                        .border_color(look.c(if on { ui.border_strong } else { ui.border }))
+                        .text_color(look.c(if on { ui.text } else { ui.text_muted }))
+                        .when(on, |d| d.bg(look.c(ui.active_bg)))
+                        .child(if on { "✓ Plan first" } else { "Plan first" })
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_plan_first(cx)))
+                });
                 let chips: Vec<_> = agents
                     .iter()
                     .enumerate()
@@ -542,6 +559,7 @@ impl Workspace {
                                         .gap(look.z(6.))
                                         .child(div().font_weight(gpui::FontWeight::MEDIUM).child("New agent task"))
                                         .child(div().flex_1())
+                                        .children(plan_chip)
                                         .children(chips),
                                 )
                                 .child(
