@@ -49,6 +49,23 @@ pub struct Config {
     pub keys: KeysConfig,
     pub alerts: AlertsConfig,
     pub layout: LayoutConfig,
+    pub agents: AgentsConfig,
+}
+
+/// Structured (ACP) agents.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AgentsConfig {
+    /// Minutes a finished agent may sit unused, out of sight, before Qur
+    /// stops its process (it resumes its session when you go back to it).
+    /// 0 = never.
+    pub idle_release: u64,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        AgentsConfig { idle_release: 10 }
+    }
 }
 
 /// The agent stage's arrangement (dock.rs), written by Qur as you drag tabs
@@ -176,6 +193,7 @@ impl Default for Config {
             keys: KeysConfig::default(),
             alerts: AlertsConfig::default(),
             layout: LayoutConfig::default(),
+            agents: AgentsConfig::default(),
         }
     }
 }
@@ -768,6 +786,17 @@ mod tests {
         assert!(err.is_none());
         assert_eq!(c.theme, "Auto");
         assert!(c.editor.soft_wrap);
+        assert_eq!(c.agents.idle_release, 10);
+    }
+
+    #[test]
+    fn agents_idle_release() {
+        let d = tmp("agents");
+        let p = d.join("config.toml");
+        std::fs::write(&p, "[agents]\nidle_release = 0\n").unwrap();
+        let (c, err) = Config::load_from(&p);
+        assert!(err.is_none());
+        assert_eq!(c.agents.idle_release, 0);
     }
 
     #[test]

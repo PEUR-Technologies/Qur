@@ -306,6 +306,9 @@ pub enum Event {
     Exited { code: Option<i32>, stderr_tail: String },
     /// A malformed message, or a request Qur doesn't handle (answered with -32601).
     Warning(String),
+    /// `session/load` was answered (or failed): every update it replayed came
+    /// before this in the stream, so later updates are new work.
+    Loaded(SessionId),
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -107,6 +107,58 @@ impl Workspace {
         .detach();
     }
 
+    /// Idle release (`[agents] idle_release`, in minutes): every so often,
+    /// each agent that has sat out of sight, doing nothing, that long lets
+    /// go of what it can rebuild, its agent process above all (it resumes
+    /// its session when you go back to it). Agent Terminals and shells are
+    /// never touched: they hold your state. Dev/test:
+    /// QUR_DEBUG_AGENT_IDLE=<seconds> sets the time.
+    pub(super) fn watch_idle(&mut self, cx: &mut Context<Self>) {
+        let bg = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            while let Ok(wait) = this.update(cx, |this, cx| this.release_idle(cx)) {
+                bg.timer(wait).await;
+            }
+        })
+        .detach();
+    }
+
+    fn idle_limit(&self) -> Option<Duration> {
+        if let Some(secs) = std::env::var("QUR_DEBUG_AGENT_IDLE").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
+            return Some(Duration::from_secs(secs));
+        }
+        (self.config.agents.idle_release > 0).then(|| Duration::from_secs(self.config.agents.idle_release * 60))
+    }
+
+    /// One sweep; returns how long until the next.
+    fn release_idle(&mut self, cx: &mut Context<Self>) -> Duration {
+        let Some(limit) = self.idle_limit() else { return Duration::from_secs(60) };
+        let selected = self.selected_agent();
+        for a in self.agents.clone() {
+            let reviewer = a.read(cx).reviewer.clone();
+            // On screen (a reviewer shows in its task's stage): its clock restarts.
+            if selected.as_ref() == Some(&a) {
+                for t in std::iter::once(&a).chain(reviewer.as_ref()) {
+                    t.update(cx, |t, _| t.touch());
+                }
+                continue;
+            }
+            // A reviewer has a clock of its own; its task waits while it works.
+            if let Some(r) = &reviewer
+                && r.read(cx).idle_for().is_some_and(|d| d >= limit)
+            {
+                r.update(cx, |r, cx| r.release(cx));
+            }
+            if reviewer.is_some_and(|r| r.read(cx).busy()) {
+                continue;
+            }
+            if a.read(cx).idle_for().is_some_and(|d| d >= limit) {
+                a.update(cx, |a, cx| a.release(cx));
+            }
+        }
+        (limit / 4).clamp(Duration::from_secs(1), Duration::from_secs(60))
+    }
+
     /// An Inspect pick in an Agent Terminal's Browser: paste it into the
     /// agent's terminal (not sent), with the screenshot saved to a file so a
     /// CLI agent can read it.
@@ -269,7 +321,7 @@ impl Workspace {
                 this.sync_menus(cx);
                 cx.notify();
             }
-            AgentEvent::Subagents => cx.notify(),
+            AgentEvent::Subagents | AgentEvent::Resumed => cx.notify(),
             AgentEvent::Review => {
                 this.save_tasks(cx);
                 this.sync_menus(cx);

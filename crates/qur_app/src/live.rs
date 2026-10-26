@@ -109,6 +109,22 @@ impl LivePane {
         cx.notify();
     }
 
+    /// Idle release: drop the editor (the file's text, highlighting, undo)
+    /// unless you've edited it here. `wake` opens the same file again.
+    pub fn release(&mut self, cx: &mut Context<Self>) {
+        if self.editor.as_ref().is_some_and(|e| !e.read(cx).is_dirty()) {
+            self.editor = None;
+        }
+    }
+
+    pub fn wake(&mut self, cx: &mut Context<Self>) {
+        if self.editor.is_none()
+            && let Some(p) = self.current.clone()
+        {
+            self.show(p, cx);
+        }
+    }
+
     fn on_files(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         let (Some(cur), Some(e)) = (self.current.clone(), self.editor.clone()) else { return };
         if !paths.contains(&cur) {

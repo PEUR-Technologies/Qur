@@ -58,6 +58,10 @@ impl AgentTask {
         let saved = self.record.session_id.clone().filter(|_| self.load_session).map(SessionId::from);
         let cwd = self.record.worktree.clone();
         let role = self.review.clone();
+        // Back from an idle release: the chat already shows the history the
+        // load replays, and the user's settings go back on.
+        self.replaying = saved.is_some() && self.resume.is_some();
+        let restore = self.resume.as_ref().map(|r| r.settings.clone()).unwrap_or_default();
         cx.spawn(async move |this, cx| {
             let session = match saved {
                 Some(id) => match client.load_session(&id, &cwd).await {
@@ -66,6 +70,7 @@ impl AgentTask {
                 },
                 None => None,
             };
+            let loaded = session.is_some();
             let (session, settings) = match session {
                 Some(s) => s,
                 None => match client.new_session(&cwd).await {
@@ -79,6 +84,7 @@ impl AgentTask {
             // anything is sent (also after a restart: modes aren't saved).
             let settings = match &role {
                 Some(role) => review_setup(&client, &session, settings, role).await,
+                None if loaded => restore_settings(&client, &session, settings, &restore).await,
                 None => settings,
             };
             this.update(cx, |t, cx| {
@@ -86,16 +92,127 @@ impl AgentTask {
                 t.settings = settings;
                 t.record.session_id = Some(session.to_string());
                 t.session_id = Some(session);
-                t.set_status(Status::Idle, cx);
-                if let Some(out) = t.queued.take() {
-                    t.send_out(out, cx);
-                } else {
-                    t.drain_pending(cx);
+                let resumed = t.resume.take();
+                if resumed.is_some() && !loaded {
+                    t.replaying = false;
+                    t.push(ChatItem::Notice(format!("Couldn't pick up the earlier session again: {} starts afresh and doesn't remember the chat above.", t.def.label)));
+                }
+                match resumed {
+                    // Nothing to send: back to how it was, with no new status to alert for.
+                    Some(r) if t.queued.is_none() && t.pending.is_empty() => {
+                        println!("RESUME {} {}", t.record.id, if loaded { "loaded" } else { "new session" });
+                        t.status = r.status;
+                        t.last_active = Instant::now();
+                        cx.emit(AgentEvent::Resumed);
+                        cx.notify();
+                    }
+                    _ => {
+                        t.set_status(Status::Idle, cx);
+                        if let Some(out) = t.queued.take() {
+                            t.send_out(out, cx);
+                        } else {
+                            t.drain_pending(cx);
+                        }
+                    }
                 }
             })
             .ok()
         })
         .detach();
+    }
+
+    // -- idle release --------------------------------------------------------------
+
+    /// Nothing is going on or waiting: no turn, queue, permission, sign-in,
+    /// setup or Rewind.
+    fn quiet(&self) -> bool {
+        matches!(self.status, Status::Done | Status::Idle)
+            && self.queued.is_none()
+            && self.pending.is_empty()
+            && self.permissions.is_empty()
+            && self.sign_in.is_none()
+            && !self.setting_up
+            && !self.rewinding
+            && !self.turn_running()
+            && self.rewind_after_stop.is_none()
+    }
+
+    /// Working, starting, or about to: a turn, setup or Rewind under way.
+    pub fn busy(&self) -> bool {
+        matches!(self.status, Status::Working | Status::NeedsYou | Status::Starting) || self.setting_up || self.rewinding || self.turn_running()
+    }
+
+    /// How long the task has gone without doing or showing anything (None
+    /// while it's busy).
+    pub fn idle_for(&self) -> Option<Duration> {
+        (!self.busy()).then(|| self.last_active.elapsed())
+    }
+
+    /// Restart the idle clock (the task was on screen).
+    pub fn touch(&mut self) {
+        self.last_active = Instant::now();
+    }
+
+    /// QUR_DEBUG_ACTIONS `state`: "id:status:process:chat=rows".
+    pub fn debug_state(&self) -> String {
+        let process = if self.is_released() {
+            "released"
+        } else if self.client.is_some() {
+            "running"
+        } else {
+            "none"
+        };
+        format!("{}:{:?}:{process}:chat={}", self.record.id, self.status.label(), self.chat.len())
+    }
+
+    /// Released for being idle: no process now, back on `start`.
+    pub fn is_released(&self) -> bool {
+        self.resume.is_some() && self.client.is_none()
+    }
+
+    /// Idle release, for a task out of sight: Live's copy of its file and
+    /// the Changes view's diff go (rebuilt by `wake`), and so does the
+    /// agent's process (the ACP adapter and the CLI under it, the bulk of an
+    /// agent's memory) when it's quiet and can load its session again. The
+    /// task, its chat and session id stay; `start` loads the session without
+    /// showing its history twice. Returns whether the process was stopped.
+    pub fn release(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.busy() {
+            return false;
+        }
+        // A reviewer borrows its task's views: they're the task's to release.
+        if self.review.is_none() {
+            self.live.update(cx, |l, cx| l.release(cx));
+            self.changes.update(cx, |c, _| c.release());
+        }
+        if !(self.quiet() && self.load_session && self.session_id.is_some()) {
+            return false;
+        }
+        let Some(client) = self.client.take() else { return false };
+        let pid = client.pid();
+        std::thread::spawn(move || client.shutdown(Duration::from_secs(2)));
+        let settings = self.settings.iter().map(|o| (o.id.clone(), o.current.clone())).collect();
+        self.resume = Some(Resume { status: self.status.clone(), settings });
+        self.session_id = None;
+        // Its exit isn't news: nothing reads the events any more.
+        self._events = None;
+        println!("RELEASE {} agent pid {pid} after {}s idle", self.record.id, self.last_active.elapsed().as_secs());
+        cx.notify();
+        true
+    }
+
+    /// The task is on screen again: rebuild what `release` let go, and start
+    /// the agent when it was released or stopped with a saved session (its
+    /// history loads; nothing is sent).
+    pub fn wake(&mut self, cx: &mut Context<Self>) {
+        self.touch();
+        if self.review.is_none() {
+            self.live.update(cx, |l, cx| l.wake(cx));
+            self.changes.update(cx, |c, cx| c.wake(cx));
+        }
+        if self.is_released() || (self.status == Status::Stopped && self.record.session_id.is_some()) {
+            self.start(cx);
+        }
     }
 
     // -- sign-in -------------------------------------------------------------------
@@ -284,6 +401,7 @@ impl AgentTask {
     }
 
     fn set_status(&mut self, s: Status, cx: &mut Context<Self>) {
+        self.last_active = Instant::now();
         if s == Status::Working && self.status != Status::NeedsYou {
             self.turn_wrote = false;
         }
@@ -747,6 +865,18 @@ impl AgentTask {
     }
 
     fn on_event(&mut self, ev: Event, cx: &mut Context<Self>) {
+        self.last_active = Instant::now();
+        // A released session loading again: its history is in the chat
+        // already. Only what may have changed since (commands, settings,
+        // usage) is taken.
+        if self.replaying {
+            match &ev {
+                Event::Loaded(_) => self.replaying = false,
+                Event::Update { update: SessionUpdate::AvailableCommands(_) | SessionUpdate::ConfigOptions(_) | SessionUpdate::CurrentMode(_) | SessionUpdate::Usage { .. }, .. } => {}
+                Event::Update { .. } => return,
+                _ => {}
+            }
+        }
         match ev {
             // Our session id is known before session/load replays history, so
             // replayed subagent work is kept out of the chat too.
@@ -915,7 +1045,7 @@ impl AgentTask {
                     self.set_status(Status::Error(msg), cx);
                 }
             }
-            Event::Warning(_) => {}
+            Event::Warning(_) | Event::Loaded(_) => {}
         }
         cx.notify();
     }
@@ -928,7 +1058,7 @@ impl AgentTask {
 /// A reviewer's session settings: its read-only mode (`plan`, or Codex's
 /// read-only), then the model picked for it. Returns the settings as the
 /// agent now has them. A refusal is logged; Qur's deny still applies.
-async fn review_setup(client: &Client, session: &SessionId, mut settings: Vec<ConfigOption>, role: &ReviewRole) -> Vec<ConfigOption> {
+async fn review_setup(client: &Client, session: &SessionId, settings: Vec<ConfigOption>, role: &ReviewRole) -> Vec<ConfigOption> {
     let mut wanted: Vec<(String, String)> = Vec::new();
     match review::read_only_mode(&settings) {
         Some(m) => wanted.push(m),
@@ -941,21 +1071,39 @@ async fn review_setup(client: &Client, session: &SessionId, mut settings: Vec<Co
     {
         wanted.push((o.id.clone(), m.clone()));
     }
+    apply_settings(client, session, settings, wanted, "REVIEW").await
+}
+
+/// A session loaded again after an idle release: the settings the user had
+/// (mode, model…) go back on where the loaded session differs and still
+/// offers them.
+async fn restore_settings(client: &Client, session: &SessionId, settings: Vec<ConfigOption>, had: &[(String, String)]) -> Vec<ConfigOption> {
+    let wanted = had
+        .iter()
+        .filter(|(id, value)| settings.iter().any(|o| o.id == *id && o.current != *value && o.values.iter().any(|v| v.value == *value)))
+        .cloned()
+        .collect();
+    apply_settings(client, session, settings, wanted, "RESUME").await
+}
+
+/// Set each (id, value) in turn; returns the settings as the agent now has
+/// them. A refusal is logged under `tag`.
+async fn apply_settings(client: &Client, session: &SessionId, mut settings: Vec<ConfigOption>, wanted: Vec<(String, String)>, tag: &str) -> Vec<ConfigOption> {
     for (id, value) in wanted {
         let Some(opt) = settings.iter().find(|o| o.id == id).cloned() else { continue };
         match client.set_option(session, &opt, &value).await {
             Ok(Ok(Some(list))) => {
                 let legacy = settings.iter().find(|o| o.legacy_mode).cloned().filter(|_| !list.iter().any(ConfigOption::is_mode));
                 settings = legacy.into_iter().chain(list).collect();
-                println!("REVIEW {session} set {id}={value}");
+                println!("{tag} {session} set {id}={value}");
             }
             Ok(Ok(None)) => {
                 if let Some(o) = settings.iter_mut().find(|o| o.id == id) {
                     o.current = value.clone();
                 }
-                println!("REVIEW {session} set {id}={value}");
+                println!("{tag} {session} set {id}={value}");
             }
-            Ok(Err(e)) => eprintln!("REVIEW {session} couldn't set {id}={value}: {e}"),
+            Ok(Err(e)) => eprintln!("{tag} {session} couldn't set {id}={value}: {e}"),
             Err(_) => {}
         }
     }

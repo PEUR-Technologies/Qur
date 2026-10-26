@@ -124,6 +124,8 @@ pub enum AgentEvent {
     PermissionsChanged,
     /// The task's reviewer started, changed state or went away (save, sidebar).
     Review,
+    /// A released agent is back where it was (no new status to alert for).
+    Resumed,
 }
 
 /// What makes an `AgentTask` a reviewer: a second-opinion session on
@@ -377,9 +379,25 @@ pub struct AgentTask {
     pub open_review: bool,
     /// The reviewer finished while you weren't looking at it.
     pub review_unread: bool,
+    /// When the task last did or showed anything (idle release counts from here).
+    last_active: Instant,
+    /// Set while the agent's process is released for being idle: how to
+    /// pick up again (see `release`).
+    resume: Option<Resume>,
+    /// A released session is loading again: the history it replays is
+    /// already in the chat, so it's skipped until `Event::Loaded`.
+    replaying: bool,
     _review_subs: Vec<Subscription>,
     _events: Option<Task<()>>,
     _subs: Vec<Subscription>,
+}
+
+/// What a released agent goes back to once its session is loaded again.
+struct Resume {
+    status: Status,
+    /// Session settings the user had (mode, model…) as (id, value): a
+    /// loaded session may start from the agent's defaults.
+    settings: Vec<(String, String)>,
 }
 
 impl EventEmitter<AgentEvent> for AgentTask {}
@@ -558,6 +576,9 @@ impl AgentTask {
             reviewer: None,
             open_review: false,
             review_unread: false,
+            last_active: Instant::now(),
+            resume: None,
+            replaying: false,
             _review_subs: Vec::new(),
             _events: None,
             _subs: {
