@@ -199,7 +199,7 @@ impl Workspace {
         // Recently opened files under this root first.
         let recent: Vec<PathBuf> = self
             .buffers
-            .paths(cx)
+            .paths()
             .into_iter()
             .filter_map(|p| p.strip_prefix(&root).ok().map(Path::to_path_buf))
             .collect();

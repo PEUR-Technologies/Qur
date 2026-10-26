@@ -541,7 +541,7 @@ impl State {
 // projects/<project-id>.state.toml (machine-managed)
 // ---------------------------------------------------------------------------
 
-/// Files restored with the project: more than this only slows opening.
+/// Files remembered with the project (Recent File, Go to File's first rows).
 pub const MAX_OPEN_FILES: usize = 20;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -561,6 +561,8 @@ pub struct OpenFile {
     /// Cursor, 0-based.
     pub line: usize,
     pub col: usize,
+    /// The line at the top of the view, 0-based.
+    pub top: usize,
 }
 
 pub fn project_state_path(id: &str) -> PathBuf {
@@ -590,6 +592,9 @@ impl ProjectState {
             t["path"] = toml_edit::value(f.path.to_string_lossy().as_ref());
             t["line"] = toml_edit::value(f.line as i64);
             t["col"] = toml_edit::value(f.col as i64);
+            if f.top > 0 {
+                t["top"] = toml_edit::value(f.top as i64);
+            }
             files.push(t);
         }
         doc["file"] = toml_edit::Item::ArrayOfTables(files);
@@ -864,8 +869,8 @@ mod tests {
     fn project_state_round_trip() {
         let s = ProjectState {
             files: vec![
-                OpenFile { path: "/p/src/main.rs".into(), line: 41, col: 3 },
-                OpenFile { path: "/p/README.md".into(), line: 0, col: 0 },
+                OpenFile { path: "/p/src/main.rs".into(), line: 41, col: 3, top: 20 },
+                OpenFile { path: "/p/README.md".into(), line: 0, col: 0, top: 0 },
             ],
             code_open: true,
         };

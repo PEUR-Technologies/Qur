@@ -72,8 +72,9 @@ impl Workspace {
                         return;
                     }
                 } else {
-                    this.buffers.list.retain(|b| !b.read(cx).is_dirty());
+                    // Edits dropped: the files stay in the list, as on disk.
                     this.code = None;
+                    this.buffers.free(|b| Some(b.read(cx).spot()));
                 }
                 this.shutdown(cx);
                 window.remove_window();

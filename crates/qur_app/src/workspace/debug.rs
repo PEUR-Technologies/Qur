@@ -41,6 +41,7 @@ impl Workspace {
             }
             None => "none".into(),
         };
+        let buffers = format!("{}/{}", self.buffers.loaded().count(), self.buffers.len());
         let vc = self.git.as_ref().map(|g| g.read(cx).debug_state(cx)).unwrap_or_else(|| "none".into());
         let docks = format!("acp={} terminal={}", Docks::get(cx, dock::Kind::Acp).serialize(), Docks::get(cx, dock::Kind::Terminal).serialize());
         let u = &self.config.ui;
@@ -48,7 +49,7 @@ impl Workspace {
         let sidebar = format!("on={} mode={} side={} shown={} visible={} sections={}", self.sidebar, u.sidebar, u.sidebar_side, self.sidebar_shown, self.sidebar_visible(), u.sidebar_sections.join(","));
         let viewer = self.viewer.as_ref().map_or_else(|| "none".into(), |v| v.debug_state());
         format!(
-            "overlay={overlay} selected={selected} code={code} viewer={viewer} term={{{}}} git={{{vc}}} docks={{{docks}}} gaps={{{gaps}}} sidebar={{{sidebar}}}",
+            "overlay={overlay} selected={selected} code={code} buffers={buffers} viewer={viewer} term={{{}}} git={{{vc}}} docks={{{docks}}} gaps={{{gaps}}} sidebar={{{sidebar}}}",
             self.terms.read(cx).debug_state(cx)
         )
     }
