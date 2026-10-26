@@ -473,6 +473,8 @@ impl AgentTask {
         cx: &mut Context<Self>,
     ) -> Self {
         let Parts { monitor, live, browser, changes } = parts;
+        let id = cx.entity_id().as_u64();
+        subs.push(cx.on_release(move |_, _| crate::crash::forget_agent(id)));
         let wt = record.worktree.clone();
         let placeholder = match &review {
             Some(_) => format!("Ask {} a follow-up (read-only)…", def.label),

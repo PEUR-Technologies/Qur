@@ -302,6 +302,12 @@ impl AgentTask {
             self.monitor.update(cx, |m, _| m.set_turn_active(active));
         }
         if self.status != s {
+            // For a crash report (only ever read by the panic hook).
+            let state = match &s {
+                Status::Error(_) => "Error".to_string(),
+                s => format!("{s:?}"),
+            };
+            crate::crash::note_agent(cx.entity_id().as_u64(), &self.def.label, &state);
             self.status = s;
             cx.emit(AgentEvent::Changed);
         }
