@@ -54,6 +54,9 @@ A file in an agent's worktree (the modal says "in <task>") shows the agent's cha
 | Edit > Changes / palette / peek | Revert Change: put the base's lines back in the buffer as one undoable edit (`Cmd+Z` brings the agent's back; save to keep it; the index is never touched) | ✅ |
 | Edit > Changes / palette / peek | Accept Change: mark it reviewed; its marker goes until its text changes again (for this session), and the cursor moves to the next change | ✅ |
 | Edit > Changes | Last Turn Only (checkmark): a task's markers show what its last turn changed, not everything since it started | ✅ |
+| `Shift+Opt+Cmd+C` | Copy Relative Path of the file in the code modal (relative to its checkout: the project or the task's worktree; VS Code's key) | ✅ |
+| File menu / palette | Reveal in Finder, Copy Path (the file in the code modal). No default keys: VS Code's `Opt+Cmd+R` and `Opt+Cmd+C` are Qur's find toggles | ✅ |
+| Right-click a Files row | Open, Open in Default App (files), Reveal in Finder, Copy Path, Copy Relative Path (relative to the tree's root); a deleted file's row is greyed out. Drag a row out of the window to drop the file in Finder or another app | ✅ |
 
 ## Editing
 

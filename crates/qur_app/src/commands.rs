@@ -32,6 +32,7 @@ pub mod qur {
             PushPullRequest, OpenPullRequest,
             NextChange, PrevChange, ShowChange, RevertChange, AcceptChange, ChangesLastTurn,
             OpenFile, OpenAsText, ReopenWithEncoding, ConvertToEncoding, ConvertLineEndings, ShowWhitespace,
+            RevealInFinder, CopyPath, CopyRelativePath,
         ]
     );
 
@@ -221,6 +222,12 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::ReopenWithEncoding, "File", "Reopen with Encoding…", "", W, R),
     cmd!(qur::ConvertToEncoding, "File", "Convert to Encoding…", "", W, R),
     cmd!(qur::ConvertLineEndings, "File", "Convert Line Endings (LF ⇄ CRLF)", "", W, R),
+    // The file in the code modal (the Files tree's right-click menu has them too).
+    // VS Code's Opt+Cmd+R and Opt+Cmd+C are Qur's find toggles, so only Copy
+    // Relative Path takes VS Code's key.
+    cmd!(qur::RevealInFinder, "File", "Reveal in Finder", "", W, R),
+    cmd!(qur::CopyPath, "File", "Copy Path", "", W, R),
+    cmd!(qur::CopyRelativePath, "File", "Copy Relative Path", "cmd-alt-shift-c", W, R),
     cmd!(qur::RevealInFiles, "View", "Files Dropdown", "cmd-shift-e", W, R),
     cmd!(qur::GoToLine, "Go", "Go to Line…", "ctrl-g", NT, R),
     cmd!(qur::NavBack, "Go", "Back", "ctrl--", NT, R),
@@ -716,6 +723,10 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
                 item(qur::ConvertLineEndings),
             ])),
             sep(),
+            item(qur::RevealInFinder),
+            item(qur::CopyPath),
+            item(qur::CopyRelativePath),
+            sep(),
             item(qur::CloseTerminal),
             item(qur::CloseWindow),
         ]),
@@ -973,5 +984,17 @@ mod tests {
         for a in ["qur::OpenAsText", "qur::ReopenWithEncoding", "qur::ConvertToEncoding", "qur::ConvertLineEndings", "qur::ShowWhitespace"] {
             assert!(COMMANDS[resolve(a).unwrap()].ready());
         }
+    }
+
+    /// VS Code's keys for the file path commands, where Qur has them free:
+    /// Opt+Cmd+R and Opt+Cmd+C stay the find toggles.
+    #[test]
+    fn file_path_keys() {
+        let bound = |k: &str| -> Vec<&str> { COMMANDS.iter().filter(|c| c.keys().split('|').any(|x| x == k)).map(|c| c.action_name()).collect() };
+        assert_eq!(bound("cmd-alt-shift-c"), ["qur::CopyRelativePath"]);
+        assert_eq!(bound("cmd-alt-r"), ["editor::ToggleRegex"]);
+        assert_eq!(bound("cmd-alt-c"), ["editor::ToggleCase"]);
+        assert_eq!(COMMANDS[resolve("qur::RevealInFinder").unwrap()].keys(), "");
+        assert_eq!(COMMANDS[resolve("qur::CopyPath").unwrap()].keys(), "");
     }
 }

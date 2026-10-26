@@ -39,6 +39,8 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
   - ---
   - Convert Line Endings (LF ⇄ CRLF; undoable)
 - ---
+- Reveal in Finder · Copy Path · Copy Relative Path `Shift+Opt+Cmd+C` (the file in the code modal; also in the Files tree's right-click menu)
+- ---
 - Close Terminal or Agent `Cmd+W` (in a terminal or an agent; an agent asks first)
 - Close Window `Cmd+Shift+W`
 
@@ -146,6 +148,11 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Show Logs in Finder
 - Report a Problem… (opens the GitHub issues page in the browser; no in-app network call)
 - About Qur
+
+## Right-click menus
+
+- **An agent's button** in the sidebar: its Agent menu commands (Rename…, Review Changes, Merge, Run Checks Now, Run Project, Reveal in Finder, Open Folder in Terminal, turn, review and permission commands, Stop, Close/Delete Agent…).
+- **A Files tree row** (the project or a task's worktree): Open · Open in Default App (files only) · Reveal in Finder · Copy Path · Copy Relative Path (relative to the tree's root). A deleted file's row shows them all greyed out. Esc or a click outside closes it.
 
 ## What this removes from the window
 
