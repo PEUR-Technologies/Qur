@@ -3,8 +3,10 @@
 //! header, To-do strip, Chat, permission bar and prompt bar.
 
 mod chat;
+mod exchanges;
 mod find;
 mod plan;
+pub mod history;
 mod second_opinion;
 mod session;
 mod stage;
@@ -166,6 +168,9 @@ enum ChatItem {
     Failure(Failure),
     /// End of turn N: "3 files · +12 −4 · View · Rewind".
     Turn(u32),
+    /// "Show N earlier messages": the chat's first row while older rows
+    /// are on disk (history.rs).
+    Earlier,
 }
 
 /// One attachment shown under a sent message.
@@ -327,8 +332,11 @@ pub struct AgentTask {
     sign_in: Option<SignIn>,
     /// The last message sent (Retry / Edit & resend).
     last_sent: Option<Outgoing>,
+    /// The chat's rows in memory (its older part is on disk: `history`).
     chat: Vec<ChatItem>,
     tools: HashMap<ToolCallId, ToolCall>,
+    /// The saved chat, and how much of it is only on disk.
+    history: history::History,
     list: ListState,
     /// Text sizes and zoom the chat rows were measured at; the list caches
     /// row heights, so a change re-measures them.
@@ -512,6 +520,8 @@ impl AgentTask {
         cx: &mut Context<Self>,
     ) -> Self {
         let Parts { monitor, live, browser, changes } = parts;
+        let id = cx.entity_id().as_u64();
+        subs.push(cx.on_release(move |_, _| crate::crash::forget_agent(id)));
         let wt = record.worktree.clone();
         let placeholder = match &review {
             Some(_) => format!("Ask {} a follow-up (read-only)…", def.label),
@@ -563,6 +573,7 @@ impl AgentTask {
             last_sent: None,
             chat: Vec::new(),
             tools: HashMap::new(),
+            history: history::History::default(),
             list,
             measured_at: (0., 0., 0.),
             plan: Vec::new(),
@@ -803,7 +814,7 @@ fn chat_markdown(title: &str, agent: &str, chat: &[ChatItem], tools: &HashMap<To
                 spoke = false;
             }
             ChatItem::Agent(t) if !t.trim().is_empty() => add(&mut out, t.trim(), false, &mut prev_tool),
-            ChatItem::Agent(_) | ChatItem::Thought(_) => {}
+            ChatItem::Agent(_) | ChatItem::Thought(_) | ChatItem::Earlier => {}
             ChatItem::Tool(id) => {
                 let Some(t) = tools.get(id) else { continue };
                 let glyph = match t.status {

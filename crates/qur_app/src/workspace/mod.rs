@@ -7,6 +7,7 @@
 mod actions;
 mod checks;
 mod code;
+mod crash_notice;
 mod debug;
 mod diff_review;
 mod merge;
@@ -40,6 +41,7 @@ use qur_theme::{Appearance, Registry, Rgba, ThemeChoice};
 
 use crate::agent_view::{AgentEvent, AgentTask, Layout, Status, View};
 use crate::alerts;
+use crate::commit_msg;
 use crate::changes_view::{ChangesEvent, ChangesView};
 use crate::dock::{self, Docks};
 use crate::git_panel::{GitEvent, GitPanel};
@@ -119,8 +121,10 @@ struct FirstRun {
 struct MergeState {
     task: String,
     title: String,
-    branch: String,
     files: Vec<PathBuf>,
+    /// The merge commit's message (from the agent's turns); the Git
+    /// panel's commit box offers it, editable.
+    message: String,
 }
 
 /// What the stage shows.
@@ -258,6 +262,8 @@ pub struct Workspace {
     message_timer: Option<Task<()>>,
     /// The top-bar message opens this when clicked (a pull request).
     message_url: Option<String>,
+    /// A crash report from an earlier run the user hasn't seen (top bar).
+    crash_notice: Option<PathBuf>,
     file_lists: HashMap<PathBuf, Vec<PathBuf>>,
     layout: Layout,
     _root_watcher: Option<qur_watch::Watcher>,
@@ -292,6 +298,7 @@ impl Workspace {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         crate::mark("ws_new");
         let (config, err) = Config::load();
+        crate::terminal::set_scrollback(config.terminal.scrollback);
         if !cx.has_global::<Docks>() {
             Docks::load(&config, cx);
         }
@@ -394,6 +401,7 @@ impl Workspace {
             message: None,
             message_timer: None,
             message_url: None,
+            crash_notice: crate::crash::take_unseen(),
             file_lists: HashMap::new(),
             layout: Layout::A,
             _root_watcher: None,
@@ -649,6 +657,7 @@ impl Render for Workspace {
                     self.start_task(0, p.to_string(), Vec::new(), plan, window, cx);
                 }
             }
+            crate::crash::debug_crash(cx);
             if std::env::var("QUR_BENCH").as_deref() == Ok("glow") {
                 self.bench_glow(window, cx);
             }
@@ -926,6 +935,7 @@ impl Render for Workspace {
                 }
             }))
             .child(frame)
+            .children(self.crash_notice_el(&look, cx))
             .children(crate::script::mark(|| "window".to_string()))
             // A text file opened from a chip in the New Agent Task dialog shows
             // over the dialog; any other code modal sits under the pickers.

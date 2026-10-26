@@ -329,6 +329,15 @@ pub fn tasks_path(project_id: &str) -> PathBuf {
     qur_config::qur_home().join("projects").join(format!("{project_id}.tasks.toml"))
 }
 
+/// Saved ACP chats: one folder per task (format: qur_app's `agent_view/history.rs`).
+pub fn chats_dir(project_id: &str) -> PathBuf {
+    qur_config::qur_home().join("projects").join(format!("{project_id}.chats"))
+}
+
+pub fn chat_dir(project_id: &str, task_id: &str) -> PathBuf {
+    chats_dir(project_id).join(task_id)
+}
+
 pub fn worktrees_dir(project_id: &str) -> PathBuf {
     qur_config::qur_home().join("worktrees").join(project_id)
 }

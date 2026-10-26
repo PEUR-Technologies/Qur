@@ -41,11 +41,80 @@ impl Workspace {
         self.term_task(id).map(|t| (t.record.worktree.clone(), t.record.branch.clone(), t.record.title.clone(), t.changes.clone()))
     }
 
+    /// A task's record, read by `f`.
+    fn task_record<R>(&self, id: &str, cx: &App, f: impl FnOnce(&TaskRecord) -> R) -> Option<R> {
+        match self.agent(id) {
+            Some(a) => Some(f(&a.read(cx).record)),
+            None => self.term_task(id).map(|t| f(&t.record)),
+        }
+    }
+
+    /// What a task did, for a commit message: its title and the turns that
+    /// changed files with what you asked and what the agent answered. The
+    /// caller adds the changed files (they take git to list).
+    fn commit_source(&self, id: &str, cx: &App) -> Option<commit_msg::Source> {
+        let talk = self.agent(id).map(|a| a.read(cx).turn_exchanges()).unwrap_or_default();
+        self.task_record(id, cx, |r| commit_msg::Source {
+            title: r.title.clone(),
+            turns: r
+                .turns
+                .iter()
+                .filter(|t| !t.rewound && t.end.is_some() && t.files > 0)
+                .map(|t| {
+                    let (prompt, reply) = talk.iter().find(|(n, ..)| *n == t.n).map(|(_, p, r)| (p.clone(), r.clone())).unwrap_or_default();
+                    commit_msg::TurnNote { n: t.n, files: t.files, added: t.added, removed: t.removed, prompt, reply }
+                })
+                .collect(),
+            files: Vec::new(),
+        })
+    }
+
+    /// Opening the Git panel: offer a commit message in its empty commit
+    /// box. During a merge, the merge's; else, when an agent works in the
+    /// project folder and the checkout has changes, one from its work.
+    pub(super) fn suggest_commit(&mut self, cx: &mut Context<Self>) {
+        let Some(g) = self.git.clone() else { return };
+        if let Some(m) = &self.merge {
+            let text = m.message.clone();
+            return g.update(cx, |g, cx| g.suggest(&text, cx));
+        }
+        if !g.read(cx).message(cx).is_empty() {
+            return;
+        }
+        let id = self
+            .term_tasks
+            .iter()
+            .find(|t| t.record.in_root)
+            .map(|t| t.record.id.clone())
+            .or_else(|| self.agents.iter().find(|a| a.read(cx).record.in_root).map(|a| a.read(cx).record.id.clone()));
+        let Some(id) = id else { return };
+        let (Some(mut src), Some(base)) = (self.commit_source(&id, cx), self.task_record(&id, cx, |r| r.base.clone())) else { return };
+        let root = self.root.clone();
+        let bg = cx.background_executor().clone();
+        cx.spawn(async move |_, cx| {
+            let text = bg
+                .spawn(async move {
+                    let st = qur_git::status(&root).ok()?;
+                    if st.staged.is_empty() && st.unstaged.is_empty() && st.untracked.is_empty() {
+                        return None;
+                    }
+                    src.files = qur_git::task_diff(&root, &base).ok()?.into_iter().map(|f| (f.path, f.added, f.removed)).collect();
+                    (!src.files.is_empty()).then(|| commit_msg::generate(&src).full())
+                })
+                .await;
+            if let Some(text) = text {
+                g.update(cx, |g, cx| g.suggest(&text, cx));
+            }
+        })
+        .detach();
+    }
+
     /// Merge (handoff section 10, M0 recipe): commit the task's work on its
     /// branch, then merge it into the main checkout's current branch without
     /// touching the user's index or stash. Conflicts open in the editor.
     pub(super) fn merge_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some((wt, branch, title, changes)) = self.task_parts(id, cx) else { return };
+        let (Some(mut src), Some(base)) = (self.commit_source(id, cx), self.task_record(id, cx, |r| r.base.clone())) else { return };
         if self.in_root(id, cx) {
             return self.flash("This agent works in your project folder: its changes are already there (commit them in Source Control)", cx);
         }
@@ -62,13 +131,22 @@ impl Workspace {
         let id = id.to_string();
         self.flash(format!("Merging “{title}”…"), cx);
         cx.spawn_in(window, async move |this, cx| {
-            let (t2, b2, root2) = (title.clone(), branch.clone(), root.clone());
+            let (b2, root2) = (branch.clone(), root.clone());
             let outcome = bg
                 .spawn(async move {
-                    qur_git::commit_all(&wt, &format!("qur: {t2}"))?;
-                    Ok::<_, String>(qur_git::merge_clean(&root2, &b2, &format!("Merge {b2}: {t2}")))
+                    // The message is made from the agent's turns and every
+                    // file the task changed (committed or not yet).
+                    src.files = qur_git::task_diff(&wt, &base).unwrap_or_default().into_iter().map(|f| (f.path, f.added, f.removed)).collect();
+                    let msg = commit_msg::generate(&src);
+                    qur_git::commit_all(&wt, &msg.full())?;
+                    let merge_msg = msg.merge(&b2);
+                    Ok::<_, String>((qur_git::merge_clean(&root2, &b2, &merge_msg), merge_msg))
                 })
                 .await;
+            let (outcome, merge_msg) = match outcome {
+                Ok((o, m)) => (Ok(o), m),
+                Err(e) => (Err(e), String::new()),
+            };
             this.update_in(cx, |this, window, cx| match outcome {
                 Err(e) => this.flash(format!("Couldn't commit the task's work: {e}"), cx),
                 Ok(qur_git::MergeOutcome::UpToDate) => this.flash("Nothing to merge: your branch already has these changes", cx),
@@ -98,7 +176,7 @@ impl Workspace {
                         files.iter().take(5).map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
                     );
                     let answer = ask(window, PromptLevel::Warning, "Merge conflicts", Some(&detail), &["Resolve in Qur", "Cancel"], cx);
-                    let (root, branch, title, id) = (root.clone(), branch.clone(), title.clone(), id.clone());
+                    let (root, branch, title, id, merge_msg) = (root.clone(), branch.clone(), title.clone(), id.clone(), merge_msg.clone());
                     cx.spawn_in(window, async move |this, cx| {
                         if answer.await.ok() != Some(0) {
                             return;
@@ -110,8 +188,10 @@ impl Workspace {
                         this.update_in(cx, |this, window, cx| match started {
                             Err(e) => this.flash(e, cx),
                             Ok(files) => {
-                                this.merge = Some(MergeState { task: id, title, branch, files: files.clone() });
+                                this.merge = Some(MergeState { task: id, title, files: files.clone(), message: merge_msg });
                                 this.sync_menus(cx);
+                                this.git_panel(window, cx);
+                                this.suggest_commit(cx);
                                 if let Some(f) = files.first() {
                                     let abs = this.root.join(f);
                                     this.open_path(&abs, window, cx);
@@ -167,13 +247,19 @@ impl Workspace {
                 b.update(cx, |b, cx| b.save(cx));
             }
         }
-        let (root, files, msg, id) = (self.root.clone(), m.files.clone(), format!("Merge {}: {}", m.branch, m.title), m.task.clone());
+        // The Git panel's commit box offers the merge's message, editable.
+        let typed = self.git.as_ref().map(|g| g.read(cx).message(cx)).unwrap_or_default();
+        let msg = if typed.is_empty() { m.message.clone() } else { typed };
+        let (root, files, id) = (self.root.clone(), m.files.clone(), m.task.clone());
         let bg = cx.background_executor().clone();
         cx.spawn_in(window, async move |this, cx| {
             let r = bg.spawn(async move { qur_git::finish_merge(&root, &files, &msg) }).await;
             this.update_in(cx, |this, window, cx| match r {
                 Ok(sha) => {
                     let title = this.merge.take().map(|m| m.title).unwrap_or_default();
+                    if let Some(g) = &this.git {
+                        g.update(cx, |g, cx| g.clear_message(cx));
+                    }
                     this.sync_menus(cx);
                     for b in &this.buffers.list {
                         b.update(cx, |b, _| b.merge_conflicts = false);
