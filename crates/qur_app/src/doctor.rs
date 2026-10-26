@@ -256,8 +256,26 @@ pub fn cli() -> i32 {
     println!("{}", render(&checks));
     let fails = checks.iter().filter(|c| c.level == Level::Fail).count();
     let warns = checks.iter().filter(|c| c.level == Level::Warn).count();
+    memory();
     println!("\n{}", if fails > 0 { format!("{fails} problem(s), {warns} warning(s)") } else if warns > 0 { format!("OK, {warns} warning(s)") } else { "All good".to_string() });
     if fails > 0 { 1 } else { 0 }
+}
+
+/// Memory of every running Qur: its own footprint and its agents' and
+/// terminals' (sampled once, now). Information only: never a problem.
+fn memory() {
+    let qurs = crate::mem::other_qurs();
+    if qurs.is_empty() {
+        println!("\nMemory: Qur isn't running");
+        return;
+    }
+    for pid in qurs {
+        let r = crate::mem::report(pid, &Default::default());
+        println!("\nMemory of Qur (pid {pid}): {}", r.summary());
+        for line in r.lines() {
+            println!("  {line}");
+        }
+    }
 }
 
 #[cfg(test)]

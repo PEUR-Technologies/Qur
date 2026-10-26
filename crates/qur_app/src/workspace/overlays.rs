@@ -289,12 +289,15 @@ impl Workspace {
         self.close_overlays(window, cx);
         self.prev_focus = window.focused(cx);
         window.focus(&self.focus, cx);
-        self.overlay = Some(Overlay::About);
+        // Sampled once, now (a few ms): no polling while it's open.
+        let mem = crate::mem::report(std::process::id() as i32, &memory_labels(cx));
+        self.overlay = Some(Overlay::About(Box::new(mem)));
         cx.notify();
     }
 
-    fn about_box(&self, look: &Look, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn about_box(&self, mem: &crate::mem::Report, look: &Look, cx: &mut Context<Self>) -> gpui::AnyElement {
         let ui = &look.theme.ui;
+        let small = |s: String| div().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(s);
         let credit = look.theme.credit.as_ref().map(|c| format!("Theme “{}” by {} ({})", look.theme.name, c.author, c.license));
         let line = |s: String| div().text_size(look.text(-1.)).text_color(look.c(ui.text_secondary)).child(s);
         div()
@@ -323,6 +326,10 @@ impl Workspace {
             .child(line(format!("Version {}", env!("CARGO_PKG_VERSION"))))
             .child(line("GPL-3.0-or-later · Inter (SIL OFL)".into()))
             .children(credit.map(line))
+            .child(div().h(look.z(6.)))
+            .child(line(format!("Memory: {}", crate::mem::mb(mem.total()))))
+            .child(small(mem.summary()))
+            .children(mem.lines().into_iter().map(small))
             .child(
                 div()
                     .id("about-ok")
@@ -468,7 +475,7 @@ impl Workspace {
             }
             Overlay::Picker(p, _) => Some(centered(p.clone().into_any_element())),
             Overlay::Setup(s) => Some(centered(s.clone().into_any_element())),
-            Overlay::About => Some(centered(self.about_box(look, cx))),
+            Overlay::About(mem) => Some(centered(self.about_box(mem, look, cx))),
             Overlay::Accent => Some(centered(self.accent_box(look, cx))),
             Overlay::AgentMenu { id, at } => Some(self.agent_menu(id, *at, look, cx)),
             Overlay::Layouts => Some(centered(self.layouts_box(look, cx))),
@@ -842,4 +849,24 @@ fn hue_name(c: Rgba) -> &'static str {
         255..=289 => "purple",
         _ => "pink",
     }
+}
+
+/// Names for the processes Qur started, by pid, across its windows: each
+/// agent's ACP adapter and each terminal's shell.
+fn memory_labels(cx: &App) -> std::collections::HashMap<i32, String> {
+    let mut out = std::collections::HashMap::new();
+    for w in cx.windows() {
+        let Some(ws) = w.downcast::<Workspace>().and_then(|w| w.read(cx).ok()) else { continue };
+        for a in &ws.agents {
+            let a = a.read(cx);
+            if let Some(pid) = a.agent_pid() {
+                out.insert(pid, if a.record.title.is_empty() { a.def.label.clone() } else { a.record.title.clone() });
+            }
+        }
+        for s in &ws.terms.read(cx).sessions {
+            let task = ws.term_tasks.iter().find(|t| t.term_id == Some(s.id)).map(|t| t.record.title.clone());
+            out.insert(s.pid(), task.filter(|t| !t.is_empty()).unwrap_or_else(|| s.display_label()));
+        }
+    }
+    out
 }

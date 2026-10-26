@@ -18,6 +18,7 @@ mod input;
 mod live;
 mod look;
 mod markdown;
+mod mem;
 mod monitor;
 mod picker;
 mod prompt;

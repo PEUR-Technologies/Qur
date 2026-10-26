@@ -158,8 +158,8 @@ enum Overlay {
     AgentMenu { id: String, at: gpui::Point<Pixels> },
     /// View > Choose Stage Layout….
     Layouts,
-    /// About Qur (M7).
-    About,
+    /// About Qur (M7), with memory as it was when it opened.
+    About(Box<crate::mem::Report>),
     Transparency { project_scope: bool },
     /// Qur > Appearance > Gaps…: window gaps, live while you drag.
     Gaps,
@@ -840,7 +840,7 @@ impl Render for Workspace {
                     this.close_viewer(window, cx);
                     return cx.stop_propagation();
                 }
-                if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::AgentMenu { .. } | Overlay::About)) {
+                if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::AgentMenu { .. } | Overlay::About(_))) {
                     this.close_overlays(window, cx);
                     cx.stop_propagation();
                 }

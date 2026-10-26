@@ -15,7 +15,7 @@ impl Workspace {
             Some(Overlay::Accent) => "accent".into(),
             Some(Overlay::AgentMenu { id, .. }) => format!("agent_menu:{id}"),
             Some(Overlay::Layouts) => "layouts".into(),
-            Some(Overlay::About) => "about".into(),
+            Some(Overlay::About(_)) => "about".into(),
             Some(Overlay::Transparency { .. }) => "transparency".into(),
             Some(Overlay::Gaps) => "gaps".into(),
             Some(Overlay::NewTask { .. }) => "new_task".into(),

@@ -12,6 +12,8 @@
 //! - `scroll:<at>,<dy>` turns the wheel over a point by `dy` points (negative scrolls down).
 //! - `state` prints a `STATE …` line: overlay, code modal, terminal find, git panel, docks.
 //! - `marks` prints a `BOUNDS name x,y wxh` line for every marked element on screen.
+//! - `mem` prints a `MEM footprint_mb=… children_mb=…` line: Qur's physical footprint (as
+//!   `footprint <pid>` reports it) and its agents' and terminals' (`mem.rs`).
 //!
 //! `<at>` is a point in the window, in points from the top-left of its
 //! content: `x,y`, or a marked element (`mark`) by name: `@tab:Terminal:Live`
@@ -79,6 +81,7 @@ pub enum Step {
     Scroll { at: At, dy: f32 },
     State,
     Marks,
+    Mem,
 }
 
 /// Split on commas (not `\,`), then let `click:`/`drag:` take their points.
@@ -125,6 +128,7 @@ pub fn parse(list: &str) -> Result<Vec<Step>, String> {
             }
             "state" => Step::State,
             "marks" => Step::Marks,
+            "mem" => Step::Mem,
             _ => Step::Action(p.clone()),
         });
     }
@@ -321,6 +325,13 @@ pub fn run(handle: AnyWindowHandle, list: &str, cx: &mut App) {
                         }
                     });
                 }
+                Step::Mem => {
+                    // After a frame, like `state`: what's on screen now is counted.
+                    let _ = handle.update(cx, |_, window, cx| fresh(window, cx));
+                    let r = crate::mem::report(std::process::id() as i32, &Default::default());
+                    let kids = r.total() - r.own;
+                    println!("MEM t={t}ms footprint_mb={:.1} children_mb={:.1} children={}", r.own as f64 / 1_048_576.0, kids as f64 / 1_048_576.0, r.children.len());
+                }
                 Step::Wait(_) => {}
             }
         }
@@ -334,7 +345,7 @@ mod tests {
 
     #[test]
     fn parses_steps() {
-        let s = parse("qur::Find, wait:50, type:a\\, b\\n, key:cmd-shift-p escape, click:10,20, drag:1,2,@tab:X~0.9~0.1, rclick:@agent:tt-1, scroll:@list,-120, state, marks").unwrap();
+        let s = parse("qur::Find, wait:50, type:a\\, b\\n, key:cmd-shift-p escape, click:10,20, drag:1,2,@tab:X~0.9~0.1, rclick:@agent:tt-1, scroll:@list,-120, state, marks, mem").unwrap();
         assert_eq!(
             s,
             vec![
@@ -348,6 +359,7 @@ mod tests {
                 Step::Scroll { at: At::Mark("list".into(), 0.5, 0.5), dy: -120. },
                 Step::State,
                 Step::Marks,
+                Step::Mem,
             ]
         );
         assert!(parse("click:1").is_err());
