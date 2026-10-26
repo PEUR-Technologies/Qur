@@ -798,7 +798,7 @@ mod tests {
     }
 
     /// A chat's rows (and tool calls) as saved, for comparing.
-    fn saved(rows: &[(ChatItem, Option<ToolCall>)], dir: &Path) -> Vec<serde_json::Value> {
+    fn saved(rows: &[(ChatItem, Option<ToolCall>)]) -> Vec<serde_json::Value> {
         let tools: HashMap<ToolCallId, ToolCall> = rows.iter().filter_map(|(_, t)| t.clone()).map(|t| (t.id.clone(), t)).collect();
         rows.iter().map(|(c, _)| row_json(c, &tools)).collect()
     }
@@ -827,9 +827,9 @@ mod tests {
             ),
             (ChatItem::Turn(7), None),
         ]);
-        let before = saved(&rows, &dir);
-        let back: Vec<(ChatItem, Option<ToolCall>)> = before.iter().map(|v| row_from_line(&v.to_string(), &dir)).collect();
-        assert_eq!(saved(&back, &dir), before, "every row reads back as it was saved");
+        let before = saved(&rows);
+        let back: Vec<(ChatItem, Option<ToolCall>)> = before.iter().map(|v| row_from_line(&v.to_string())).collect();
+        assert_eq!(saved(&back), before, "every row reads back as it was saved");
         // The tool calls come back whole (the read's raw output, shown
         // nowhere, isn't kept; a call with nothing else keeps its raw input).
         let read = back.iter().find_map(|(_, t)| t.as_ref().filter(|t| t.kind == ToolKind::Read)).unwrap();
