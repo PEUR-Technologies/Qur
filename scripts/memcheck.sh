@@ -33,7 +33,7 @@ SETTLE=12000   # ms of quiet before a sample
 # name | threshold MB | expect (pass or xfail) | what
 CHECKS="
 code|12|pass|open and close the code modal on 10 files (closed buffers stay cached today)
-viewer|10|xfail|open and close the file viewer on 3 images and a binary file (images leak today: +70 MB per 1600x3065 PNG)
+viewer|30|pass|open and close the file viewer on 3 images and a binary file (images are decoded at drawn size and freed on close)
 viewer_file|6|pass|open and close the file viewer on a binary file, 5 times
 terminals|8|pass|3 terminals with filled scrollback, then closed
 "
