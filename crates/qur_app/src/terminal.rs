@@ -530,6 +530,16 @@ pub struct TerminalPanel {
     /// Terminal's dock pane: with window gaps on, its panes are the tiles.
     /// Set by the workspace as it lays the stage out.
     pub standalone: std::cell::Cell<bool>,
+    /// Zen's bar is out (sliding or down), pushing the panes down: each
+    /// grid keeps the size it had with the bar away, pinned to its pane's
+    /// bottom with its top rows clipped. Resizing as the bar moved sent the
+    /// program a new size every few frames, and Claude Code redrew its input
+    /// box each time: the bottom of the terminal jiggled. Set by the workspace.
+    pub zen_hold: std::cell::Cell<bool>,
+    /// Each pane's grid size with zen's bar away: width, height.
+    rest_size: HashMap<usize, (Pixels, Pixels)>,
+    /// How far above its pane a held grid starts (mouse to cell).
+    grid_shift: HashMap<usize, Pixels>,
 }
 
 impl EventEmitter<PanelEvent> for TerminalPanel {}
@@ -545,6 +555,9 @@ impl TerminalPanel {
             message: None,
             cell: (px(8.), px(16.)),
             pane_bounds: HashMap::new(),
+            zen_hold: std::cell::Cell::new(false),
+            rest_size: HashMap::new(),
+            grid_shift: HashMap::new(),
             selecting: false,
             scroll_px: px(0.),
             find: None,
@@ -718,6 +731,8 @@ impl TerminalPanel {
             None => {}
         }
         self.pane_bounds.remove(&s.id);
+        self.rest_size.remove(&s.id);
+        self.grid_shift.remove(&s.id);
         cx.emit(PanelEvent::Closed);
         cx.notify();
     }
@@ -1051,11 +1066,14 @@ impl TerminalPanel {
     }
 
     fn grid_point(&self, p: gpui::Point<Pixels>, display_offset: usize) -> (TPoint, Side) {
-        let b = self.active_session().and_then(|s| self.pane_bounds.get(&s.id)).copied().unwrap_or_default();
+        let id = self.active_session().map(|s| s.id);
+        let b = id.and_then(|id| self.pane_bounds.get(&id)).copied().unwrap_or_default();
+        let shift = id.and_then(|id| self.grid_shift.get(&id)).copied().unwrap_or_default();
         let x = (p.x - b.left()).max(px(0.));
         let col = (x / self.cell.0).floor() as usize;
         let side = if (x / self.cell.0).fract() < 0.5 { Side::Left } else { Side::Right };
-        let row = ((p.y - b.top()).max(px(0.)) / self.cell.1).floor() as i32;
+        let row = ((p.y - b.top()).max(px(0.)) + shift) / self.cell.1;
+        let row = row.floor() as i32;
         (TPoint::new(Line(row - display_offset as i32), Column(col)), side)
     }
 
@@ -1401,6 +1419,9 @@ struct GridRow {
 }
 
 struct GridPrepaint {
+    /// Where the grid's first row is: the pane's top, or above it while zen
+    /// holds the grid's size (`TerminalPanel::zen_hold`).
+    top: Pixels,
     rows: Vec<GridRow>,
     cursor: Option<(usize, usize, CursorShape)>,
     has_content: bool,
@@ -1439,13 +1460,26 @@ impl Element for GridElement {
         let ts = window.text_system().clone();
         let cw = ts.advance(ts.resolve_font(&f), fs, 'm').map(|s| s.width).unwrap_or(px(7.));
         let lh = look.z(((look.code_size - 1.) * 1.3).round());
-        let cols = ((bounds.size.width / cw).floor() as usize).max(2);
-        let lines = ((bounds.size.height / lh).floor() as usize).max(1);
-        let mut out = GridPrepaint { rows: Vec::new(), cursor: None, has_content: false };
         let id = self.id;
+        // Zen's bar out: the size from before it came, bottom edges together.
+        let grid = self.panel.update(cx, |p, _| match p.rest_size.get(&id).copied() {
+            Some((w, h)) if p.zen_hold.get() && w == bounds.size.width && h > bounds.size.height => {
+                Bounds::new(point(bounds.left(), bounds.bottom() - h), size(w, h))
+            }
+            _ => {
+                if !p.zen_hold.get() {
+                    p.rest_size.insert(id, (bounds.size.width, bounds.size.height));
+                }
+                bounds
+            }
+        });
+        let cols = ((grid.size.width / cw).floor() as usize).max(2);
+        let lines = ((grid.size.height / lh).floor() as usize).max(1);
+        let mut out = GridPrepaint { top: grid.top(), rows: Vec::new(), cursor: None, has_content: false };
         self.panel.update(cx, |p, _| {
             p.cell = (cw, lh);
             p.pane_bounds.insert(id, bounds);
+            p.grid_shift.insert(id, bounds.top() - grid.top());
             crate::script::record(|| format!("term:{id}"), bounds);
             crate::script::record(|| format!("term-cell:{id}"), Bounds::new(bounds.origin, gpui::size(cw, lh)));
             let Some(s) = p.sessions.iter_mut().find(|s| s.id == id) else { return };
@@ -1542,7 +1576,7 @@ impl Element for GridElement {
         drop(term);
         for (i, (t, r)) in text.into_iter().zip(runs).enumerate() {
             let shaped = ts.shape_line(SharedString::from(t), fs, &r, None);
-            out.rows.push(GridRow { y: bounds.top() + lh * i as f32, text: shaped, bgs: std::mem::take(&mut bgs[i]), shapes: std::mem::take(&mut shapes[i]) });
+            out.rows.push(GridRow { y: grid.top() + lh * i as f32, text: shaped, bgs: std::mem::take(&mut bgs[i]), shapes: std::mem::take(&mut shapes[i]) });
         }
         out
     }
@@ -1576,7 +1610,7 @@ impl Element for GridElement {
                 row.text.paint(point(bounds.left(), row.y), lh, gpui::TextAlign::Left, None, window, cx).ok();
             }
             if let Some((r, c, shape)) = pre.cursor {
-                let origin = point(bounds.left() + cw * c as f32, bounds.top() + lh * r as f32);
+                let origin = point(bounds.left() + cw * c as f32, pre.top + lh * r as f32);
                 let q = match (focused, shape) {
                     (true, CursorShape::Beam) => fill(Bounds::new(origin, size(px(2.), lh)), crate::look::hsla(cursor_color)),
                     (true, CursorShape::Underline) => fill(Bounds::new(point(origin.x, origin.y + lh - px(2.)), size(cw, px(2.))), crate::look::hsla(cursor_color)),

@@ -669,6 +669,7 @@ impl Render for Workspace {
         }
         let sidebar = self.sidebar_visible();
         let body = div()
+            .flex_1()
             .min_h(px(0.))
             .flex()
             // `[ui] sidebar_side = "right"`: the same row, mirrored.
@@ -677,16 +678,9 @@ impl Render for Workspace {
             .when(sidebar && tiled, |d| d.child(self.sidebar_gap(&look, cx)))
             .child(div().flex_1().min_w(px(0.)).h_full().child(self.stage(&look, cx)));
         let zen = self.config.ui.zen;
-        // While zen's bar slides, the content keeps the height it has with the
-        // bar away and moves down under a clip, so it's laid out again once a
-        // slide (when the bar has arrived, or as it starts to leave), not every
-        // frame: terminals resizing their PTYs each frame made the slide stutter.
-        let body = if zen && zen_p > 0. && zen_p < 1. {
-            let h = window.viewport_size().height - if tiled { look.gap() * 2. } else { px(0.) };
-            div().flex_1().min_h(px(0.)).flex().flex_col().overflow_hidden().child(body.flex_none().h(h))
-        } else {
-            body.flex_1()
-        };
+        // While zen's bar is out, terminals keep the size they have with it
+        // away (see `TerminalPanel::zen_hold`).
+        self.terms.read(cx).zen_hold.set(zen && zen_p > 0.);
         // With window gaps the regions sit a gap apart and in from the edges.
         let frame = div()
             .flex_1()
