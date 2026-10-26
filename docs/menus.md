@@ -24,12 +24,20 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - New Agent Terminal `Cmd+Shift+T`
 - New Window `Cmd+N`
 - ---
-- Open Folder… `Cmd+O`
+- Open File… `Cmd+O` (any file, also outside the project)
+- Open Folder… `Cmd+K Cmd+O`
 - Open Recent ▸ (projects)
 - Quick Open… `Cmd+P`
 - ---
 - Save `Cmd+S` · Save All `Cmd+Opt+S`
 - Revert File
+- ---
+- Open as Text (the file viewer's file, in the code modal or, when large, as paged text)
+- Encoding ▸ (like Notepad++'s Encoding menu)
+  - Reopen with Encoding… (UTF-8, UTF-8 BOM, UTF-16 LE, UTF-16 BE, Windows-1252)
+  - Convert to Encoding… (saved in it from now on; undoable)
+  - ---
+  - Convert Line Endings (LF ⇄ CRLF; undoable)
 - ---
 - Close Terminal or Agent `Cmd+W` (in a terminal or an agent; an agent asks first)
 - Close Window `Cmd+Shift+W`
@@ -72,7 +80,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Browser: Inspect Element `Cmd+Shift+C`
 - Follow Agent (checkmark)
 - ---
-- Soft Wrap `Opt+Z` (checkmark)
+- Soft Wrap `Opt+Z` (checkmark) · Show Whitespace (checkmark; `[editor] show_whitespace`)
 - Zoom In `Cmd+=` · Zoom Out `Cmd+-` · Reset Zoom `Cmd+0`
 - ---
 - Appearance ▸

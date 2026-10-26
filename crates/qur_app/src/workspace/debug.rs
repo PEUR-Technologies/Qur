@@ -37,7 +37,7 @@ impl Workspace {
                 let p = e.cursor();
                 let mode = e.vim.as_ref().and_then(|v| v.mode).map(|m| m.label()).unwrap_or("-");
                 let text: String = e.model.rope().to_string().chars().take(200).collect();
-                format!("{}@{}:{} vim={mode} dirty={} changes={} text={text:?}", e.title(), p.line + 1, p.col + 1, e.is_dirty(), e.diff_debug())
+                format!("{}@{}:{} vim={mode} dirty={} changes={} format={:?} text={text:?}", e.title(), p.line + 1, p.col + 1, e.is_dirty(), e.diff_debug(), Self::code_status(e))
             }
             None => "none".into(),
         };
@@ -46,7 +46,7 @@ impl Workspace {
         let u = &self.config.ui;
         let gaps = format!("on={} gap={} rounded={} radius={} border={} sidebar_w={}", u.gaps, u.gap, u.rounded, u.radius, u.tile_border, self.sidebar_w);
         let sidebar = format!("on={} mode={} side={} shown={} visible={} sections={}", self.sidebar, u.sidebar, u.sidebar_side, self.sidebar_shown, self.sidebar_visible(), u.sidebar_sections.join(","));
-        let viewer = self.viewer.as_ref().map_or_else(|| "none".into(), |v| v.debug_state());
+        let viewer = self.viewer.as_ref().map_or_else(|| "none".into(), |v| v.debug_state(cx));
         let agents = self.agents.iter().map(|a| a.read(cx).debug_state()).collect::<Vec<_>>().join(" ");
         // The selected task's Changes view, and the changed files its heat counts as the agent's.
         let work = match &self.selected {

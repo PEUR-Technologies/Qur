@@ -13,7 +13,8 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+,` | Settings… (agents, appearance, editor, layout, files; changes apply and save at once, Esc closes) | Qur | ✅ |
 | `Cmd+N` | New Window | File | M1+ |
 | `Cmd+Shift+N` | New Agent Task (same as sidebar `+`) | File | M2 ✅ |
-| `Cmd+O` | Open Folder… | File | M1+ |
+| `Cmd+O` | Open File…: any file, also outside the project (text in the code modal; images, binaries and large files in the file viewer) | File | ✅ |
+| `Cmd+K Cmd+O` | Open Folder… (was `Cmd+O`) | File | ✅ |
 | `Cmd+Opt+O` | Switch Project… (also: click the project name in the top bar) | File | M1 |
 | `Cmd+Shift+W` | Close Window | File | S |
 | `Cmd+M` | Minimize | Window | S |
@@ -36,6 +37,11 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Ctrl+G` | Go to Line… | S |
 | `Ctrl+-` / `Ctrl+Shift+-` | Navigate Back / Forward | M1 |
 | `Cmd+Shift+O` | Go to Symbol in File (tree-sitter outline, no LSP; arrows preview, Esc goes back) | ✅ |
+| File menu / palette | Open as Text: the file viewer's file (an image, a binary) in the code modal, decoded as Windows-1252 when it isn't text; read-only if saving couldn't give the same bytes back. A large file opens as paged text in the viewer (no default keys) | ✅ |
+| File > Encoding / palette | Reopen with Encoding… / Convert to Encoding… (UTF-8, UTF-8 BOM, UTF-16 LE, UTF-16 BE, Windows-1252; converting marks the file unsaved, `Cmd+Z` undoes), Convert Line Endings (LF ⇄ CRLF, undoable). The code modal's header shows the encoding and line endings (no default keys) | ✅ |
+| View menu / palette | Show Whitespace: spaces as ·, tabs as →, line ends as ¬ in the code modal, saved as `[editor] show_whitespace` (no default keys) | ✅ |
+| File viewer (hex view) | Scroll, arrows, `PageUp`/`PageDown`, `Cmd+Up`/`Cmd+Down`; `Ctrl+G` Go to Offset (`0x1F00` or `7936`); drag or Shift-click to select bytes, `Cmd+A` all, `Cmd+C` copies them as hex; `Esc` closes the offset bar, then the viewer | ✅ |
+| File viewer (large file) | Read-only paged text: scroll and keys as in the hex view, `Ctrl+G` Go to Line, click or Shift-click lines and `Cmd+C`, `Cmd+F` Find (streams through the file; `Enter` / `Shift+Enter` or `Cmd+G` / `Cmd+Shift+G` next / previous; counts every match) | ✅ |
 
 ## Reviewing changes in the code modal
 

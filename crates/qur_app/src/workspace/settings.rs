@@ -30,6 +30,7 @@ impl Workspace {
             line_height: self.config.editor.line_height,
             theme: theme.clone(),
             tiles: crate::look::Tiles::from_config(&self.config.ui),
+            show_whitespace: self.config.editor.show_whitespace,
         };
         window.set_background_appearance(look.background_appearance());
         Look::set(window, look, cx);
@@ -442,6 +443,8 @@ const CONFIG_TEMPLATE: &str = r#"# Qur settings. Saved changes apply right away.
 # line_height = 1.5
 # soft_wrap = true
 # tab_width = 4
+# show_whitespace = false   # spaces as ·, tabs as →, line ends as ¬ (View > Show Whitespace)
+# large_file_mb = 50        # bigger files open read-only, paged from disk (hex for binaries)
 
 [ui]
 # font_size = 13

@@ -80,10 +80,16 @@ impl Workspace {
     }
 
     pub(super) fn open_path_at(&mut self, path: &Path, at: Option<Point>, window: &mut Window, cx: &mut Context<Self>) {
-        // Images show in the viewer, not as text.
-        if crate::files::viewable(path).is_some() {
+        // Images, binaries and large files show in the viewer (hex, paged
+        // text), unless they're already open as text.
+        if self.buffers.find(path, cx).is_none() && self.wants_viewer(path) {
             return self.view_file(path, window, cx);
         }
+        self.open_text_at(path, at, window, cx)
+    }
+
+    /// The code modal for `path` whatever it holds (Open as Text).
+    pub(super) fn open_text_at(&mut self, path: &Path, at: Option<Point>, window: &mut Window, cx: &mut Context<Self>) {
         self.record_nav(cx);
         let buf = match self.buffers.find(path, cx) {
             Some(b) => b,
@@ -324,11 +330,11 @@ impl Workspace {
         let code = self.code.clone()?;
         let ui = &look.theme.ui;
         let vim = code.read(cx).vim_status();
-        let (title, dirty, owner) = {
+        let (title, dirty, owner, format) = {
             let c = code.read(cx);
             let path = c.path().map(Path::to_path_buf).unwrap_or_default();
             let (rel, owner) = self.where_is(&path, cx);
-            (rel, c.is_dirty(), owner)
+            (rel, c.is_dirty(), owner, Self::code_status(c))
         };
         Some(
             div()
@@ -368,6 +374,7 @@ impl Workspace {
                                 .children(owner.map(|w| div().flex_none().text_color(look.c(ui.text_muted)).child(format!("in {w}"))))
                                 .children(vim.map(|m| div().flex_none().ml(look.z(8.)).px(look.z(5.)).rounded(look.z(3.)).bg(look.c(ui.active_bg)).text_size(look.text(-2.)).font_family(look.code_font.clone()).text_color(look.c(ui.text_secondary)).child(m)))
                                 .child(div().flex_1())
+                                .child(div().flex_none().text_color(look.c(ui.text_muted)).child(format))
                                 .child(div().flex_none().text_color(look.c(ui.text_muted)).child("esc to close")),
                         )
                         .child(div().flex_1().min_h(px(0.)).child(code)),

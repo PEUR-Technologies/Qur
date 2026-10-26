@@ -1190,6 +1190,7 @@ mod tests {
             code_size: 13.,
             line_height: 1.5,
             tiles: None,
+            show_whitespace: false,
         }
     }
 

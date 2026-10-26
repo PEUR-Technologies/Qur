@@ -23,6 +23,8 @@ pub struct Look {
     pub line_height: f32,
     /// Window gaps (`[ui] gaps`): every region floats as its own tile.
     pub tiles: Option<Tiles>,
+    /// `[editor] show_whitespace`: the code modal draws spaces, tabs and line ends.
+    pub show_whitespace: bool,
 }
 
 /// Hyprland-style window gaps: the window paints nothing between regions,
@@ -83,6 +85,7 @@ impl Look {
             code_size: 13.0,
             line_height: 1.5,
             tiles: None,
+            show_whitespace: false,
         }
     }
 

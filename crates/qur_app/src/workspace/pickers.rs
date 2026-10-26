@@ -145,6 +145,11 @@ impl Workspace {
                     code.update(cx, |c, cx| c.restore_selections(restore, cx));
                 }
             }
+            (PickerEvent::Confirm(i), PickKind::Encoding(action)) => {
+                let (i, action) = (*i, *action);
+                self.close_overlays(window, cx);
+                self.encoding_chosen(i, action, window, cx);
+            }
             (PickerEvent::Dismiss, _) => self.close_overlays(window, cx),
             _ => {}
         }
@@ -244,7 +249,8 @@ impl Workspace {
                 PickItem::new(name).detail(p.to_string_lossy().replacen(&home, "~", 1))
             })
             .collect();
-        items.push(PickItem::new("Open Folder…").right(commands::display_keys("cmd-o")));
+        let keys = commands::find(&qur::OpenFolder).map(|c| c.first_keys()).unwrap_or_default();
+        items.push(PickItem::new("Open Folder…").right(commands::display_keys(&keys)));
         self.open_picker("Switch project…", items, PickKind::Projects(list), false, window, cx);
     }
 
