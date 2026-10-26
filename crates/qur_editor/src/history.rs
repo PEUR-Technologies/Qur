@@ -3,6 +3,7 @@
 use std::time::{Duration, Instant};
 
 use crate::Selection;
+use crate::encoding::Encoding;
 
 /// Consecutive typing within this window becomes one undo step.
 const GROUP_WINDOW: Duration = Duration::from_secs(1);
@@ -13,6 +14,15 @@ pub(crate) struct Applied {
     pub start: usize,
     pub removed: String,
     pub inserted: String,
+}
+
+/// How the buffer is saved: line endings and encoding. Converting them is
+/// an undo step of its own, with no text change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Meta {
+    pub crlf: bool,
+    pub encoding: Encoding,
+    pub bom: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +38,8 @@ pub(crate) struct Txn {
     pub changes: Vec<Applied>,
     pub before: (Vec<Selection>, usize),
     pub after: (Vec<Selection>, usize),
+    /// A save-format change (before, after), for line ending and encoding conversions.
+    pub meta: Option<(Meta, Meta)>,
     kind: Kind,
     time: Instant,
 }
@@ -68,7 +80,14 @@ impl History {
             return;
         }
         self.next_id += 1;
-        self.undo.push(Txn { id: self.next_id, changes, before, after, kind, time: now });
+        self.undo.push(Txn { id: self.next_id, changes, before, after, meta: None, kind, time: now });
+    }
+
+    /// A save-format change as its own undo step (marks the buffer dirty).
+    pub fn push_meta(&mut self, before: Meta, after: Meta, sels: (Vec<Selection>, usize), now: Instant) {
+        self.redo.clear();
+        self.next_id += 1;
+        self.undo.push(Txn { id: self.next_id, changes: Vec::new(), before: sels.clone(), after: sels, meta: Some((before, after)), kind: Kind::Other, time: now });
     }
 }
 
