@@ -156,7 +156,7 @@ pub fn report(pid: i32, labels: &HashMap<i32, String>) -> Report {
             (bytes > 0).then_some(Child { pid: c, label, bytes, procs: procs.len() })
         })
         .collect();
-    children.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    children.sort_by_key(|c| std::cmp::Reverse(c.bytes));
     Report { pid, own, children }
 }
 

@@ -455,6 +455,9 @@ const PROJECT_ONLY: &[&str] = &[
     "qur::DiscardTask", "qur::OpenWorktreeInTerminal", "qur::RevealWorktree", "qur::CyclePeekLayout",
     "qur::ChooseLayout", "qur::PeekLayoutA", "qur::PeekLayoutB", "qur::PeekLayoutC", "qur::PeekLive", "qur::PeekTodo",
     "qur::PeekChat", "qur::PeekChanges", "qur::PeekBrowser", "qur::ToggleInspect", "qur::FollowAgent",
+    "qur::CleanUpWorktrees", "qur::PlanMode", "qur::CommentOnPlan", "qur::ApprovePlan", "qur::SendPlanComments",
+    "qur::PushPullRequest", "qur::OpenPullRequest", "qur::NextChange", "qur::PrevChange", "qur::ShowChange",
+    "qur::RevertChange", "qur::AcceptChange", "qur::ChangesLastTurn",
 ];
 
 /// Commands that need the project to be a git repository (a plain folder

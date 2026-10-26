@@ -229,7 +229,7 @@ impl Workspace {
         let header = theme_scope_header(project_scope, &self.project_name());
         let p = self.open_picker("Select a theme…", items, PickKind::Themes { names, project_scope }, false, window, cx);
         p.update(cx, |p, cx| {
-            p.header = Some(header).filter(|_| project_scope);
+            p.header = project_scope.then_some(header);
             p.select_item(current, cx);
         });
     }
