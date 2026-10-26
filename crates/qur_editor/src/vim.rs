@@ -188,7 +188,7 @@ impl Vim {
                     out
                 }
                 ('g', 'g') => {
-                    let line = self.count.take().map(|n| n.saturating_sub(1)).unwrap_or(0);
+                    let line = self.count.take().map(|n| n.saturating_sub(1)).unwrap_or(0).min(last_line(e));
                     self.motion_to(e, line_first_nonblank(e, line), Kind::Linewise, cx)
                 }
                 _ => {
@@ -212,7 +212,7 @@ impl Vim {
                     let n = self.op_count.take().unwrap_or(1) * self.take_count();
                     self.op = None;
                     let line = e.primary().head.line;
-                    let last = (line + n - 1).min(e.line_count() - 1);
+                    let last = (line + n - 1).min(last_line(e)).max(line);
                     return self.apply_lines(e, c, line, last, cx);
                 }
                 Some(_) => {
@@ -303,7 +303,7 @@ impl Vim {
                 let mut out = Outcome::default();
                 for _ in 0..n.max(1) {
                     let line = e.primary().head.line;
-                    if line + 1 >= e.line_count() {
+                    if line >= last_line(e) {
                         break;
                     }
                     let end = line_start(e, line) + line_len(e, line);
@@ -358,7 +358,7 @@ impl Vim {
         };
         if let Some(p) = self.pending.take() {
             if (p, c) == ('g', 'g') {
-                let line = self.count.take().map(|n| n.saturating_sub(1)).unwrap_or(0);
+                let line = self.count.take().map(|n| n.saturating_sub(1)).unwrap_or(0).min(last_line(e));
                 return self.extend_to(e, line_first_nonblank(e, line));
             }
             return Outcome::default();
@@ -411,28 +411,32 @@ impl Vim {
 
     /// Where motion `c` lands from the cursor, or None if `c` isn't a motion.
     fn motion(&mut self, e: &Editor, c: char) -> Option<(usize, Kind)> {
-        let n = if matches!(c, 'h' | 'j' | 'k' | 'l' | 'w' | 'b' | 'e' | '$' | 'G') { self.count.take().unwrap_or(1) } else { 1 };
+        let count = if matches!(c, 'h' | 'j' | 'k' | 'l' | 'w' | 'b' | 'e' | '$' | 'G') { self.count.take() } else { None };
+        let n = count.unwrap_or(1);
         let p = e.primary().head;
         let here = to_char(e, p);
-        let last_line = e.line_count() - 1;
+        let last_line = last_line(e);
+        // `j` and `$` never move up, even from the empty line after a trailing newline.
+        let below = last_line.max(p.line);
         Some(match c {
             'h' => (line_start(e, p.line) + p.col.saturating_sub(n), Kind::Exclusive),
             'l' => (line_start(e, p.line) + (p.col + n).min(line_len(e, p.line)), Kind::Exclusive),
             'j' | 'k' => {
-                let line = if c == 'j' { (p.line + n).min(last_line) } else { p.line.saturating_sub(n) };
+                let line = if c == 'j' { (p.line + n).min(below) } else { p.line.saturating_sub(n) };
                 (line_start(e, line) + p.col.min(line_len(e, line).saturating_sub(1)), Kind::Linewise)
             }
             '0' => (line_start(e, p.line), Kind::Exclusive),
             '^' => (line_first_nonblank(e, p.line), Kind::Exclusive),
             '$' => {
-                let line = (p.line + n - 1).min(last_line);
+                let line = (p.line + n - 1).min(below);
                 (line_start(e, line) + line_len(e, line).saturating_sub(1), Kind::Inclusive)
             }
             'w' => ((0..n).fold(here, |at, _| word_forward(e, at)), Kind::Exclusive),
             'b' => ((0..n).fold(here, |at, _| word_back(e, at)), Kind::Exclusive),
             'e' => ((0..n).fold(here, |at, _| word_end(e, at)), Kind::Inclusive),
             'G' => {
-                let line = if self.count.is_some() || n > 1 { (n - 1).min(last_line) } else { last_line };
+                // `G` is the last line, `1G` the first.
+                let line = count.map_or(last_line, |n| n.saturating_sub(1).min(last_line));
                 (line_first_nonblank(e, line), Kind::Linewise)
             }
             _ => return None,
@@ -528,7 +532,7 @@ impl Vim {
                 // one before it instead.
                 let (s2, t2) = if !had_newline && a > 0 { (s - 1, t) } else { (s, t) };
                 let out = replace(e, s2, t2, "", cx);
-                let line = a.min(e.line_count() - 1);
+                let line = a.min(last_line(e));
                 set_cursor_char(e, line_first_nonblank(e, line));
                 self.finish_change();
                 out
@@ -625,6 +629,13 @@ fn line_start(e: &Editor, line: usize) -> usize {
 
 fn line_len(e: &Editor, line: usize) -> usize {
     crate::text::line_len(e.rope(), line.min(e.line_count() - 1))
+}
+
+/// The last line as Vim counts them: a trailing newline ends the last line
+/// rather than starting an empty one after it.
+fn last_line(e: &Editor) -> usize {
+    let n = e.line_count() - 1;
+    if n > 0 && line_len(e, n) == 0 { n - 1 } else { n }
 }
 
 fn to_char(e: &Editor, p: Point) -> usize {
@@ -809,8 +820,10 @@ mod tests {
         assert_eq!(at(&e), (0, 10));
         keys(&mut v, &mut e, "0j^");
         assert_eq!(at(&e), (1, 4));
+        // Like Vim, `G` stops on the last real line, not the empty one after
+        // the trailing newline.
         keys(&mut v, &mut e, "G");
-        assert_eq!(at(&e), (3, 0));
+        assert_eq!(at(&e), (2, 0));
         keys(&mut v, &mut e, "gg");
         assert_eq!(at(&e), (0, 0));
         keys(&mut v, &mut e, "2G");
@@ -819,6 +832,68 @@ mod tests {
         assert_eq!(at(&e), (1, 7));
         keys(&mut v, &mut e, "kh");
         assert_eq!(at(&e), (0, 6));
+    }
+
+    #[test]
+    fn last_line_is_the_last_real_line() {
+        let (mut v, mut e) = setup("a\n  b\nc\n");
+        keys(&mut v, &mut e, "G");
+        assert_eq!(at(&e), (2, 0));
+        keys(&mut v, &mut e, "1G");
+        assert_eq!(at(&e), (0, 0));
+        keys(&mut v, &mut e, "2G");
+        assert_eq!(at(&e), (1, 2));
+        keys(&mut v, &mut e, "99G");
+        assert_eq!(at(&e), (2, 0));
+        keys(&mut v, &mut e, "99gg");
+        assert_eq!(at(&e), (2, 0));
+        keys(&mut v, &mut e, "2gg");
+        assert_eq!(at(&e), (1, 2));
+        keys(&mut v, &mut e, "gg9j");
+        assert_eq!(at(&e), (2, 0));
+        keys(&mut v, &mut e, "gg5$");
+        assert_eq!(at(&e), (2, 0));
+        keys(&mut v, &mut e, "J");
+        assert_eq!(text(&e), "a\n  b\nc\n");
+        // Without a trailing newline the last line is the last one too.
+        let (mut v, mut e) = setup("a\nb");
+        keys(&mut v, &mut e, "G");
+        assert_eq!(at(&e), (1, 0));
+        // An empty last line of its own still counts.
+        let (mut v, mut e) = setup("a\n\n");
+        keys(&mut v, &mut e, "G");
+        assert_eq!(at(&e), (1, 0));
+
+        let (mut v, mut e) = setup("a\nb\nc\n");
+        keys(&mut v, &mut e, "jyG");
+        assert_eq!((v.register.0.as_str(), at(&e)), ("b\nc\n", (1, 0)));
+        keys(&mut v, &mut e, "dG");
+        assert_eq!((text(&e).as_str(), at(&e)), ("a\n", (0, 0)));
+        keys(&mut v, &mut e, "u");
+        assert_eq!(text(&e), "a\nb\nc\n");
+        keys(&mut v, &mut e, "ggdG");
+        assert_eq!(text(&e), "");
+        let (mut v, mut e) = setup("a\nb\nc\n");
+        keys(&mut v, &mut e, "G5dd");
+        assert_eq!((text(&e).as_str(), at(&e)), ("a\nb\n", (1, 0)));
+        let (mut v, mut e) = setup("a\nb\nc\n");
+        keys(&mut v, &mut e, "jd2G");
+        assert_eq!(text(&e), "a\nc\n");
+        keys(&mut v, &mut e, "ggd9G");
+        assert_eq!(text(&e), "");
+
+        // Visual mode extends to the same lines.
+        let (mut v, mut e) = setup("a\nb\nc\n");
+        keys(&mut v, &mut e, "jVGd");
+        assert_eq!(text(&e), "a\n");
+        let (mut v, mut e) = setup("a\nb\nc\n");
+        keys(&mut v, &mut e, "VGy");
+        assert_eq!(v.register.0, "a\nb\nc\n");
+        keys(&mut v, &mut e, "GV99ggd");
+        assert_eq!(text(&e), "a\nb\n");
+        let (mut v, mut e) = setup("a\nb\nc\n");
+        keys(&mut v, &mut e, "vGd");
+        assert_eq!(text(&e), "\n");
     }
 
     #[test]

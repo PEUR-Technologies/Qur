@@ -33,6 +33,8 @@ impl Workspace {
         };
         window.set_background_appearance(look.background_appearance());
         Look::set(window, look, cx);
+        // This window's terminals answer color queries with its theme.
+        self.terms.read(cx).set_colors(theme.terminal.clone());
         // Agent accents follow the theme's palette (unless agents.toml overrides).
         let n = theme.accents.len();
         let mut slot = 0;
