@@ -11,7 +11,7 @@ Everything the [README](../README.md) leaves out: requirements, every feature, c
 - For agents, on your own logins (Qur never sets an API key):
   - [Claude Code](https://claude.com/claude-code), logged in with your subscription (`claude` CLI). That's all Agent Terminals need.
   - For structured (ACP) agents, the adapter, pinned: `npm i -g @agentclientprotocol/claude-agent-acp@0.94.0` (don't use `npx` at runtime).
-  - Gemini CLI and opencode over ACP, Aider in a terminal: Settings > Agents lists them once installed. Any other CLI agent: Settings > Agents > **Add agent** (name, command, Structured or Terminal), or by hand in `agents.toml`.
+  - Gemini CLI, opencode, GitHub Copilot and Cursor over ACP, Aider in a terminal: Settings > Agents lists them once installed. Any other CLI agent: Settings > Agents > **Add agent** (name, command, Structured or Terminal), or by hand in `agents.toml`.
 
 ### The app
 

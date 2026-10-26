@@ -48,6 +48,10 @@ pub const KNOWN: &[Known] = &[
     // Native ACP; `--acp` is stable from @google/gemini-cli 0.50.0.
     ("gemini", "Gemini CLI", Mode::Acp, "gemini", &["--acp"], None),
     ("opencode", "opencode", Mode::Acp, "opencode", &["acp"], None),
+    // ACP in public preview; signs in with a GitHub Copilot plan.
+    ("copilot", "GitHub Copilot", Mode::Acp, "copilot", &["--acp"], None),
+    // Cursor's CLI installs as `agent` (~/.local/bin); sign in with `agent login`.
+    ("cursor", "Cursor", Mode::Acp, "agent", &["acp"], None),
 ];
 
 /// An AI account Setup connects (decision 45): a CLI the user signs in to,
@@ -146,8 +150,9 @@ pub enum SetupEvent {
     RunInTerminal { label: String, command: String },
     /// That step finished: show Setup again.
     Ready(String),
-    /// The agents ticked (never empty): saved to agents.toml.
-    Agents(Vec<AgentDef>),
+    /// The agents ticked (never empty), and the ids of every agent listed:
+    /// agents.toml becomes `chosen` plus the entries Settings never listed.
+    Agents { chosen: Vec<AgentDef>, listed: Vec<String> },
     /// Theme picked, for this project or all (decision 13).
     Theme { name: String, project_scope: bool },
     /// Opacity and blur; `save` once the slider is let go (or blur clicked).
@@ -334,7 +339,8 @@ impl SetupView {
     fn save_agents(&mut self, cx: &mut Context<Self>) {
         let agents: Vec<AgentDef> = self.agents.iter().filter(|f| f.enabled).map(|f| f.def.clone()).collect();
         if !agents.is_empty() {
-            cx.emit(SetupEvent::Agents(agents));
+            let listed = self.agents.iter().map(|f| f.def.id.clone()).collect();
+            cx.emit(SetupEvent::Agents { chosen: agents, listed });
         }
     }
 

@@ -288,7 +288,7 @@ impl Workspace {
                 }
                 this.flash(msg.clone(), cx);
             }
-            SetupEvent::Agents(agents) => this.save_agents(agents.clone(), cx),
+            SetupEvent::Agents { chosen, listed } => this.save_agents(chosen.clone(), listed, cx),
             SetupEvent::Theme { name, project_scope } => this.save_theme(name, *project_scope, window, cx),
             SetupEvent::Opacity { project_scope, opacity, blur, save } => {
                 this.set_opacity(*project_scope, *opacity, *blur, window, cx);
@@ -335,10 +335,15 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The agents ticked in Settings become agents.toml. Settings lists every
-    /// agent there (added by hand too), so unticking one removes it.
-    fn save_agents(&mut self, chosen: Vec<AgentDef>, cx: &mut Context<Self>) {
-        let roster = qur_agents::Roster { agents: chosen };
+    /// The agents ticked in Settings, then any agents.toml entry Settings
+    /// never listed. Listed but unticked ones are removed.
+    fn save_agents(&mut self, chosen: Vec<AgentDef>, listed: &[String], cx: &mut Context<Self>) {
+        // Re-read the file: entries added since Settings opened (by hand, or
+        // from another window) weren't listed there, so they stay.
+        let mut agents = chosen;
+        let kept: Vec<_> = qur_agents::Roster::load().0.agents.into_iter().filter(|a| !listed.contains(&a.id) && !agents.iter().any(|c| c.id == a.id)).collect();
+        agents.extend(kept);
+        let roster = qur_agents::Roster { agents };
         if let Err(e) = roster.save() {
             self.flash(format!("Couldn't save agents.toml: {e}"), cx);
         }
