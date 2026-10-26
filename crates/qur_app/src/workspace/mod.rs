@@ -964,7 +964,6 @@ impl Render for Workspace {
                     return cx.stop_propagation();
                 }
                 if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::AgentMenu { .. } | Overlay::About(_) | Overlay::Cleanup(_))) {
-            .map(|d| Self::file_actions(d, cx))
                     this.close_overlays(window, cx);
                     cx.stop_propagation();
                 }
