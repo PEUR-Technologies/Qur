@@ -766,6 +766,22 @@ impl TerminalPanel {
         cx.notify();
     }
 
+    /// Cmd+W on session `id`: in a dwindled row (not a grid) the newest pane,
+    /// the smallest, goes first, and focus stays where it was if it survives.
+    pub fn close_newest(&mut self, id: usize, cx: &mut Context<Self>) {
+        let focused = self.active_session().map(|s| s.id);
+        let mut victim = id;
+        if let Some(g) = self.groups.iter_mut().find(|g| !g.grid && g.tile.ids().contains(&id)) {
+            let mut ids = g.tile.ids();
+            ids.sort_unstable();
+            victim = ids[ids.len() - 1];
+            g.last = focused.filter(|f| *f != victim && ids.contains(f)).unwrap_or(ids[ids.len() - 2]);
+        }
+        if let Some(ix) = self.sessions.iter().position(|s| s.id == victim) {
+            self.close(ix, cx);
+        }
+    }
+
     /// Close a sidebar row: the session `id` and every pane split beside it.
     pub fn close_row(&mut self, id: usize, cx: &mut Context<Self>) {
         let ids = self.groups.iter().find(|g| g.tile.ids().contains(&id)).map(|g| g.tile.ids()).unwrap_or_else(|| vec![id]);
@@ -1094,8 +1110,9 @@ impl TerminalPanel {
         cx.notify();
     }
     fn close_terminal(&mut self, _: &qur::CloseTerminal, _: &mut Window, cx: &mut Context<Self>) {
-        let ix = self.active;
-        self.close(ix, cx);
+        if let Some(id) = self.active_session().map(|s| s.id) {
+            self.close_newest(id, cx);
+        }
     }
 
     fn grid_point(&self, p: gpui::Point<Pixels>, display_offset: usize) -> (TPoint, Side) {
