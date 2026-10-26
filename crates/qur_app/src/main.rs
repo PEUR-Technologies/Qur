@@ -9,6 +9,7 @@ mod alerts;
 mod browser_view;
 mod changes_view;
 mod commands;
+mod commit_msg;
 mod dock;
 mod doctor;
 mod editor_view;

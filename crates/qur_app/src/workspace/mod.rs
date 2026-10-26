@@ -40,6 +40,7 @@ use qur_theme::{Appearance, Registry, Rgba, ThemeChoice};
 
 use crate::agent_view::{AgentEvent, AgentTask, Layout, Status, View};
 use crate::alerts;
+use crate::commit_msg;
 use crate::changes_view::{ChangesEvent, ChangesView};
 use crate::dock::{self, Docks};
 use crate::git_panel::{GitEvent, GitPanel};
@@ -119,8 +120,10 @@ struct FirstRun {
 struct MergeState {
     task: String,
     title: String,
-    branch: String,
     files: Vec<PathBuf>,
+    /// The merge commit's message (from the agent's turns); the Git
+    /// panel's commit box offers it, editable.
+    message: String,
 }
 
 /// What the stage shows.

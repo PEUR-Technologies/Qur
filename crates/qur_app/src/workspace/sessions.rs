@@ -42,6 +42,7 @@ impl Workspace {
             }
             Some(Selected::Git) => {
                 self.git_panel(window, cx);
+                self.suggest_commit(cx);
                 window.focus(&self.focus, cx);
             }
             Some(Selected::Search) => {
