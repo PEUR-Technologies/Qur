@@ -81,7 +81,11 @@ impl Workspace {
                 t.record.turns.push(qur_agents::Turn { n, start: start.clone(), end: Some(end.clone()), files, added, removed, rewound: false });
                 let wt = t.record.worktree.clone();
                 let turns = t.record.turns.clone();
-                t.changes.update(cx, |c, cx| c.set_turns(turns, cx));
+                t.changes.update(cx, |c, cx| {
+                    c.set_turns(turns, cx);
+                    // Like an ACP turn's end: the file list is stale until it's recomputed.
+                    c.refresh(cx);
+                });
                 let pin_id = id.clone();
                 cx.background_executor()
                     .spawn(async move {

@@ -3659,7 +3659,7 @@ dependencies = [
 
 [[package]]
 name = "qur_acp"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "futures",
  "libc",
@@ -3668,7 +3668,7 @@ dependencies = [
 
 [[package]]
 name = "qur_agents"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "qur_config",
  "qur_worktree",
@@ -3679,7 +3679,7 @@ dependencies = [
 
 [[package]]
 name = "qur_app"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "alacritty_terminal",
  "futures",
@@ -3712,7 +3712,7 @@ dependencies = [
 
 [[package]]
 name = "qur_browser"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "block2 0.6.2",
  "futures",
@@ -3725,7 +3725,7 @@ dependencies = [
 
 [[package]]
 name = "qur_config"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "serde",
  "toml_edit 0.25.17+spec-1.1.0",
@@ -3733,7 +3733,7 @@ dependencies = [
 
 [[package]]
 name = "qur_editor"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "memchr",
  "regex",
@@ -3744,15 +3744,15 @@ dependencies = [
 
 [[package]]
 name = "qur_git"
-version = "0.1.7"
+version = "0.1.8"
 
 [[package]]
 name = "qur_heat"
-version = "0.1.7"
+version = "0.1.8"
 
 [[package]]
 name = "qur_search"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "ignore",
  "regex",
@@ -3760,7 +3760,7 @@ dependencies = [
 
 [[package]]
 name = "qur_syntax"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "ropey",
  "tree-sitter",
@@ -3780,7 +3780,7 @@ dependencies = [
 
 [[package]]
 name = "qur_theme"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "serde",
  "toml_edit 0.25.17+spec-1.1.0",
@@ -3788,14 +3788,14 @@ dependencies = [
 
 [[package]]
 name = "qur_tree"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "ignore",
 ]
 
 [[package]]
 name = "qur_watch"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "futures",
  "ignore",
@@ -3804,7 +3804,7 @@ dependencies = [
 
 [[package]]
 name = "qur_worktree"
-version = "0.1.7"
+version = "0.1.8"
 
 [[package]]
 name = "r-efi"

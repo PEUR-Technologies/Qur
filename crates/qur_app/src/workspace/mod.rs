@@ -588,10 +588,7 @@ impl Workspace {
     fn refresh_overlaps(&self, cx: &mut Context<Self>) {
         let monitors: Vec<_> = self.agents.iter().map(|a| a.read(cx).monitor.clone()).chain(self.term_tasks.iter().map(|t| t.monitor.clone())).collect();
         if let Some(t) = self.trees.get(&self.root) {
-            t.update(cx, |t, cx| {
-                t.overlaps = monitors;
-                cx.notify();
-            });
+            t.update(cx, |t, cx| t.set_overlaps(monitors, cx));
         }
     }
 
