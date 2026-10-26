@@ -21,6 +21,7 @@ mod markdown;
 mod monitor;
 mod picker;
 mod prompt;
+mod pull_request;
 mod script;
 mod review;
 mod search_view;

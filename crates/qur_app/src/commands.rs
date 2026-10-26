@@ -29,6 +29,7 @@ pub mod qur {
             Gaps, ToggleGaps, AutoHideSidebar, SidebarOnRight,
             ShowLastTurn, RewindLastTurn, ReviewWork, ReviewPlan, SendReviewFindings,
             PlanMode, CommentOnPlan, ApprovePlan, SendPlanComments,
+            PushPullRequest, OpenPullRequest,
         ]
     );
 
@@ -353,6 +354,9 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::ReviewPlan, "Agent", "Review Agent's Plan…", "", W, R),
     cmd!(qur::SendReviewFindings, "Agent", "Send Review Findings to Agent", "", W, R),
     cmd!(qur::Merge, "Agent", "Merge into My Branch", "", W, R),
+    // Run by the user's own git and gh, with their logins (pull_request.rs).
+    cmd!(qur::PushPullRequest, "Agent", "Push and Open Pull Request…", "", W, R),
+    cmd!(qur::OpenPullRequest, "Agent", "Open Pull Request", "", W, R),
     cmd!(qur::KeepWorking, "Agent", "Keep Working", "", W, R),
     cmd!(qur::RenameAgent, "Agent", "Rename Agent…", "", W, R),
     cmd!(qur::RunChecks, "Agent", "Run Checks Now", "", W, R),
@@ -819,6 +823,8 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::ReviewPlan).disabled(!s.review.plan),
             item(qur::SendReviewFindings).disabled(!s.review.findings),
             item(qur::Merge),
+            item(qur::PushPullRequest),
+            item(qur::OpenPullRequest),
             item(qur::KeepWorking),
             item(qur::RunChecks),
             item(qur::RunProject),

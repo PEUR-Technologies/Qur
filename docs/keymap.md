@@ -139,6 +139,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+=` `Cmd+-` `Cmd+0` (browser) | Page zoom in / out / actual size (instead of Qur's zoom while the browser has focus) | Browser ✅ |
 | `Cmd+C/X/V/A/Z`, `Shift+Cmd+Z` (in a page) | Copy, cut, paste, select all, undo, redo in the page | Browser ✅ |
 | Changes view / Agent menu | Merge into My Branch, Keep Working, Discard Task…, Review Changes | M4 ✅ |
+| Changes view / Agent menu | Push and Open Pull Request…, Open Pull Request (your own `git` and `gh`) | ✅ |
 | Agent menu | Run Checks Now, Run Project in Worktree (no default keys) | ✅ |
 | Agent menu / chat turn line | Show Last Turn's Changes, Rewind Last Turn… (structured agents; no default keys) | ✅ |
 | `Cmd+F` (in a terminal) | Find in Terminal (regex; ↩ older, ⇧↩ newer, Esc closes) | M5 ✅ |

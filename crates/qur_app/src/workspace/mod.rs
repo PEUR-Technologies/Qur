@@ -11,6 +11,7 @@ mod debug;
 mod merge;
 mod overlays;
 mod pickers;
+mod pull_request;
 mod sessions;
 mod settings;
 mod sidebar;
@@ -251,6 +252,8 @@ pub struct Workspace {
     nav_ix: usize,
     message: Option<(SharedString, Instant)>,
     message_timer: Option<Task<()>>,
+    /// The top-bar message opens this when clicked (a pull request).
+    message_url: Option<String>,
     file_lists: HashMap<PathBuf, Vec<PathBuf>>,
     layout: Layout,
     _root_watcher: Option<qur_watch::Watcher>,
@@ -385,6 +388,7 @@ impl Workspace {
             nav_ix: 0,
             message: None,
             message_timer: None,
+            message_url: None,
             file_lists: HashMap::new(),
             layout: Layout::A,
             _root_watcher: None,
@@ -442,6 +446,7 @@ impl Workspace {
             println!("FLASH {msg}");
         }
         self.message = Some((msg, Instant::now()));
+        self.message_url = None;
         let bg = cx.background_executor().clone();
         self.message_timer = Some(cx.spawn(async move |this, cx| {
             bg.timer(Duration::from_secs(6)).await;
@@ -789,6 +794,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::discard_task))
             .on_action(cx.listener(Self::show_git))
             .on_action(cx.listener(Self::merge_action))
+            .on_action(cx.listener(Self::push_pull_request_action))
+            .on_action(cx.listener(Self::open_pull_request_action))
             .on_action(cx.listener(Self::run_checks_action))
             .on_action(cx.listener(Self::run_project))
             .on_action(cx.listener(Self::rename_agent))

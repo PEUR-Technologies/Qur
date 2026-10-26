@@ -230,6 +230,10 @@ pub struct TaskRecord {
     /// read-only session in the same worktree. Dropped with the task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewLink>,
+    /// The pull request opened for this task's branch (Push and Open Pull
+    /// Request…), so it isn't opened twice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
 }
 
 /// The reviewer attached to a task: which agent and model, what it reviews,
@@ -414,6 +418,7 @@ mod tests {
                 session_id: Some("r1".into()),
                 created: 2,
             }),
+            pr_url: Some("https://github.com/acme/proj/pull/7".into()),
         });
         let body = toml_edit::ser::to_string_pretty(&s).unwrap();
         let back: TaskStore = toml_edit::de::from_str(&body).unwrap();
@@ -428,8 +433,9 @@ mod tests {
         // No reviewer: nothing written, and it reads back the same.
         let mut plain = s.clone();
         plain.tasks[0].review = None;
+        plain.tasks[0].pr_url = None;
         let body = toml_edit::ser::to_string_pretty(&plain).unwrap();
-        assert!(!body.contains("review"), "{body}");
+        assert!(!body.contains("review") && !body.contains("pr_url"), "{body}");
         assert_eq!(toml_edit::de::from_str::<TaskStore>(&body).unwrap(), plain);
     }
 

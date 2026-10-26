@@ -573,6 +573,18 @@ impl AgentTask {
         cx.notify();
     }
 
+    /// A notice with a link under it (the pull request opened for the task).
+    pub fn notice_link(&mut self, text: impl Into<String>, uri: String, cx: &mut Context<Self>) {
+        self.push(ChatItem::Notice(text.into()));
+        self.push(ChatItem::Link { name: uri.clone(), uri });
+        cx.notify();
+    }
+
+    /// What you asked this session, oldest first (a pull request's body).
+    pub fn user_prompts(&self) -> Vec<String> {
+        self.chat.iter().filter_map(|c| if let ChatItem::User(t) = c { Some(t.clone()) } else { None }).collect()
+    }
+
     pub fn set_error(&mut self, msg: String, cx: &mut Context<Self>) {
         self.set_status(Status::Error(msg), cx);
     }

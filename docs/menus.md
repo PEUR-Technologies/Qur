@@ -106,6 +106,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Next Agent · Previous Agent · Switch Agent or Terminal… `Ctrl+T` · Agent 1–9 `Ctrl+1..9`
 - ---
 - Review Changes `Cmd+4` · Merge into My Branch · Keep Working · Discard Task…
+- Push and Open Pull Request… (asks first; commits the task's uncommitted work as "qur: <title>" like Merge, runs your own `git push -u <remote> <task branch>` (the remote of your current branch, else `origin`), then `gh pr create` into your branch; without `gh` or its login, GitHub's compare page opens in the browser, and other hosts just get the push. The PR's address is kept on the task and shown in the Changes view; a second run pushes new work to the same PR. Remote branches are never deleted, also on Discard) · Open Pull Request (once the task has one). Also in the agent's right-click menu, and as a button next to Merge in the Changes view.
 - Show Last Turn's Changes · Rewind Last Turn… (structured agents with a turn that changed files; disabled otherwise, and for Agent Terminals)
 - Review Agent's Work… · Review Agent's Plan… (a read-only second opinion from another agent or model; Plan only when the agent has a plan) · Send Review Findings to Agent (once its reviewer has findings). Disabled otherwise, and for Agent Terminals. Also in the agent's right-click menu.
 - Run Checks Now (the project's `[checks] command`, decision 29)
@@ -138,5 +139,5 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 
 - No toolbar, no gear icon. The one settings screen is **Qur > Settings…** (`Cmd+,`), the macOS place for it: Agents, Appearance (theme, accent, transparency, top bar, traffic lights), Editor (Vim mode, keys), Layout, and links to the settings files. Each of its settings is also a menu command or popover (View > Appearance, Edit > Vim Mode, View > Zen Mode, View > Peek Layout), and each change there saves the same way.
 - Peek header keeps only the Follow toggle and Live/To-do/Chat/Changes segments (layout B). Layout switching moves to the **View** menu and shortcut.
-- Merge/Discard keep their buttons only in the Changes view (handoff section 10), since they are the action of that view; they are also in the **Agent** menu.
+- Merge/Discard (and Pull Request…) keep their buttons only in the Changes view (handoff section 10), since they are the action of that view; they are also in the **Agent** menu.
 - The quick popovers stay: Theme… (picker), Accent Color…, Transparency… and Gaps… open in place without the settings screen.
