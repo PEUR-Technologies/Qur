@@ -39,7 +39,7 @@ impl Workspace {
             }
         });
         self._subs.push(sub);
-        let changes = cx.new(|cx| ChangesView::new(self.root.clone(), record.worktree.clone(), record.base.clone(), record.branch.clone(), cx));
+        let changes = cx.new(|cx| ChangesView::new(self.root.clone(), record.worktree.clone(), record.base.clone(), record.branch.clone(), cx).with_pr(record.pr_url.clone()));
         let id = record.id.clone();
         let sub = cx.subscribe_in(&changes, window, move |this, _, ev: &ChangesEvent, window, cx| this.on_changes_event(&id, ev, window, cx));
         self._subs.push(sub);
@@ -296,6 +296,10 @@ impl Workspace {
                 let id = a.read(cx).record.id.clone();
                 this.merge_task(&id, window, cx);
             }
+            AgentEvent::PullRequest => {
+                let id = a.read(cx).record.id.clone();
+                this.push_pull_request(&id, window, cx);
+            }
             AgentEvent::TurnChangedFiles => {
                 let id = a.read(cx).record.id.clone();
                 this.run_checks(&id, false, window, cx);
@@ -371,7 +375,7 @@ impl Workspace {
                         renamed: false,
                         in_root: false,
                         queued: Vec::new(),
-                        turns: Vec::new(), review: None,
+                        turns: Vec::new(), review: None, pr_url: None,
                     };
                     let debug_browser = std::env::var_os("QUR_DEBUG_BROWSER_URL").is_some();
                     match def.mode {
@@ -465,7 +469,7 @@ impl Workspace {
                 renamed: false,
                 in_root: true,
                 queued: Vec::new(),
-                turns: Vec::new(), review: None,
+                turns: Vec::new(), review: None, pr_url: None,
             };
             let id = record.id.clone();
             self.add_term_task(record, window, cx);
@@ -504,7 +508,7 @@ impl Workspace {
                         renamed: false,
                         in_root: false,
                         queued: Vec::new(),
-                        turns: Vec::new(), review: None,
+                        turns: Vec::new(), review: None, pr_url: None,
                     };
                     this.add_term_task(record, window, cx);
                     this.apply_look(window, cx);
@@ -757,8 +761,9 @@ impl Workspace {
         }
         let dirty = qur_worktree::is_dirty(&wt);
         let detail = format!(
-            "This stops the agent and deletes its worktree and branch {branch}.{}",
-            if dirty { " Its uncommitted changes will be lost." } else { "" }
+            "This stops the agent and deletes its worktree and branch {branch}.{}{}",
+            if dirty { " Its uncommitted changes will be lost." } else { "" },
+            self.pr_discard_note(&id, cx)
         );
         let answer = ask(window, PromptLevel::Warning, "Discard this task?", Some(&detail), &["Discard", "Cancel"], cx);
         let root = self.root.clone();

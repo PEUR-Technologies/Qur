@@ -18,6 +18,8 @@ use crate::look::Look;
 
 pub enum ChangesEvent {
     Merge,
+    /// Push the task's branch and open a pull request (pull_request.rs).
+    PullRequest,
     KeepWorking,
     Discard,
     /// Send these review comments to the agent as one prompt.
@@ -194,6 +196,11 @@ pub struct ChangesView {
     scroll: UniformListScrollHandle,
     refresh_task: Option<Task<()>>,
     pub merged: bool,
+    /// The task's pull request, once opened; and a push in progress or its
+    /// failure (text, is an error).
+    pub pr_url: Option<String>,
+    pub pr_busy: bool,
+    pub pr_note: Option<(String, bool)>,
     _subs: Vec<Subscription>,
 }
 
@@ -218,10 +225,18 @@ impl ChangesView {
             scroll: UniformListScrollHandle::new(),
             refresh_task: None,
             merged: false,
+            pr_url: None,
+            pr_busy: false,
+            pr_note: None,
             _subs: Vec::new(),
         };
         v.refresh(cx);
         v
+    }
+
+    pub fn with_pr(mut self, url: Option<String>) -> Self {
+        self.pr_url = url;
+        self
     }
 
     /// Show what one turn changed (the chat's View, Show Last Turn's Changes).
@@ -382,6 +397,11 @@ impl Render for ChangesView {
                         d.child(div().truncate().text_size(look.text(-2.)).text_color(look.c(ui.warning)).child(format!("⚠ would conflict with your branch: {names}{}", if self.conflicts.len() > 3 { "…" } else { "" })))
                     })
                     .when(self.merged, |d| d.child(div().text_size(look.text(-2.)).text_color(look.c(ui.success)).child("Merged into your branch.")))
+                    .children(self.pr_url.clone().map(|u| {
+                        let open = u.clone();
+                        div().id("changes-pr-url").truncate().cursor_pointer().underline().text_size(look.text(-2.)).text_color(look.c(ui.success)).child(format!("Pull request: {u}")).on_click(move |_, _, cx| cx.open_url(&open))
+                    }))
+                    .children(self.pr_note.clone().map(|(t, err)| div().truncate().text_size(look.text(-2.)).text_color(look.c(if err { ui.error } else { ui.text_muted })).child(t)))
                     .children(self.error.clone().map(|e| div().text_size(look.text(-2.)).text_color(look.c(ui.error)).child(e))),
             )
             .child(div().flex_1())
@@ -393,6 +413,10 @@ impl Render for ChangesView {
             .child(button("Refresh".into(), "changes-refresh", false).on_click(cx.listener(|v, _, _, cx| v.refresh(cx))))
             .child(button("Discard…".into(), "changes-discard", false).on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesEvent::Discard))))
             .child(button("Keep working".into(), "changes-keep", false).on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesEvent::KeepWorking))))
+            .child(match self.pr_url.clone() {
+                Some(u) => button("Open Pull Request".into(), "changes-pr", false).on_click(move |_, _, cx| cx.open_url(&u)),
+                None => button(if self.pr_busy { "Pushing…" } else { "Pull Request…" }.into(), "changes-pr", false).on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesEvent::PullRequest))),
+            })
             .child(button("Merge".into(), "changes-merge", true).on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesEvent::Merge))));
         let rows = self.rows();
         let count = rows.len();

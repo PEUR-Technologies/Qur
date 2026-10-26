@@ -79,7 +79,7 @@ impl Workspace {
                     renamed: false,
                     in_root: false,
                     queued: Vec::new(),
-                    turns: Vec::new(), review: None,
+                    turns: Vec::new(), review: None, pr_url: None,
                 };
                 this.add_term_task(record, window, cx);
                 // Show the tree without starting a terminal process.

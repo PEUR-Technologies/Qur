@@ -26,6 +26,7 @@ impl Workspace {
             ("Rename…", || Box::new(qur::RenameAgent), true, false),
             ("Review Changes", || Box::new(qur::ReviewChanges), true, false),
             ("Merge into My Branch", || Box::new(qur::Merge), !in_root, false),
+            ("Push and Open Pull Request…", || Box::new(qur::PushPullRequest), !in_root, false),
             ("Run Checks Now", || Box::new(qur::RunChecks), true, false),
             ("Run Project", || Box::new(qur::RunProject), true, false),
             ("Reveal in Finder", || Box::new(qur::RevealWorktree), true, false),

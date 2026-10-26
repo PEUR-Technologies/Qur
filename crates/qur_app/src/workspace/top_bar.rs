@@ -118,7 +118,23 @@ impl Workspace {
                     .on_click(cx.listener(|this, _, window, cx| this.project_switcher(&qur::ProjectSwitcher, window, cx))),
             )
             .child(div().flex_1())
-            .children(message.map(|m| div().flex_none().max_w(look.z(420.)).truncate().text_size(look.text(-1.)).text_color(look.c(ui.text_secondary)).child(m)))
+            .children(message.map(|m| {
+                let url = self.message_url.clone();
+                div()
+                    .id("flash")
+                    .flex_none()
+                    .max_w(look.z(420.))
+                    .truncate()
+                    .text_size(look.text(-1.))
+                    .text_color(look.c(ui.text_secondary))
+                    .child(m)
+                    .when_some(url, |d, url| {
+                        d.cursor_pointer()
+                            .underline()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(move |_, _, cx| cx.open_url(&url))
+                    })
+            }))
     }
 
     /// Close, minimize and zoom, drawn by Qur in the bar itself (decision 61):

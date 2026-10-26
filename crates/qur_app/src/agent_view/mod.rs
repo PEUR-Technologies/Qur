@@ -110,6 +110,8 @@ pub enum AgentEvent {
     Subagents,
     /// Changes view: merge this task's branch into the user's branch.
     Merge,
+    /// Changes view: push the task's branch and open a pull request.
+    PullRequest,
     /// Changes view: discard the task.
     Discard,
     /// A turn ended after changing files: run the project's checks.
@@ -396,9 +398,10 @@ impl AgentTask {
     #[allow(clippy::too_many_arguments)]
     pub fn new(root: PathBuf, record: TaskRecord, def: AgentDef, accent: Rgba, layout: Layout, wrap: bool, tab: usize, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let project_root = root.clone();
-        let changes = cx.new(|cx| ChangesView::new(root, record.worktree.clone(), record.base.clone(), record.branch.clone(), cx));
+        let changes = cx.new(|cx| ChangesView::new(root, record.worktree.clone(), record.base.clone(), record.branch.clone(), cx).with_pr(record.pr_url.clone()));
         let changes_sub = cx.subscribe_in(&changes, window, |this, _, ev: &ChangesEvent, window, cx| match ev {
             ChangesEvent::Merge => cx.emit(AgentEvent::Merge),
+            ChangesEvent::PullRequest => cx.emit(AgentEvent::PullRequest),
             ChangesEvent::Discard => cx.emit(AgentEvent::Discard),
             ChangesEvent::KeepWorking => {
                 let f = this.prompt.read(cx).focus.clone();

@@ -6,6 +6,7 @@ impl Workspace {
     pub(super) fn on_changes_event(&mut self, id: &str, ev: &ChangesEvent, window: &mut Window, cx: &mut Context<Self>) {
         match ev {
             ChangesEvent::Merge => self.merge_task(id, window, cx),
+            ChangesEvent::PullRequest => self.push_pull_request(id, window, cx),
             ChangesEvent::Discard => {
                 self.select(Some(Selected::TermTask(id.to_string())), window, cx);
                 self.discard_task(&qur::DiscardTask, window, cx);
