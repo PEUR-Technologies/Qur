@@ -7,6 +7,7 @@
 mod actions;
 mod checks;
 mod code;
+mod crash_notice;
 mod debug;
 mod diff_review;
 mod merge;
@@ -261,6 +262,8 @@ pub struct Workspace {
     message_timer: Option<Task<()>>,
     /// The top-bar message opens this when clicked (a pull request).
     message_url: Option<String>,
+    /// A crash report from an earlier run the user hasn't seen (top bar).
+    crash_notice: Option<PathBuf>,
     file_lists: HashMap<PathBuf, Vec<PathBuf>>,
     layout: Layout,
     _root_watcher: Option<qur_watch::Watcher>,
@@ -398,6 +401,7 @@ impl Workspace {
             message: None,
             message_timer: None,
             message_url: None,
+            crash_notice: crate::crash::take_unseen(),
             file_lists: HashMap::new(),
             layout: Layout::A,
             _root_watcher: None,
@@ -653,6 +657,7 @@ impl Render for Workspace {
                     self.start_task(0, p.to_string(), Vec::new(), plan, window, cx);
                 }
             }
+            crate::crash::debug_crash(cx);
             if std::env::var("QUR_BENCH").as_deref() == Ok("glow") {
                 self.bench_glow(window, cx);
             }
@@ -930,6 +935,7 @@ impl Render for Workspace {
                 }
             }))
             .child(frame)
+            .children(self.crash_notice_el(&look, cx))
             .children(crate::script::mark(|| "window".to_string()))
             // A text file opened from a chip in the New Agent Task dialog shows
             // over the dialog; any other code modal sits under the pickers.

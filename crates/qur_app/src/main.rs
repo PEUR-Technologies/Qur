@@ -10,6 +10,7 @@ mod browser_view;
 mod changes_view;
 mod commands;
 mod commit_msg;
+mod crash;
 mod dock;
 mod doctor;
 mod editor_view;
@@ -190,13 +191,9 @@ fn open_window(root: PathBuf, cx: &mut App) -> WindowHandle<Workspace> {
 
 fn main() {
     START.get_or_init(Instant::now);
-    // Crashes go to ~/Library/Logs/Qur/qur.log (Help > Show Logs): a bundled
-    // app has no terminal to print to.
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        log(&format!("panic: {info}\n{}", std::backtrace::Backtrace::force_capture()));
-        default_hook(info);
-    }));
+    // Crash reports next to qur.log (Help > Show Logs): a bundled app has
+    // no terminal to print to.
+    crash::install();
     // `qur doctor`: check the setup in the terminal, no window.
     if std::env::args().nth(1).as_deref() == Some("doctor") {
         std::process::exit(doctor::cli());

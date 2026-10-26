@@ -47,6 +47,7 @@ impl Workspace {
         let gaps = format!("on={} gap={} rounded={} radius={} border={} sidebar_w={}", u.gaps, u.gap, u.rounded, u.radius, u.tile_border, self.sidebar_w);
         let sidebar = format!("on={} mode={} side={} shown={} visible={} sections={}", self.sidebar, u.sidebar, u.sidebar_side, self.sidebar_shown, self.sidebar_visible(), u.sidebar_sections.join(","));
         let viewer = self.viewer.as_ref().map_or_else(|| "none".into(), |v| v.debug_state());
+        let crash = self.crash_notice.as_ref().and_then(|p| p.file_name()).map_or_else(|| "none".into(), |n| n.to_string_lossy().into_owned());
         let agents = self.agents.iter().map(|a| a.read(cx).debug_state()).collect::<Vec<_>>().join(" ");
         // The selected task's Changes view, and the changed files its heat counts as the agent's.
         let work = match &self.selected {
@@ -60,7 +61,7 @@ impl Workspace {
             _ => "none".into(),
         };
         format!(
-            "overlay={overlay} selected={selected} agents={{{agents}}} work={{{work}}} code={code} viewer={viewer} term={{{}}} git={{{vc}}} docks={{{docks}}} gaps={{{gaps}}} sidebar={{{sidebar}}}",
+            "overlay={overlay} selected={selected} crash={crash} agents={{{agents}}} work={{{work}}} code={code} viewer={viewer} term={{{}}} git={{{vc}}} docks={{{docks}}} gaps={{{gaps}}} sidebar={{{sidebar}}}",
             self.terms.read(cx).debug_state(cx)
         )
     }

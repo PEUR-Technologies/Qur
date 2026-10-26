@@ -168,9 +168,15 @@ impl Workspace {
     }
 
     pub(super) fn report_problem(&mut self, _: &qur::ReportProblem, _: &mut Window, cx: &mut Context<Self>) {
-        // Opens the browser; Qur itself makes no network call.
-        if let Err(e) = std::process::Command::new("/usr/bin/open").arg("https://github.com/PEUR-Technologies/Qur/issues/new").spawn() {
-            self.flash(format!("Couldn't open the browser: {e}"), cx);
+        // Opens the browser; Qur itself makes no network call, and a crash
+        // report is only named in the issue: it's selected in Finder for the
+        // user to attach if they want to.
+        let report = crate::crash::recent();
+        let url = crate::crash::issue_url(report.as_deref());
+        if let Some(p) = &report {
+            self.open_args(&["-R".as_ref(), p.as_os_str()], cx);
+            self.flash(format!("{} is selected in Finder: drag it into the issue to attach it", p.file_name().unwrap_or_default().to_string_lossy()), cx);
         }
+        self.open_args(&[url.as_ref()], cx);
     }
 }
