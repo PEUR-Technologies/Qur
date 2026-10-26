@@ -154,10 +154,13 @@ pub struct FindOptions {
 }
 
 mod commands;
+pub mod diff;
+pub mod encoding;
 mod find;
 #[cfg(test)]
 mod tests;
 mod history;
+pub mod large;
 mod text;
 pub mod vim;
 mod wrap;
@@ -165,7 +168,8 @@ mod wrap;
 use std::time::Instant;
 
 use find::FindState;
-use history::{Applied, History, Kind};
+use encoding::Encoding;
+use history::{Applied, History, Kind, Meta};
 use text::{byte_point, line_len, line_string};
 
 /// The editor model for one open file.
@@ -173,7 +177,14 @@ pub struct Editor {
     rope: Rope,
     path: Option<PathBuf>,
     crlf: bool,
+    /// How the file is stored (restored on save), and whether it starts with a BOM.
+    encoding: Encoding,
     bom: bool,
+    /// Chosen with Reopen with Encoding: reloads keep it instead of detecting.
+    forced: Option<(Encoding, bool)>,
+    /// Saving wouldn't give back the bytes that were read (bytes that didn't
+    /// decode, or a binary file's stray CRs): open it read-only.
+    lossy: bool,
     indent: String,
     version: u64,
     sels: Vec<Selection>,
@@ -248,26 +259,112 @@ impl Editor {
         Self::from_text("")
     }
 
-    /// Load a file. Detects line endings (LF/CRLF, preserved on save) and
-    /// indent unit (from content, else `default_indent`).
+    /// Load a file. Detects the encoding (`encoding::detect`; any bytes open,
+    /// Windows-1252 being the fallback), line endings (LF/CRLF) and the BOM,
+    /// all preserved on save, and the indent unit (from content, else
+    /// `default_indent`).
     pub fn open(path: &Path, default_indent: &str) -> std::io::Result<Self> {
+        Self::open_with(path, default_indent, None)
+    }
+
+    /// `open`, decoding as `forced` (Reopen with Encoding) instead of detecting.
+    pub fn open_with(path: &Path, default_indent: &str, forced: Option<(Encoding, bool)>) -> std::io::Result<Self> {
         let bytes = std::fs::read(path)?;
-        let raw = String::from_utf8(bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let (bom, raw) = match raw.strip_prefix('\u{feff}') {
-            Some(rest) => (true, rest),
-            None => (false, raw.as_str()),
-        };
-        let crlf_count = raw.matches("\r\n").count();
-        let lf_count = raw.matches('\n').count();
-        let crlf = crlf_count > 0 && crlf_count * 2 >= lf_count;
-        let text = text::normalize_newlines(raw);
+        let (encoding, bom) = forced.unwrap_or_else(|| encoding::detect(&bytes));
+        let (raw, lossless) = encoding::decode(&bytes, encoding);
+        let binary = encoding::is_binary(&bytes);
+        drop(bytes);
+        let (crlf, exact) = line_endings(&raw);
+        let text = text::normalize_newlines(&raw);
         let mut ed = Self::from_text(&text);
         ed.path = Some(path.to_path_buf());
         ed.crlf = crlf;
-        ed.bom = bom;
+        ed.encoding = encoding;
+        ed.bom = bom && encoding != Encoding::Windows1252;
+        ed.forced = forced;
+        // Mixed line endings in a text file are evened out on save, as they
+        // always were; in a binary file a CR is data.
+        ed.lossy = !lossless || (binary && !exact);
         ed.indent = detect_indent(&ed.rope).unwrap_or_else(|| default_indent.to_string());
         Ok(ed)
+    }
+
+    /// The file's text as `open` would read it now, in this buffer's encoding
+    /// (LF line endings), to compare with the buffer.
+    pub fn read_disk_text(&self) -> std::io::Result<String> {
+        let path = self.path.as_deref().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "untitled buffer"))?;
+        let bytes = std::fs::read(path)?;
+        let (raw, _) = encoding::decode(&bytes, self.encoding);
+        Ok(text::normalize_newlines(&raw).into_owned())
+    }
+
+    /// (encoding, BOM) the buffer saves in.
+    pub fn encoding(&self) -> (Encoding, bool) {
+        (self.encoding, self.bom)
+    }
+
+    /// The encoding Reopen with Encoding chose, if any (reloads keep it).
+    pub fn forced_encoding(&self) -> Option<(Encoding, bool)> {
+        self.forced
+    }
+
+    /// Decode as this on the next reload (`open_with(.., forced_encoding())`);
+    /// None detects again.
+    pub fn force_encoding(&mut self, forced: Option<(Encoding, bool)>) {
+        self.forced = forced;
+    }
+
+    /// Saving wouldn't reproduce the bytes read: keep the buffer read-only.
+    pub fn is_lossy(&self) -> bool {
+        self.lossy
+    }
+
+    /// Convert to LF (`crlf` false) or CRLF line endings on save: one undo
+    /// step, no text change. False when they already are.
+    pub fn set_line_endings(&mut self, crlf: bool) -> bool {
+        if self.crlf == crlf {
+            return false;
+        }
+        let before = self.meta();
+        self.crlf = crlf;
+        self.push_meta(before);
+        true
+    }
+
+    /// Convert to another encoding (saved in it from now on): one undo step,
+    /// no text change. Err names a char the encoding can't store; Ok(false)
+    /// when nothing changes.
+    pub fn set_encoding(&mut self, encoding: Encoding, bom: bool) -> Result<bool, char> {
+        let bom = bom && encoding != Encoding::Windows1252;
+        if (self.encoding, self.bom) == (encoding, bom) {
+            return Ok(false);
+        }
+        if let Some(c) = self.rope.chunks().find_map(|chunk| encoding::unencodable(chunk, encoding)) {
+            return Err(c);
+        }
+        let before = self.meta();
+        self.encoding = encoding;
+        self.bom = bom;
+        self.push_meta(before);
+        Ok(true)
+    }
+
+    fn meta(&self) -> Meta {
+        Meta { crlf: self.crlf, encoding: self.encoding, bom: self.bom }
+    }
+
+    fn set_meta(&mut self, m: Meta) {
+        self.crlf = m.crlf;
+        self.encoding = m.encoding;
+        self.bom = m.bom;
+    }
+
+    fn push_meta(&mut self, before: Meta) {
+        let after = self.meta();
+        let sels = (self.sels.clone(), self.primary);
+        let now = (self.now)();
+        self.history.push_meta(before, after, sels, now);
+        self.break_group = true;
     }
 
     pub fn from_text(text: &str) -> Self {
@@ -279,7 +376,10 @@ impl Editor {
             rope,
             path: None,
             crlf: false,
+            encoding: Encoding::Utf8,
             bom: false,
+            forced: None,
+            lossy: false,
             version: 0,
             sels: vec![Selection::caret(Point::default())],
             primary: 0,
@@ -360,14 +460,21 @@ impl Editor {
             let mut f = std::fs::File::create(&tmp)?;
             let mut w = std::io::BufWriter::new(&mut f);
             if self.bom {
-                w.write_all("\u{feff}".as_bytes())?;
+                w.write_all(&encoding::encode("", self.encoding, true).unwrap_or_default())?;
             }
+            let mut buf = Vec::new();
             for chunk in self.rope.chunks() {
-                if self.crlf {
-                    w.write_all(chunk.replace('\n', "\r\n").as_bytes())?;
-                } else {
+                let chunk = if self.crlf { std::borrow::Cow::Owned(chunk.replace('\n', "\r\n")) } else { std::borrow::Cow::Borrowed(chunk) };
+                if self.encoding == Encoding::Utf8 {
                     w.write_all(chunk.as_bytes())?;
+                    continue;
                 }
+                buf.clear();
+                encoding::encode_into(&chunk, self.encoding, &mut buf).map_err(|c| {
+                    let msg = format!("{} can't store {c:?} (U+{:04X}); convert it to UTF-8 first", encoding::label(self.encoding, self.bom), c as u32);
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, msg)
+                })?;
+                w.write_all(&buf)?;
             }
             w.flush()?;
             drop(w);
@@ -595,6 +702,19 @@ impl Editor {
         }
         let mut out = self.find_next();
         out.text_changed = true;
+        out
+    }
+
+    /// Replace whole lines `lines` (0-based, half-open; the end may be the
+    /// line count) with `text`, as one undo step of its own. The caret goes
+    /// to the start of the new text. Reverting a change hunk uses it.
+    pub fn replace_lines(&mut self, lines: Range<usize>, text: &str) -> Outcome {
+        let n = self.rope.len_lines();
+        let (a, b) = (self.rope.line_to_char(lines.start.min(n)), self.rope.line_to_char(lines.end.min(n)));
+        let text = text::normalize_newlines(text).into_owned();
+        self.break_group = true;
+        let out = self.commit(vec![Change::new(a, b.max(a), text, 0, self.primary)], Plan::Carets, Kind::Other);
+        self.break_group = true;
         out
     }
 
@@ -884,6 +1004,9 @@ impl Editor {
             self.apply_raw(a.start, end, &a.removed);
         }
         self.after_text_change();
+        if let Some((before, _)) = t.meta {
+            self.set_meta(before);
+        }
         self.set_sels(t.before.0.clone(), t.before.1);
         self.history.redo.push(t);
         self.break_group = true;
@@ -897,6 +1020,9 @@ impl Editor {
             self.apply_raw(a.start, end, &a.inserted);
         }
         self.after_text_change();
+        if let Some((_, after)) = t.meta {
+            self.set_meta(after);
+        }
         self.set_sels(t.after.0.clone(), t.after.1);
         self.history.undo.push(t);
         self.break_group = true;
@@ -955,6 +1081,18 @@ fn expand_replacement(f: &FindState, line: &str, start: usize, replacement: &str
         }
         _ => replacement.to_string(),
     }
+}
+
+/// (CRLF?, saving back reproduces the line endings exactly): CRLF when at
+/// least half the line breaks are CRLF; exact when there's no lone CR and
+/// every break is the winning kind.
+fn line_endings(raw: &str) -> (bool, bool) {
+    let crlf_count = raw.matches("\r\n").count();
+    let lf_count = raw.matches('\n').count();
+    let cr_count = raw.matches('\r').count();
+    let crlf = crlf_count > 0 && crlf_count * 2 >= lf_count;
+    let exact = cr_count == crlf_count && if crlf { crlf_count == lf_count } else { crlf_count == 0 };
+    (crlf, exact)
 }
 
 /// Most common indent step among the first 1000 lines; tabs win if more

@@ -106,17 +106,33 @@ type TitleCell = Arc<std::sync::Mutex<Option<String>>>;
 /// The PTY's input side, for answers the terminal owes the program.
 type Reply = Arc<std::sync::Mutex<Option<EventLoopSender>>>;
 
-/// The theme's terminal colors as last drawn, for color queries (OSC 10/11/4).
-static THEME_COLORS: std::sync::Mutex<Option<TerminalColors>> = std::sync::Mutex::new(None);
+/// The theme's terminal colors, for color queries (OSC 10/11/4). One per
+/// panel, set from its window's look, so each window answers with its own theme.
+type ColorsCell = Arc<std::sync::Mutex<Option<TerminalColors>>>;
 
 #[derive(Clone)]
-pub struct Listener(UnboundedSender<()>, TitleCell, Reply);
+pub struct Listener(UnboundedSender<()>, TitleCell, Reply, ColorsCell);
 
 impl Listener {
     fn reply(&self, text: String) {
         if let Some(s) = self.2.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             let _ = s.send(Msg::Input(text.into_bytes().into()));
         }
+    }
+
+    /// The color a query for `index` gets: 0–255 the palette, 256 or 259+ the
+    /// foreground, 257 the background, 258 the cursor. `None` before the
+    /// panel has its window's colors.
+    fn color_answer(&self, index: usize) -> Option<alacritty_terminal::vte::ansi::Rgb> {
+        let colors = self.3.lock().unwrap_or_else(|e| e.into_inner());
+        let t = colors.as_ref()?;
+        let v = match index {
+            i if i < 256 => indexed(i as u8, t),
+            257 => rgb(t.background),
+            258 => rgb(t.cursor),
+            _ => rgb(t.foreground),
+        };
+        Some(alacritty_terminal::vte::ansi::Rgb { r: (v >> 16) as u8, g: (v >> 8) as u8, b: v as u8 })
     }
 }
 
@@ -130,15 +146,7 @@ impl EventListener for Listener {
             // "What's your background?": programs such as Claude Code pick their
             // light or dark palette from this, so answer with the theme's colors.
             TermEvent::ColorRequest(index, format) => {
-                let colors = THEME_COLORS.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                if let Some(t) = colors {
-                    let v = match *index {
-                        i if i < 256 => indexed(i as u8, &t),
-                        257 => rgb(t.background),
-                        258 => rgb(t.cursor),
-                        _ => rgb(t.foreground),
-                    };
-                    let c = alacritty_terminal::vte::ansi::Rgb { r: (v >> 16) as u8, g: (v >> 8) as u8, b: v as u8 };
+                if let Some(c) = self.color_answer(*index) {
                     self.reply(format(c));
                 }
             }
@@ -208,10 +216,17 @@ pub fn shell() -> String {
 
 type Spawned = (Arc<FairMutex<Term<Listener>>>, EventLoopSender, i32, futures::channel::mpsc::UnboundedReceiver<()>);
 
-fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize, title: TitleCell) -> std::io::Result<Spawned> {
+/// Lines of scrollback for terminals opened from now on (`[terminal] scrollback`).
+static SCROLLBACK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(qur_config::DEFAULT_SCROLLBACK);
+
+pub fn set_scrollback(n: usize) {
+    SCROLLBACK.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize, title: TitleCell, colors: ColorsCell) -> std::io::Result<Spawned> {
     let (tx, rx) = unbounded();
     let reply = Reply::default();
-    let listener = Listener(tx, title, reply.clone());
+    let listener = Listener(tx, title, reply.clone(), colors);
     let (cols, lines) = (100, 12);
     // `env -u` strips vendor API keys so the CLIs use their own logins.
     let mut args = vec!["-u".into(), "ANTHROPIC_API_KEY".into(), "-u".into(), "OPENAI_API_KEY".into(), shell(), "-l".into()];
@@ -233,7 +248,7 @@ fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize, title: TitleCell) -> std:
             ("PATH".into(), qur_agents::login_path().into()),
         ]),
     };
-    let term = Arc::new(FairMutex::new(Term::new(TermConfig::default(), &Dims { cols, lines }, listener.clone())));
+    let term = Arc::new(FairMutex::new(Term::new(TermConfig { scrolling_history: SCROLLBACK.load(std::sync::atomic::Ordering::Relaxed), ..TermConfig::default() }, &Dims { cols, lines }, listener.clone())));
     let pty = tty::new(&opts, WindowSize { num_lines: lines as u16, num_cols: cols as u16, cell_width: 8, cell_height: 16 }, id as u64)?;
     let pid = pty.child().id() as i32;
     let ev = EventLoop::new(term.clone(), listener, pty, false, false)?;
@@ -303,6 +318,11 @@ impl Session {
         }
     }
 
+    /// The shell's pid (it leads the terminal's session).
+    pub fn pid(&self) -> i32 {
+        self.pid
+    }
+
     /// What the agent says it's working on (its terminal title), when that's
     /// a real description rather than the program's or shell's name.
     pub fn agent_title(&self) -> Option<String> {
@@ -331,6 +351,13 @@ impl Session {
 
     pub fn is_busy(&self) -> bool {
         self.last_output.is_some_and(|t| t.elapsed() < Duration::from_secs(2))
+    }
+
+    /// The program asked for bracketed paste: it's at an input line that
+    /// takes pasted text (an agent's prompt, a shell), not a menu where a
+    /// typed letter could pick an answer.
+    pub fn takes_paste(&self) -> bool {
+        self.term.lock().mode().contains(TermMode::BRACKETED_PASTE)
     }
 
     /// Note the selection just made (see `kept`).
@@ -523,6 +550,18 @@ pub struct TerminalPanel {
     /// Terminal's dock pane: with window gaps on, its panes are the tiles.
     /// Set by the workspace as it lays the stage out.
     pub standalone: std::cell::Cell<bool>,
+    /// Zen's bar is out (sliding or down), pushing the panes down: each
+    /// grid keeps the size it had with the bar away, pinned to its pane's
+    /// bottom with its top rows clipped. Resizing as the bar moved sent the
+    /// program a new size every few frames, and Claude Code redrew its input
+    /// box each time: the bottom of the terminal jiggled. Set by the workspace.
+    pub zen_hold: std::cell::Cell<bool>,
+    /// Each pane's grid size with zen's bar away: width, height.
+    rest_size: HashMap<usize, (Pixels, Pixels)>,
+    /// How far above its pane a held grid starts (mouse to cell).
+    grid_shift: HashMap<usize, Pixels>,
+    /// This window's terminal colors, shared with its sessions' listeners.
+    colors: ColorsCell,
 }
 
 impl EventEmitter<PanelEvent> for TerminalPanel {}
@@ -538,6 +577,9 @@ impl TerminalPanel {
             message: None,
             cell: (px(8.), px(16.)),
             pane_bounds: HashMap::new(),
+            zen_hold: std::cell::Cell::new(false),
+            rest_size: HashMap::new(),
+            grid_shift: HashMap::new(),
             selecting: false,
             scroll_px: px(0.),
             find: None,
@@ -548,7 +590,14 @@ impl TerminalPanel {
             glide: Motion::default(),
             glide_area: Rc::default(),
             resizing: None,
+            colors: ColorsCell::default(),
         }
+    }
+
+    /// The theme's terminal colors for this window (set as its look changes),
+    /// which its terminals answer color queries with.
+    pub fn set_colors(&self, colors: TerminalColors) {
+        *self.colors.lock().unwrap_or_else(|e| e.into_inner()) = Some(colors);
     }
 
     pub fn open(&mut self, cwd: &Path, kind: Kind, label: String, cx: &mut Context<Self>) -> Option<usize> {
@@ -559,7 +608,7 @@ impl TerminalPanel {
             Kind::Shell => None,
         };
         let title = TitleCell::default();
-        let (term, sender, pid, mut rx) = match spawn_pty(cwd, run.as_deref(), id, title.clone()) {
+        let (term, sender, pid, mut rx) = match spawn_pty(cwd, run.as_deref(), id, title.clone(), self.colors.clone()) {
             Ok(x) => x,
             Err(e) => {
                 self.message = Some(format!("terminal failed: {e}"));
@@ -711,6 +760,8 @@ impl TerminalPanel {
             None => {}
         }
         self.pane_bounds.remove(&s.id);
+        self.rest_size.remove(&s.id);
+        self.grid_shift.remove(&s.id);
         cx.emit(PanelEvent::Closed);
         cx.notify();
     }
@@ -1003,6 +1054,10 @@ impl TerminalPanel {
             _ => {}
         }
         let Some(t) = clip.text() else { return };
+        // "Copy Image" in a browser: its address comes first, the image behind it.
+        if crate::files::has_image_behind_text(&t) {
+            return self.write_active(vec![0x16], cx);
+        }
         let bracketed = self
             .active_session()
             .map(|s| s.term.lock().mode().contains(TermMode::BRACKETED_PASTE))
@@ -1044,11 +1099,14 @@ impl TerminalPanel {
     }
 
     fn grid_point(&self, p: gpui::Point<Pixels>, display_offset: usize) -> (TPoint, Side) {
-        let b = self.active_session().and_then(|s| self.pane_bounds.get(&s.id)).copied().unwrap_or_default();
+        let id = self.active_session().map(|s| s.id);
+        let b = id.and_then(|id| self.pane_bounds.get(&id)).copied().unwrap_or_default();
+        let shift = id.and_then(|id| self.grid_shift.get(&id)).copied().unwrap_or_default();
         let x = (p.x - b.left()).max(px(0.));
         let col = (x / self.cell.0).floor() as usize;
         let side = if (x / self.cell.0).fract() < 0.5 { Side::Left } else { Side::Right };
-        let row = ((p.y - b.top()).max(px(0.)) / self.cell.1).floor() as i32;
+        let row = ((p.y - b.top()).max(px(0.)) + shift) / self.cell.1;
+        let row = row.floor() as i32;
         (TPoint::new(Line(row - display_offset as i32), Column(col)), side)
     }
 
@@ -1394,6 +1452,9 @@ struct GridRow {
 }
 
 struct GridPrepaint {
+    /// Where the grid's first row is: the pane's top, or above it while zen
+    /// holds the grid's size (`TerminalPanel::zen_hold`).
+    top: Pixels,
     rows: Vec<GridRow>,
     cursor: Option<(usize, usize, CursorShape)>,
     has_content: bool,
@@ -1426,19 +1487,31 @@ impl Element for GridElement {
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) -> GridPrepaint {
         let look = Look::of(window, cx);
         let tc = look.theme.terminal.clone();
-        *THEME_COLORS.lock().unwrap_or_else(|e| e.into_inner()) = Some(tc.clone());
         let fs = look.z(look.code_size - 1.);
         let f = font(look.code_font.clone());
         let ts = window.text_system().clone();
         let cw = ts.advance(ts.resolve_font(&f), fs, 'm').map(|s| s.width).unwrap_or(px(7.));
         let lh = look.z(((look.code_size - 1.) * 1.3).round());
-        let cols = ((bounds.size.width / cw).floor() as usize).max(2);
-        let lines = ((bounds.size.height / lh).floor() as usize).max(1);
-        let mut out = GridPrepaint { rows: Vec::new(), cursor: None, has_content: false };
         let id = self.id;
+        // Zen's bar out: the size from before it came, bottom edges together.
+        let grid = self.panel.update(cx, |p, _| match p.rest_size.get(&id).copied() {
+            Some((w, h)) if p.zen_hold.get() && w == bounds.size.width && h > bounds.size.height => {
+                Bounds::new(point(bounds.left(), bounds.bottom() - h), size(w, h))
+            }
+            _ => {
+                if !p.zen_hold.get() {
+                    p.rest_size.insert(id, (bounds.size.width, bounds.size.height));
+                }
+                bounds
+            }
+        });
+        let cols = ((grid.size.width / cw).floor() as usize).max(2);
+        let lines = ((grid.size.height / lh).floor() as usize).max(1);
+        let mut out = GridPrepaint { top: grid.top(), rows: Vec::new(), cursor: None, has_content: false };
         self.panel.update(cx, |p, _| {
             p.cell = (cw, lh);
             p.pane_bounds.insert(id, bounds);
+            p.grid_shift.insert(id, bounds.top() - grid.top());
             crate::script::record(|| format!("term:{id}"), bounds);
             crate::script::record(|| format!("term-cell:{id}"), Bounds::new(bounds.origin, gpui::size(cw, lh)));
             let Some(s) = p.sessions.iter_mut().find(|s| s.id == id) else { return };
@@ -1535,7 +1608,7 @@ impl Element for GridElement {
         drop(term);
         for (i, (t, r)) in text.into_iter().zip(runs).enumerate() {
             let shaped = ts.shape_line(SharedString::from(t), fs, &r, None);
-            out.rows.push(GridRow { y: bounds.top() + lh * i as f32, text: shaped, bgs: std::mem::take(&mut bgs[i]), shapes: std::mem::take(&mut shapes[i]) });
+            out.rows.push(GridRow { y: grid.top() + lh * i as f32, text: shaped, bgs: std::mem::take(&mut bgs[i]), shapes: std::mem::take(&mut shapes[i]) });
         }
         out
     }
@@ -1569,7 +1642,7 @@ impl Element for GridElement {
                 row.text.paint(point(bounds.left(), row.y), lh, gpui::TextAlign::Left, None, window, cx).ok();
             }
             if let Some((r, c, shape)) = pre.cursor {
-                let origin = point(bounds.left() + cw * c as f32, bounds.top() + lh * r as f32);
+                let origin = point(bounds.left() + cw * c as f32, pre.top + lh * r as f32);
                 let q = match (focused, shape) {
                     (true, CursorShape::Beam) => fill(Bounds::new(origin, size(px(2.), lh)), crate::look::hsla(cursor_color)),
                     (true, CursorShape::Underline) => fill(Bounds::new(point(origin.x, origin.y + lh - px(2.)), size(cw, px(2.))), crate::look::hsla(cursor_color)),
@@ -2019,6 +2092,30 @@ fn shell_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_queries_answer_with_each_panels_own_theme() {
+        // Two windows' panels on themes with different backgrounds.
+        let themes = qur_theme::Registry::global().all();
+        let light = themes.iter().find(|t| t.appearance == qur_theme::Appearance::Light).expect("a light theme").terminal.clone();
+        let dark = themes.iter().find(|t| t.appearance == qur_theme::Appearance::Dark).expect("a dark theme").terminal.clone();
+        assert_ne!(rgb(light.background), rgb(dark.background));
+        let listener = |colors: &ColorsCell| Listener(unbounded().0, TitleCell::default(), Reply::default(), colors.clone());
+        let (a, b) = (ColorsCell::default(), ColorsCell::default());
+        let (la, lb) = (listener(&a), listener(&b));
+        // Nothing to answer before the panel has its window's colors.
+        assert!(la.color_answer(257).is_none());
+        *a.lock().unwrap() = Some(light.clone());
+        *b.lock().unwrap() = Some(dark.clone());
+        let hex = |c: alacritty_terminal::vte::ansi::Rgb| ((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32;
+        // OSC 11 (background), OSC 10 (foreground), OSC 4;1 (red), however the last drawn window looks.
+        assert_eq!(la.color_answer(257).map(hex), Some(rgb(light.background)));
+        assert_eq!(lb.color_answer(257).map(hex), Some(rgb(dark.background)));
+        assert_eq!(la.color_answer(256).map(hex), Some(rgb(light.foreground)));
+        assert_eq!(lb.color_answer(256).map(hex), Some(rgb(dark.foreground)));
+        assert_eq!(la.color_answer(1).map(hex), Some(indexed(1, &light)));
+        assert_eq!(lb.color_answer(1).map(hex), Some(indexed(1, &dark)));
+    }
 
     #[test]
     fn selection_survives_redraws_and_scrolling() {

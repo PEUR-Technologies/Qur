@@ -33,6 +33,9 @@ pub struct GitPanel {
     selected: Option<Pick>,
     diff: Vec<FileDiff>,
     message: Entity<TextInput>,
+    /// The rest of a suggested message (from the agent's turns), committed
+    /// under the field's subject line; dropped when the field is cleared.
+    body: Option<String>,
     scroll: UniformListScrollHandle,
     refreshing: Option<Task<()>>,
     error: Option<String>,
@@ -51,8 +54,9 @@ impl GitPanel {
         };
         let diff: Vec<String> = self.diff.iter().map(|d| format!("{}+{}-{}", d.path.display(), d.added, d.removed)).collect();
         format!(
-            "message={:?} head={} staged={} unstaged={} untracked={} selected={pick} diff=[{}]",
+            "message={:?} body={:?} head={} staged={} unstaged={} untracked={} selected={pick} diff=[{}]",
             self.message.read(cx).text,
+            self.body.as_deref().unwrap_or(""),
             s.head.as_deref().map(|h| &h[..h.len().min(8)]).unwrap_or("-"),
             s.staged.len(),
             s.unstaged.len(),
@@ -63,10 +67,13 @@ impl GitPanel {
 
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let message = cx.new(|cx| TextInput::new("Commit message (⌘↩ commit)", cx));
-        let sub = cx.subscribe_in(&message, window, |this, _, ev: &InputEvent, _, cx| {
-            if let InputEvent::Confirm { all: true, .. } = ev {
-                this.commit(cx)
+        let sub = cx.subscribe_in(&message, window, |this, input, ev: &InputEvent, _, cx| match ev {
+            InputEvent::Confirm { all: true, .. } => this.commit(cx),
+            InputEvent::Changed if this.body.is_some() && input.read(cx).text.trim().is_empty() => {
+                this.body = None;
+                cx.notify();
             }
+            _ => {}
         });
         let mut p = GitPanel {
             root,
@@ -74,6 +81,7 @@ impl GitPanel {
             selected: None,
             diff: Vec::new(),
             message,
+            body: None,
             scroll: UniformListScrollHandle::new(),
             refreshing: None,
             error: None,
@@ -187,8 +195,39 @@ impl GitPanel {
         self.commit(cx)
     }
 
+    /// Prefill the commit box with a generated message (subject in the
+    /// field, the rest under it), only when the field is empty.
+    pub fn suggest(&mut self, message: &str, cx: &mut Context<Self>) {
+        if !self.message.read(cx).text.trim().is_empty() {
+            return;
+        }
+        let (subject, body) = message.split_once("\n\n").unwrap_or((message, ""));
+        let subject = subject.lines().next().unwrap_or("").trim().to_string();
+        if subject.is_empty() {
+            return;
+        }
+        self.message.update(cx, |m, cx| m.set_text(&subject, cx));
+        self.body = Some(body.trim().to_string()).filter(|b| !b.is_empty());
+        cx.notify();
+    }
+
+    /// The whole message: the field's subject and the suggested body.
+    pub fn message(&self, cx: &App) -> String {
+        let subject = self.message.read(cx).text.trim();
+        match &self.body {
+            Some(b) if !subject.is_empty() => format!("{subject}\n\n{b}"),
+            _ => subject.to_string(),
+        }
+    }
+
+    pub fn clear_message(&mut self, cx: &mut Context<Self>) {
+        self.message.update(cx, |m, cx| m.set_text("", cx));
+        self.body = None;
+        cx.notify();
+    }
+
     fn commit(&mut self, cx: &mut Context<Self>) {
-        let msg = self.message.read(cx).text.trim().to_string();
+        let msg = self.message(cx);
         if msg.is_empty() {
             return cx.emit(GitEvent::Error("Write a commit message first".into()));
         }
@@ -199,7 +238,7 @@ impl GitPanel {
             let _ = this.update(cx, |p, cx| {
                 match r {
                     Ok(sha) => {
-                        p.message.update(cx, |m, cx| m.set_text("", cx));
+                        p.clear_message(cx);
                         cx.emit(GitEvent::Committed(sha));
                     }
                     Err(e) => cx.emit(GitEvent::Error(e)),
@@ -382,6 +421,27 @@ impl Render for GitPanel {
                     .border_t_1()
                     .border_color(look.c(ui.border))
                     .child(div().px(look.z(8.)).rounded(look.z(4.)).border_1().border_color(look.c(ui.border)).bg(look.c(ui.editor_bg)).child(self.message.clone()))
+                    .children(self.body.clone().map(|b| {
+                        div()
+                            .flex()
+                            .gap(look.z(6.))
+                            .px(look.z(8.))
+                            .text_size(look.text(-2.))
+                            .text_color(look.c(ui.text_muted))
+                            .child(div().flex_1().min_w(px(0.)).max_h(look.z(120.)).overflow_hidden().children(b.lines().map(|l| div().truncate().child(if l.is_empty() { " ".to_string() } else { l.to_string() })).collect::<Vec<_>>()))
+                            .child(
+                                div()
+                                    .id("drop-body")
+                                    .flex_none()
+                                    .cursor_pointer()
+                                    .hover(|d| d.text_color(look.c(ui.text)))
+                                    .child("×")
+                                    .on_click(cx.listener(|p, _, _, cx| {
+                                        p.body = None;
+                                        cx.notify();
+                                    })),
+                            )
+                    }))
                     .child(
                         div()
                             .id("commit")

@@ -410,7 +410,9 @@ impl Workspace {
             terminals_part.push(self.section_drag("terminals", "TERMINALS", self.section_header("TERMINALS".into(), look), look, cx).into_any_element());
             terminals_part.extend(shells);
         }
-        let git_part = vec![
+        // A folder without git has no Source Control; the empty window shows
+        // its terminals only.
+        let git_part = if !self.repo { Vec::new() } else { vec![
             self.section_drag("git", "SOURCE CONTROL", self.section_header("SOURCE CONTROL".into(), look), look, cx).into_any_element(),
             {
                 let (branch, n) = self
@@ -430,7 +432,7 @@ impl Workspace {
                     .on_click(cx.listener(|this, _, window, cx| this.show_git(&qur::GitPanel, window, cx)))
                     .into_any_element()
             },
-        ];
+        ] };
         let files_header = div()
             .id("files-toggle")
             .cursor_pointer()
@@ -450,8 +452,8 @@ impl Workspace {
                 this.files_open = !this.files_open;
                 cx.notify();
             }));
-        let mut files_part = vec![self.section_drag("files", files_label, files_header, look, cx).into_any_element()];
-        if self.files_open {
+        let mut files_part = if self.home { Vec::new() } else { vec![self.section_drag("files", files_label, files_header, look, cx).into_any_element()] };
+        if self.files_open && !self.home {
             files_part.extend(tree.map(|t| div().flex_1().min_h(px(0.)).flex().flex_col().child(t).into_any_element()));
         }
         let mut parts = [("agents", agents_part), ("terminals", terminals_part), ("git", git_part), ("files", files_part)];
@@ -538,8 +540,9 @@ impl Workspace {
 
     /// Whether the sidebar takes its column now: on (`Cmd+B`), and with
     /// auto-hide only while slid in.
+    /// The empty window has one only while it has terminals.
     pub(super) fn sidebar_visible(&self) -> bool {
-        self.sidebar && (self.config.ui.sidebar != "auto" || self.sidebar_shown)
+        self.sidebar && (self.config.ui.sidebar != "auto" || self.sidebar_shown) && !(self.home && self.shells.is_empty())
     }
 
     pub(super) fn sidebar_right(&self) -> bool {

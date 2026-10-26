@@ -122,6 +122,12 @@ fn full_turn_with_permission_and_clean_shutdown() {
     assert!(t.contains(&"chose allow".to_string()), "{t:?}");
     assert!(t.contains(&"fs refused -32601".to_string()), "unsupported requests get -32601: {t:?}");
     assert!(evs.iter().any(|e| matches!(e, Event::Warning(w) if w.contains("fs/read_text_file"))));
+    // The result's usage comes as an update of the turn's session.
+    let evs = events_until(&mut rx, 5, |e| matches!(e, Event::Update { update: SessionUpdate::TurnUsage(_), .. }));
+    assert!(
+        matches!(evs.last(), Some(Event::Update { session_id, update: SessionUpdate::TurnUsage(u) }) if session_id == "s1" && u.total == 140 && u.output == 30),
+        "{evs:?}"
+    );
 
     let pgid = client.pid();
     assert!(!group_gone(pgid));
@@ -235,6 +241,9 @@ fn load_session_replays_history() {
     let evs = events_until(&mut rx, 10, |e| matches!(e, Event::Update { update: SessionUpdate::AgentMessage(_), .. }));
     assert!(evs.iter().any(|e| matches!(e, Event::Update { update: SessionUpdate::UserMessage(c), .. } if c.text == "earlier question")));
     assert_eq!(texts(&evs), ["earlier answer"]);
+    // The replay is over once `Loaded` comes, right after the last replayed update.
+    let rest = events_until(&mut rx, 10, |e| matches!(e, Event::Loaded(_)));
+    assert!(matches!(rest.as_slice(), [Event::Loaded(id)] if *id == "s1"), "{rest:?}");
     client.shutdown(Duration::from_secs(2));
 }
 

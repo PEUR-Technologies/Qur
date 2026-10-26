@@ -159,3 +159,19 @@ On battery the display runs at 60 Hz, so scroll and theme frames pace at ~16.7 m
 **No outbound connections from Qur itself:** `lsof -nP -a -i -p <qur pid>` listed no sockets at 5, 12 and 19 s, with an ACP agent working, an Agent Terminal open and project search running. Agents and the Browser's WebKit are separate processes.
 
 **`qur doctor`** on the owner's Mac: macOS 27.0, git 2.54, settings folder writable, config.toml and agents.toml fine, Claude Code over ACP (`@agentclientprotocol/claude-agent-acp 0.94.0`, ACP v1, adapter pinned 0.94.0); exit 0 in 1.4 s.
+
+## v0.1.6 (2026-10-26, MacBook Air M5)
+
+| Metric | Target | v0.1.6 | |
+|---|---|---|---|
+| Release binary / `Qur.app` | < 40 MB | 30.9 MB / 29 MB (zip 9.0 MB) | ✅ |
+| Cold start to first frame (3 runs) | < 250 ms | 67–71 ms | ✅ |
+| Idle footprint, small project (3 runs) | < 80 MB | 70 MB | ✅ |
+| File viewer on a 1600×3065 PNG: open / after closing | | 98 MB / 92–93 MB (2 of 3 runs; one 127); v0.1.6 before the fix: 142 / ~140 | |
+| Claude agent processes, 3 agents done → released after `idle_release` | | 669 MB → 0 MB (outside Qur's process) | |
+
+`budget.sh 3` wasn't rerun: it starts three tasks with the same prompt, so two fail on the same worktree name and the "3 agents" figure measures one agent. The fix is on the unreleased memory-checks branch.
+
+## Memory checks and readout
+
+`scripts/memcheck.sh` opens and closes the code modal, the file viewer (images, a binary file) and terminals with filled scrollback, and fails when physical footprint doesn't come back (median of 3 runs; thresholds in the script). It needs a window, so it isn't in CI: run it by hand on an unlocked screen. About and `qur doctor` show Qur's own footprint plus its agents' and terminals' (sampled on demand, never polled). About 33 MB of "Owned physical footprint (unmapped) (graphics)" stays dirty after closing any modal (Metal command buffers); not investigated.

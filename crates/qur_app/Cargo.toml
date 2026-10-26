@@ -34,14 +34,16 @@ smallvec = "1"
 serde_json = "1"
 # Agent chat Markdown (MIT). No default features: no CLI, no SIMD.
 pulldown-cmark = { version = "0.13", default-features = false }
-# Only to read an agent image's size before GPUI loads it (chat rows are
-# measured once). The same crate and formats GPUI already builds.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# To read an image's size before it's drawn (chat rows are measured once),
+# to fit pasted images to what the agent takes, and to decode the images
+# Qur draws at about the size they're drawn (files.rs). The same crate and
+# formats GPUI already builds.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Dock badge and the alert chime (M6). Same crates GPUI and qur_browser
 # already link; only these AppKit classes are added.
 objc2 = "0.6.5"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSString"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSResponder", "NSSound"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSPasteboard", "NSResponder", "NSSound"] }
 

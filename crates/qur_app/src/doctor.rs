@@ -30,6 +30,7 @@ pub fn run() -> Vec<Check> {
         Ok(()) => check(Level::Ok, "Settings folder", qur_config::qur_home().display().to_string()),
         Err(e) => check(Level::Fail, "Settings folder", format!("{}: {e}", qur_config::qur_home().display())),
     });
+    out.push(worktrees());
     out.push(match qur_config::Config::load().1 {
         None => check(Level::Ok, "config.toml", "reads fine"),
         Some(e) => check(Level::Fail, "config.toml", e),
@@ -58,6 +59,17 @@ pub fn run() -> Vec<Check> {
         });
     }
     out
+}
+
+/// What Qur's task worktrees take on disk (`<qur home>/worktrees`).
+fn worktrees() -> Check {
+    let dir = qur_config::qur_home().join("worktrees");
+    let folders: usize = std::fs::read_dir(&dir).map(|rd| rd.filter_map(Result::ok).filter_map(|p| std::fs::read_dir(p.path()).ok()).map(|rd| rd.count()).sum()).unwrap_or(0);
+    if folders == 0 {
+        return check(Level::Ok, "Worktrees", "none on disk");
+    }
+    let size = crate::files::human_size(qur_worktree::cleanup::disk_use(&dir));
+    check(Level::Ok, "Worktrees", format!("{size} in {folders} folder{} (Agent > Clean Up Worktrees… frees leftovers)", if folders == 1 { "" } else { "s" }))
 }
 
 /// A CLI's own sign-in, as Qur's agents will see it (API keys removed).
@@ -256,8 +268,26 @@ pub fn cli() -> i32 {
     println!("{}", render(&checks));
     let fails = checks.iter().filter(|c| c.level == Level::Fail).count();
     let warns = checks.iter().filter(|c| c.level == Level::Warn).count();
+    memory();
     println!("\n{}", if fails > 0 { format!("{fails} problem(s), {warns} warning(s)") } else if warns > 0 { format!("OK, {warns} warning(s)") } else { "All good".to_string() });
     if fails > 0 { 1 } else { 0 }
+}
+
+/// Memory of every running Qur: its own footprint and its agents' and
+/// terminals' (sampled once, now). Information only: never a problem.
+fn memory() {
+    let qurs = crate::mem::other_qurs();
+    if qurs.is_empty() {
+        println!("\nMemory: Qur isn't running");
+        return;
+    }
+    for pid in qurs {
+        let r = crate::mem::report(pid, &Default::default());
+        println!("\nMemory of Qur (pid {pid}): {}", r.summary());
+        for line in r.lines() {
+            println!("  {line}");
+        }
+    }
 }
 
 #[cfg(test)]

@@ -6,9 +6,10 @@
 //! and tests are deterministic. The blocking git helpers live in [`git`].
 //!
 //! A project-folder agent shares its folder with you ([`Heatmap::set_shared`]): there
-//! only files the agent touched glow, and a write counts as the agent's only while it
-//! plausibly made it. Writes Qur itself made (editor saves, Replace All) are never the
-//! agent's anywhere: see [`OwnWrites`].
+//! only files the agent touched glow, and a write counts as the agent's only when its tool
+//! calls name the file, or (shell commands, Agent Terminals) while it plausibly made it.
+//! Writes Qur itself made (editor saves, Replace All) are never the agent's anywhere: see
+//! [`OwnWrites`].
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -19,14 +20,31 @@ mod own;
 pub use git::{diff_stats, full_scan};
 pub use own::{OWN_WINDOW, OwnWrites, own_writes};
 
+/// Whether the agent shares its folder with you, and how its writes are told from yours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Shared {
+    /// Its own worktree: every write during a turn is the agent's.
+    #[default]
+    No,
+    /// The project folder, structured (ACP) agent: a turn write is its when an edit tool
+    /// names the file (locations or diffs), or when a shell command (or a tool of unknown
+    /// kind) is running or just finished and the file isn't yours.
+    Tools,
+    /// The project folder, Agent Terminal (no tool calls, no paths): a write is its while
+    /// the terminal is busy (the caller's `turn_active`), unless the file is yours.
+    Busy,
+}
+
 /// How long Reading glows after its tool completes, and Editing after the last write.
 pub const FADE: Duration = Duration::from_millis(1500);
 /// Diff stat recompute delay after the last write to a file.
 pub const RECOMPUTE: Duration = Duration::from_millis(150);
 /// Heat level cap.
 pub const MAX_LEVEL: u8 = 4;
-/// Shared folders: a write during a turn is the agent's while one of its tools is running
-/// or finished at most this long ago.
+/// Shared folders: a tool still accounts for writes this long after it finished (the
+/// watcher reports a write ~50-300 ms after it lands; Claude names an edit's file 0.5-0.9 s
+/// after the call), and a write no tool accounts for waits this long for an edit tool to
+/// name its file.
 pub const TOOL_GRACE: Duration = Duration::from_secs(3);
 
 /// Per-file state, in priority order (lowest first, so `max` picks the strongest).
@@ -106,6 +124,14 @@ impl Tool {
     fn edits(&self) -> bool {
         matches!(self.kind, Some(ToolKind::Edit | ToolKind::Delete | ToolKind::Move))
     }
+    /// Running, or finished within [`TOOL_GRACE`].
+    fn recent(&self, now: Instant) -> bool {
+        !self.status.done() || self.completed_at.is_some_and(|c| now < c + TOOL_GRACE)
+    }
+    /// Could write any file without naming it (shell commands; a kind never reported).
+    fn writes_anywhere(&self) -> bool {
+        matches!(self.kind, None | Some(ToolKind::Execute))
+    }
 }
 
 #[derive(Default)]
@@ -142,7 +168,10 @@ pub struct Heatmap {
     /// tool id -> rel path -> line (from ACP locations).
     lines: HashMap<String, HashMap<PathBuf, u32>>,
     /// The worktree is the project folder, shared with you (see `set_shared`).
-    shared: bool,
+    shared: Shared,
+    /// Shared folders: turn writes no tool accounts for yet, while an edit tool hasn't
+    /// named its files (rel path, when). Claimed by `on_tool`, dropped after [`TOOL_GRACE`].
+    held: Vec<(PathBuf, Instant)>,
 }
 
 impl Heatmap {
@@ -154,33 +183,43 @@ impl Heatmap {
             files: HashMap::new(),
             focus: None,
             lines: HashMap::new(),
-            shared: false,
+            shared: Shared::No,
+            held: Vec::new(),
         }
     }
 
     /// The agent works in the project folder, alongside you (and maybe your other
     /// editors). Then only files the agent touched (named by its tools, or written while
     /// it was plausibly the writer) show heat and diff stats: your own uncommitted
-    /// changes stay quiet. A write during a turn counts as the agent's only while it has
-    /// no tool calls at all (Agent Terminals: the caller's `turn_active` is the signal)
-    /// or one of them is running or finished within [`TOOL_GRACE`].
-    pub fn set_shared(&mut self, on: bool) {
-        self.shared = on;
+    /// changes stay quiet. How a turn write is attributed: see [`Shared`].
+    pub fn set_shared(&mut self, mode: Shared) {
+        self.shared = mode;
     }
 
     pub fn shared(&self) -> bool {
-        self.shared
-    }
-
-    /// Shared folders: could a write right now be the agent's?
-    fn agent_plausible(&self, now: Instant) -> bool {
-        self.tools.is_empty()
-            || self.tools.values().any(|t| !t.status.done() || t.completed_at.is_some_and(|c| now < c + TOOL_GRACE))
+        self.shared != Shared::No
     }
 
     /// Steady states (diff stats) show for this file.
     fn owned(&self, f: &File) -> bool {
-        !self.shared || f.touches > 0
+        self.shared == Shared::No || f.touches > 0
+    }
+
+    /// An edit tool, running or just finished, names this file.
+    fn named_by_edit(&self, rel: &Path, now: Instant) -> bool {
+        self.tools.values().any(|t| t.edits() && t.recent(now) && t.paths.iter().any(|p| p == rel))
+    }
+
+    /// Is a turn write to `rel` the agent's? `yours` = the file is yours (open with
+    /// unsaved changes in Qur). See [`Shared`].
+    fn agents_write(&self, rel: &Path, yours: bool, now: Instant) -> bool {
+        match self.shared {
+            Shared::No => true,
+            Shared::Busy => !yours,
+            Shared::Tools => {
+                self.named_by_edit(rel, now) || (!yours && self.tools.values().any(|t| t.writes_anywhere() && t.recent(now)))
+            }
+        }
     }
 
     pub fn worktree(&self) -> &Path {
@@ -232,6 +271,14 @@ impl Heatmap {
         // Each (tool, file) pair is one touch.
         for r in &added {
             self.files.entry(r.clone()).or_default().touches += 1;
+        }
+        // An edit tool named its file late (Claude): the write it made, seen already, glows.
+        if self.tools[id].edits() && !added.is_empty() {
+            let claimed: Vec<(PathBuf, Instant)> = self.held.extract_if(.., |(r, _)| added.contains(r)).collect();
+            for (r, at) in claimed {
+                let f = self.files.entry(r).or_default();
+                f.turn_write = f.turn_write.max(Some(at));
+            }
         }
         let tool = &self.tools[id];
         let (reads, edits, done, completed_at) = (tool.reads(), tool.edits(), tool.status.done(), tool.completed_at);
@@ -303,23 +350,40 @@ impl Heatmap {
     /// diff-stat recompute 150 ms after its last write. `.git/` paths are ignored. Existing
     /// directories only get the recompute (git expands them); they don't glow or take focus.
     /// Pass Qur's own writes (see [`OwnWrites`]) with `turn_active = false`. In a shared
-    /// folder a turn write also needs the agent to be plausibly writing (`set_shared`).
+    /// folder a turn write also has to be the agent's (see [`Shared`]).
     pub fn on_fs_change(&mut self, abs_paths: &[PathBuf], turn_active: bool, now: Instant) {
-        let turn_active = turn_active && (!self.shared || self.agent_plausible(now));
+        self.on_fs_change_with(abs_paths, turn_active, |_| false, now);
+    }
+
+    /// [`Heatmap::on_fs_change`], where `yours(abs)` says a file is yours (open with unsaved
+    /// changes in Qur): in a shared folder a write to it is the agent's only when one of its
+    /// edit tools names it.
+    pub fn on_fs_change_with(&mut self, abs_paths: &[PathBuf], turn_active: bool, yours: impl Fn(&Path) -> bool, now: Instant) {
+        self.held.retain(|(_, t)| now < *t + TOOL_GRACE);
         for abs in abs_paths {
             let Some(rel) = self.rel(abs) else { continue };
             if rel.starts_with(".git") {
                 continue;
             }
             let is_dir = abs.is_dir();
-            let f = self.files.entry(rel.clone()).or_default();
-            f.due = Some(now + RECOMPUTE);
+            self.files.entry(rel.clone()).or_default().due = Some(now + RECOMPUTE);
             if !turn_active || is_dir {
                 continue;
             }
+            let mine = self.shared != Shared::No && yours(abs);
+            if !self.agents_write(&rel, mine, now) {
+                // Claude names an edit's file after the call: hold the write until it does.
+                let unnamed_edit = self.tools.values().any(|t| t.edits() && t.recent(now) && t.paths.is_empty());
+                if self.shared == Shared::Tools && !mine && unnamed_edit {
+                    self.held.push((rel, now));
+                }
+                continue;
+            }
+            let named = self.shared == Shared::Tools && self.named_by_edit(&rel, now);
+            let f = self.files.entry(rel.clone()).or_default();
             // A burst of writes (or the write an ACP edit just made) is one touch.
             let in_window = f.turn_write.is_some_and(|t| now < t + FADE);
-            let by_tool = !f.editing.is_empty();
+            let by_tool = !f.editing.is_empty() || named;
             if !in_window && !by_tool {
                 f.touches += 1;
             }
@@ -357,6 +421,17 @@ impl Heatmap {
             Some(f) => f.stat = stat,
             None if stat.is_some() => self.files.entry(rel.to_path_buf()).or_default().stat = stat,
             None => {}
+        }
+    }
+
+    /// Every diff stat at once (a full scan, e.g. after the base moved): files missing
+    /// from `stats` are now the same as base.
+    pub fn replace_stats(&mut self, stats: Vec<(PathBuf, DiffStat)>) {
+        for f in self.files.values_mut() {
+            f.stat = None;
+        }
+        for (rel, s) in stats {
+            self.set_stat(&rel, Some(s));
         }
     }
 

@@ -20,7 +20,7 @@ mod turns;
 mod tests;
 
 pub use conflict::{Conflict, Resolution, find_conflicts, resolve};
-pub use diff::{DiffLine, FileDiff, FileStatus, Hunk, LineKind, MAX_LINES_PER_FILE, diff_totals, file_diff, task_diff};
+pub use diff::{DiffLine, FileDiff, FileStatus, Hunk, LineKind, MAX_LINES_PER_FILE, diff_totals, file_at, file_diff, task_diff};
 pub use merge::{
     MergeOutcome, abort_merge, commit_all, conflicted_files, finish_merge, is_merging, merge_clean, precheck,
     start_conflict_merge,

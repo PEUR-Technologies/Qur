@@ -45,6 +45,7 @@ impl LivePane {
         let sub = cx.subscribe_in(&monitor, window, |this, _, ev: &MonitorEvent, _, cx| match ev {
             MonitorEvent::Changed => this.sync(cx),
             MonitorEvent::Files(paths) => this.on_files(paths, cx),
+            MonitorEvent::BaseMoved => {}
         });
         let accent = monitor.read(cx).accent;
         let mut p = LivePane { monitor, agent, accent, editor: None, current: None, follow: true, taken_over: false, editing: false, wrap, tab, _sub: sub };
@@ -95,6 +96,12 @@ impl LivePane {
     }
 
     fn show(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        // Binaries and huge files (build output, a growing log) stay out of
+        // Live: any bytes now open as text, but Live would read them whole.
+        const LIVE_MAX: u64 = 50 << 20;
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > LIVE_MAX) || qur_editor::encoding::file_is_binary(&path).unwrap_or(true) {
+            return;
+        }
         match EditorView::load(&path) {
             Ok(loaded) => {
                 let (wrap, tab) = (self.wrap, self.tab);
@@ -107,6 +114,22 @@ impl LivePane {
             }
         }
         cx.notify();
+    }
+
+    /// Idle release: drop the editor (the file's text, highlighting, undo)
+    /// unless you've edited it here. `wake` opens the same file again.
+    pub fn release(&mut self, cx: &mut Context<Self>) {
+        if self.editor.as_ref().is_some_and(|e| !e.read(cx).is_dirty()) {
+            self.editor = None;
+        }
+    }
+
+    pub fn wake(&mut self, cx: &mut Context<Self>) {
+        if self.editor.is_none()
+            && let Some(p) = self.current.clone()
+        {
+            self.show(p, cx);
+        }
     }
 
     fn on_files(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {

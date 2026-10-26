@@ -306,6 +306,9 @@ pub enum Event {
     Exited { code: Option<i32>, stderr_tail: String },
     /// A malformed message, or a request Qur doesn't handle (answered with -32601).
     Warning(String),
+    /// `session/load` was answered (or failed): every update it replayed came
+    /// before this in the stream, so later updates are new work.
+    Loaded(SessionId),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -326,10 +329,37 @@ pub enum SessionUpdate {
     /// A subagent the agent started (Claude's Agent/Task tool): announced, renamed
     /// or changed state. Its own updates arrive under `id` as the session.
     Subagent { id: SessionId, title: Option<String>, state: Option<String> },
+    /// Not sent as a `session/update`: the `usage` of a turn's
+    /// `session/prompt` result, passed on as an update right before the
+    /// turn's `Pending` resolves.
+    TurnUsage(TurnUsage),
     /// `session_info_update` with a title (the agent named the session).
     /// Updates carrying only `_meta`, or a null title, come as `Other`.
     SessionTitle(String),
     Other { kind: String, raw: Value },
+}
+
+/// What one turn used: `usage` in a `session/prompt` result (an unstable
+/// ACP field; claude-agent-acp fills it in). Tokens read from and written to
+/// the prompt cache count in `total`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TurnUsage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub total: u64,
+}
+
+impl TurnUsage {
+    /// None when the result carries no usage, or only zeros.
+    pub fn parse(result: &Value) -> Option<Self> {
+        let u = result.get("usage").filter(|u| u.is_object())?;
+        let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+        let (input, output, cache_read, cache_write) = (n("inputTokens"), n("outputTokens"), n("cachedReadTokens"), n("cachedWriteTokens"));
+        let total = u.get("totalTokens").and_then(Value::as_u64).unwrap_or(input + output + cache_read + cache_write);
+        (total > 0).then_some(TurnUsage { input, output, cache_read, cache_write, total })
+    }
 }
 
 /// One session setting the agent offers (mode, model, thinking…): a

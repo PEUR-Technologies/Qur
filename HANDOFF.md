@@ -2,7 +2,7 @@
 
 Read this first when you pick the project up, whether you're a person or a Claude session. It covers where things stand, the rules, how to work on the code, and what's next. Keep it current: update **Status** and **Next** at the end of every session.
 
-Last updated: 2026-10-26, release v0.1.5. All milestones M0–M7 are done, plus the 2026-10-25 improvements (decisions 49–58) and the 2026-10-26 window and pane work (decisions 59–61). The newest build is installed at `/Applications/Qur.app`.
+Last updated: 2026-10-26, release v0.1.6. All milestones M0–M7 are done, plus the 2026-10-25 improvements (decisions 49–58), the 2026-10-26 window and pane work (decisions 59–61) and v0.1.6 (decisions 62–70). The newest build is installed at `/Applications/Qur.app`.
 
 ## What Qur is
 
@@ -24,7 +24,7 @@ Agents are first-class. The sidebar lists agents as buttons. Each agent works in
 
 ## Status: what's built
 
-All milestones are on `main`. There are 259 tests (`cargo test --release --workspace`), all passing; clippy is clean with `-D warnings`; `scripts/handcheck.sh` passes 58 scripted hand checks.
+All milestones are on `main`. There are 359 tests (`cargo test --release --workspace`), all passing; clippy is clean with `-D warnings`; `scripts/handcheck.sh` passes 125 scripted hand checks.
 
 | Milestone | What | Decisions |
 |---|---|---|
@@ -45,6 +45,7 @@ All milestones are on `main`. There are 259 tests (`cargo test --release --works
 | README (owner, PR #1) | README shortened to visuals (`docs/images/window.svg`, `flow.svg`, `numbers.svg`); the full guide moved to `docs/guide.md` | — |
 | 2026-10-25 improvements (v0.1.4) | Turn checkpoints and Rewind; Go to Symbol, Expand/Shrink Selection, `keymap.toml`, IME marked text; nested ignores in the watcher, deleted-file rows, own-save heat attribution; Appearance submenu; terminal names; chat text size; CI and scripted input (`handcheck.sh`); chat polish (Find in Chat, grouped tool calls, permission queue, Allow All Pending, Copy Chat as Markdown); cross-vendor second-opinion review; window gaps; Settings screen (`Cmd+,`); `workspace/` and `agent_view/` split into modules | 49–58 |
 | 2026-10-26 window and panes (v0.1.5) | No window shadow with gaps; zen and gaps together, zen's bar easing the content down; the bar zooms (never below 32 pt) with Qur's own traffic lights; Chrome-style sidebar (always / auto-hide / hidden, left or right, sections reordered by dragging); dock rearranging like macOS tiling (drop preview, nearest-edge targets, whole-pane drags, one + menu, × always clickable) with panes gliding into place, split terminals too; the Browser steps aside and zen holds still during drags | 59–61 |
+| 2026-10-26 v0.1.6 | Files and images in the chat and a file viewer; images decoded to their drawn size; idle ACP agents release their processes; turns and Rewind for Agent Terminals; plan mode with commentable plans; tokens and cost in the header; Push and Open Pull Request; inline diff review in the code modal; Notepad++-style file handling (encodings, hex, large files); closed files freed; chats on disk and after a restart; commit messages from turns; local crash reports; Clean Up Worktrees; a window without a project; Reveal in Finder / Copy Path; memory readout and `memcheck.sh`; per-window terminal colors, Copy Image from a browser, Vim `G`, project-folder agent diffs and heat; zen's bar no longer jiggles terminals | 62–69 |
 
 Latest numbers (`docs/budget.md`, M7 table, measured on battery): app 25 MB, first frame 113 ms, idle 73 MB, 3 agents 129 MB, glow 81 ms, keystroke p99 2.0 ms, search 51 ms. `lsof` shows no network sockets in Qur's own process.
 
@@ -55,6 +56,7 @@ Latest numbers (`docs/budget.md`, M7 table, measured on battery): app 25 MB, fir
 - **Hand checks and the real mouse:** `handcheck.sh`'s drags mix with the real pointer's moves over the window, so leave the mouse still while it runs (the `dock` and `sidebar` drag checks fail at random otherwise).
 - **Window gaps:** that a click in a gap never falls through to the window behind (the root paints alpha 1/255; raise it to 2/255 in `Look::root_bg` if it does).
 - **Typing that scripts can't do:** IME composition (Japanese, Chinese, Korean; press-and-hold accents), `Ctrl+Shift+Cmd+→/←`, a key rebound in `keymap.toml`.
+- **v0.1.6 looks and hands-on:** pasting Finder files, a screenshot and a browser's Copy Image into an ACP prompt; dropping files on it; chips, thumbnails and the file viewer; the plan view, header token readout and Plan first chip; the Agent Terminal turn strip; the Changes view's Pull Request button; the diff gutter and peek; the encoding/line-ending header, hex view and large-file view; the crash notice; Clean Up Worktrees; the empty window; zen's bar over Claude Code (the input box should stay still). A real `gh pr create` on GitHub, and Codex for plan mode and usage, were never run.
 - **Terminal paste:** an image (Cmd+V sends Ctrl+V to Claude), copied files, and files dragged onto a terminal (scripted runs would overwrite the clipboard).
 - **Alerts:** the chime being audible, and notifications in the installed app.
 - **Codex as reviewer:** Codex isn't installed on the dev Mac, so only Claude reviewing Claude ran; check that `codex-acp` offers a read-only mode.
@@ -115,8 +117,8 @@ Where things are stored on the owner's Mac:
 ```sh
 source ~/.cargo/env
 cargo build --release -p qur_app && target/release/qur ~/some/project   # no argument = last project
-cargo test --release --workspace            # 259 tests
-scripts/handcheck.sh [check ...]            # 58 scripted hand checks (-l lists them); unlocked session
+cargo test --release --workspace            # 359 tests
+scripts/handcheck.sh [check ...]            # 125 scripted hand checks (-l lists them); unlocked session
 target/release/qur doctor                   # setup checks, exit 1 on any problem
 scripts/bundle.sh [--zip]                   # target/release/Qur.app (ad-hoc signed); then cp -R to /Applications
 scripts/budget.sh 3                         # the budget, incl. glow and 3 real agents; unlocked screen
@@ -136,18 +138,16 @@ Scripted runs (all with a scratch `QUR_HOME`):
 
 1. **Look at the screen** (the list above), ideally with the owner.
 2. **Distribution:** Developer ID signing and notarization need the owner's Apple Developer account (`docs/signing.md`); until then a downloaded copy has to be allowed in System Settings > Privacy & Security.
-3. **Needs the owner's OK** (costs usage or depends on the adapter): Plan mode with commentable plans.
+3. **Re-measure 3 agents** with `scripts/budget.sh 3` (its prompts now differ; the old 129 MB was probably one agent).
 4. **On hold (owner's notes):** a window background image or GIF with blur and readable text.
 5. **Known gaps:**
    - **qur_git:** `root` must be the top of the checkout; `diff --cc` entries are skipped; a change to only the final newline shows no marker; submodules and fsmonitor are untested; a gpgsign passphrase prompt could block commits.
    - **Browser:** iframes and closed shadow roots can't be inspected; React 19 has no `_debugSource` (use `data-qur-source`); keyboard text selection isn't captured; page JavaScript can see `window.__qur`.
-   - **Agents:** a project-folder agent's heat is a heuristic (a tool running or finished within 3 s, or the Agent Terminal busy), so your edits from another editor in that window can still glow. Its Changes view diffs against HEAD at the time it started. Turn lines aren't redrawn after a restart (the chat isn't saved). Ghost rows for deleted files appear only in a task's tree.
-   - **Vim:** `G` lands on the empty line after a trailing newline; real Vim stops on the last real line (the `motions` test expects Qur's behaviour; owner to decide).
+   - **Agents:** a project-folder Agent Terminal's heat still uses the busy rule, so your writes from another editor while it's busy can glow. A restored chat's images are blank frames that open their file (a pasted image in the temp folder may be gone). Ghost rows for deleted files appear only in a task's tree. Claude Code's permission prompts go quiet, so one terminal turn can split into several Qur turns.
+   - **Vim:** a count before the operator (`3dG`) still goes to the last line.
    - **Review:** models are listed only for the task's own agent; one reviewer per task.
-   - **Transparency:** `THEME_COLORS`, used to answer terminal color queries, is process-wide, so two windows with different themes answer with the last one drawn.
    - **Builds:** never share one `CARGO_TARGET_DIR` between worktrees: cargo hands one worktree's crates to another and builds stale or wrong binaries. Give each worktree its own (an APFS clone with `cp -c -R target …` is instant), and after a suspicious build, `touch` the crate sources.
 
 ## Open questions for the owner
 
 - Trademark clearance for "Qur" hasn't been done (the README says so).
-- Plan mode next? And the Vim `G` behaviour.

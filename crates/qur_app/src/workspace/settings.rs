@@ -30,9 +30,12 @@ impl Workspace {
             line_height: self.config.editor.line_height,
             theme: theme.clone(),
             tiles: crate::look::Tiles::from_config(&self.config.ui),
+            show_whitespace: self.config.editor.show_whitespace,
         };
         window.set_background_appearance(look.background_appearance());
         Look::set(window, look, cx);
+        // This window's terminals answer color queries with its theme.
+        self.terms.read(cx).set_colors(theme.terminal.clone());
         // Agent accents follow the theme's palette (unless agents.toml overrides).
         let n = theme.accents.len();
         let mut slot = 0;
@@ -60,13 +63,14 @@ impl Workspace {
     pub fn reload_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (config, err) = Config::load();
         self.config = config;
+        crate::terminal::set_scrollback(self.config.terminal.scrollback);
         Docks::load(&self.config, cx);
         self.project = ProjectSettings::load(&self.project_id);
         if let Some(e) = err {
             self.flash(e, cx);
         }
         let wrap = self.config.editor.soft_wrap;
-        for b in &self.buffers.list {
+        for b in self.buffers.loaded_vec() {
             b.update(cx, |b, cx| b.set_soft_wrap(wrap, cx));
             let vim = self.config.keys.vim;
             b.update(cx, |b, cx| b.set_vim(vim, cx));
@@ -76,7 +80,8 @@ impl Workspace {
     }
 
     pub(super) fn write_setting(&mut self, project_scope: bool, key: &str, value: Option<Value>, cx: &mut Context<Self>) {
-        let path = if project_scope { qur_config::project_settings_path(&self.project_id) } else { qur_config::config_path() };
+        // The empty window has no project: its changes go to all projects.
+        let path = if project_scope && !self.home { qur_config::project_settings_path(&self.project_id) } else { qur_config::config_path() };
         if let Err(e) = qur_config::write_key(&path, key, value) {
             self.flash(format!("Couldn't save {}: {e}", path.display()), cx);
         }
@@ -205,7 +210,7 @@ impl Workspace {
         let custom = Docks::get(cx, dock::Kind::Acp) != dock::Dock::preset(dock::Kind::Acp, preset) || Docks::get(cx, dock::Kind::Terminal) != dock::Dock::preset(dock::Kind::Terminal, preset);
         let (hue, brightness) = self.preview_tune.unwrap_or((self.config.ui.accent_hue, self.config.ui.accent_brightness));
         setup_view::Current {
-            project: self.project_name(),
+            project: if self.home { String::new() } else { self.project_name() },
             theme: self.preview_theme.clone().unwrap_or(eff.theme),
             theme_is_project: eff.theme_is_project,
             opacity: eff.opacity.clamp(qur_theme::MIN_OPACITY, 1.0),
@@ -440,6 +445,11 @@ const CONFIG_TEMPLATE: &str = r#"# Qur settings. Saved changes apply right away.
 # line_height = 1.5
 # soft_wrap = true
 # tab_width = 4
+# show_whitespace = false   # spaces as ·, tabs as →, line ends as ¬ (View > Show Whitespace)
+# large_file_mb = 50        # bigger files open read-only, paged from disk (hex for binaries)
+
+[terminal]
+# scrollback = 5000         # lines kept per terminal (new terminals); about 2.4 KB a line
 
 [ui]
 # font_size = 13

@@ -220,14 +220,20 @@ pub struct TaskRecord {
     /// quit or a crash doesn't lose them (sent when the task next starts).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued: Vec<QueuedMessage>,
-    /// ACP turns with their checkpoints (oldest first): what each changed,
-    /// and Rewind. Trees are pinned under `refs/qur/turns/<id>/<n>/…`.
+    /// Turns with their checkpoints (oldest first): what each changed, and
+    /// Rewind. ACP turns run from prompt to turn end; an Agent Terminal's
+    /// from busy to quiet (only those that changed files are kept). Trees are
+    /// pinned under `refs/qur/turns/<id>/<n>/…`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub turns: Vec<Turn>,
     /// A second-opinion reviewer on this task (Review Agent's Work…): a
     /// read-only session in the same worktree. Dropped with the task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewLink>,
+    /// The pull request opened for this task's branch (Push and Open Pull
+    /// Request…), so it isn't opened twice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
 }
 
 /// The reviewer attached to a task: which agent and model, what it reviews,
@@ -251,8 +257,8 @@ pub struct ReviewLink {
     pub created: u64,
 }
 
-/// One ACP turn's checkpoints: the worktree's tree when the prompt was sent
-/// and when the turn ended.
+/// One turn's checkpoints: the worktree's tree when the prompt was sent (an
+/// Agent Terminal: when it went busy) and when the turn ended (went quiet).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Turn {
     /// 1, 2, 3… within the task (never reused, also after a Rewind).
@@ -274,6 +280,15 @@ pub struct Turn {
 }
 
 impl TaskRecord {
+    /// What its changes are measured against. A worktree task: the commit it started
+    /// from (its branch is what Merge brings over). A project-folder agent: your current
+    /// `HEAD`, resolved at each diff, since you commit its work yourself and a commit made
+    /// since it started is no longer a change. One turn's own changes come from that
+    /// turn's checkpoints (`turns`), not from this.
+    pub fn diff_base(&self) -> &str {
+        if self.in_root { "HEAD" } else { &self.base }
+    }
+
     /// The newest turn that can still be rewound or viewed.
     pub fn last_turn(&self) -> Option<&Turn> {
         self.turns.iter().rev().find(|t| !t.rewound)
@@ -299,6 +314,9 @@ pub struct QueuedMessage {
     pub context: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    /// Files pasted or dropped into the prompt (sent as links).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -309,6 +327,15 @@ pub struct TaskStore {
 
 pub fn tasks_path(project_id: &str) -> PathBuf {
     qur_config::qur_home().join("projects").join(format!("{project_id}.tasks.toml"))
+}
+
+/// Saved ACP chats: one folder per task (format: qur_app's `agent_view/history.rs`).
+pub fn chats_dir(project_id: &str) -> PathBuf {
+    qur_config::qur_home().join("projects").join(format!("{project_id}.chats"))
+}
+
+pub fn chat_dir(project_id: &str, task_id: &str) -> PathBuf {
+    chats_dir(project_id).join(task_id)
 }
 
 pub fn worktrees_dir(project_id: &str) -> PathBuf {
@@ -395,7 +422,7 @@ mod tests {
             in_root: false,
             queued: vec![
                 QueuedMessage { text: "then run the tests\nand fix them".into(), ..Default::default() },
-                QueuedMessage { text: "look".into(), mentions: vec![wt.join("a.rs")], context: vec!["<div>".into()], labels: vec!["div.nav".into()] },
+                QueuedMessage { text: "look".into(), mentions: vec![wt.join("a.rs")], context: vec!["<div>".into()], labels: vec!["div.nav".into()], files: vec![PathBuf::from("/tmp/shot.pdf")] },
             ],
             turns: vec![
                 Turn { n: 1, start: "aa".into(), end: Some("bb".into()), files: 2, added: 12, removed: 4, rewound: true },
@@ -409,6 +436,7 @@ mod tests {
                 session_id: Some("r1".into()),
                 created: 2,
             }),
+            pr_url: Some("https://github.com/acme/proj/pull/7".into()),
         });
         let body = toml_edit::ser::to_string_pretty(&s).unwrap();
         let back: TaskStore = toml_edit::de::from_str(&body).unwrap();
@@ -423,8 +451,9 @@ mod tests {
         // No reviewer: nothing written, and it reads back the same.
         let mut plain = s.clone();
         plain.tasks[0].review = None;
+        plain.tasks[0].pr_url = None;
         let body = toml_edit::ser::to_string_pretty(&plain).unwrap();
-        assert!(!body.contains("review"), "{body}");
+        assert!(!body.contains("review") && !body.contains("pr_url"), "{body}");
         assert_eq!(toml_edit::de::from_str::<TaskStore>(&body).unwrap(), plain);
     }
 

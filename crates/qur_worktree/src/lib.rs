@@ -6,6 +6,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub mod cleanup;
+
 pub fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new("git").arg("-C").arg(root).args(args).output().map_err(|e| format!("git: {e}"))?;
     if out.status.success() {
@@ -17,6 +19,15 @@ pub fn git(root: &Path, args: &[&str]) -> Result<String, String> {
 
 pub fn is_repo(root: &Path) -> bool {
     git(root, &["rev-parse", "--is-inside-work-tree"]).as_deref() == Ok("true")
+}
+
+/// Make a plain folder a git repository whose first commit holds its files
+/// (agents' worktrees start from a commit). Respects a .gitignore already
+/// there; uses the user's own git identity. On request only (the user asked).
+pub fn init_repo(root: &Path) -> Result<(), String> {
+    git(root, &["init", "-q"])?;
+    git(root, &["add", "-A"])?;
+    git(root, &["commit", "-q", "--allow-empty", "-m", "Initial commit"]).map(|_| ())
 }
 
 /// "Fix the navbar on mobile!" -> "fix-the-navbar-on-mobile". ASCII only,
@@ -286,6 +297,32 @@ mod tests {
         git(&d, &["add", "-A"]).unwrap();
         git(&d, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]).unwrap();
         d
+    }
+
+    #[test]
+    fn init_plain_folder() {
+        let d = std::env::temp_dir().join(format!("qur-wt-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("a.txt"), "a\n").unwrap();
+        std::fs::write(d.join(".gitignore"), "secret.env\n").unwrap();
+        std::fs::write(d.join("secret.env"), "x\n").unwrap();
+        assert!(!is_repo(&d));
+        // The test machine's identity may be unset: give this repo one first.
+        git(&d, &["init", "-q"]).unwrap();
+        git(&d, &["config", "user.email", "t@t"]).unwrap();
+        git(&d, &["config", "user.name", "t"]).unwrap();
+        git(&d, &["config", "commit.gpgsign", "false"]).unwrap();
+        init_repo(&d).unwrap();
+        assert!(is_repo(&d));
+        let files = git(&d, &["ls-files"]).unwrap();
+        assert_eq!(files.lines().collect::<Vec<_>>(), [".gitignore", "a.txt"]);
+        // Worktrees work from it now.
+        let trees = std::env::temp_dir().join(format!("qur-wt-init-trees-{}", std::process::id()));
+        let c = create(&d, &trees, "claude", "t").unwrap();
+        assert!(c.path.join("a.txt").exists());
+        let _ = std::fs::remove_dir_all(&trees);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

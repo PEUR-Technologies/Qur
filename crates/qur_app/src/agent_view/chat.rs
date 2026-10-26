@@ -18,6 +18,8 @@ impl AgentTask {
         if let Some(run) = tool_run(&self.chat, n).filter(|r| r.len() >= 2) {
             self.list.remeasure_items(run.start..n);
         }
+        // A long chat: its oldest rows move to disk.
+        self.spill_check();
     }
 
     /// Find in Chat counts matches again before it next draws.
@@ -66,26 +68,68 @@ impl AgentTask {
         self.chat_changed();
     }
 
-    /// An image or link block from a message: its own chat row.
-    pub(super) fn push_media(&mut self, media: Option<Media>) {
+    /// An image or link block from a message: its own chat row. An image
+    /// is saved to the temp folder (click opens it) and decoded at twice
+    /// the size it's drawn, both off the main thread; the chat keeps only
+    /// that and the file's path.
+    pub(super) fn push_media(&mut self, media: Option<Media>, cx: &mut Context<Self>) {
         match media {
             Some(Media::Image { mime, data }) => match gpui::ImageFormat::from_mime_type(&mime) {
                 Some(f) => {
-                    // The size now: GPUI decodes later, after the row is measured.
-                    let size = image::ImageReader::new(std::io::Cursor::new(&data))
-                        .with_guessed_format()
-                        .ok()
-                        .and_then(|r| r.into_dimensions().ok())
-                        .filter(|(w, h)| *w > 0 && *h > 0);
-                    match size {
-                        Some(size) => self.push(ChatItem::Image(Arc::new(gpui::Image::from_bytes(f, data)), size)),
-                        None => self.push(ChatItem::Notice("[image that couldn't be read]".into())),
-                    }
+                    // The size now, from the header: the row is measured once.
+                    let Some((w, h)) = crate::files::image_size(&data) else {
+                        return self.push(ChatItem::Notice("[image that couldn't be read]".into()));
+                    };
+                    let path = crate::files::temp_image_path("image", f);
+                    self.push(ChatItem::Image(None, (w, h), path.clone()));
+                    // Drawn at most 480 high (see `render_item`).
+                    let drawn_w = w as f32 * (480. / h as f32).min(1.);
+                    let (max_w, max_h) = ((drawn_w * 2.).ceil() as u32, 960);
+                    let to = path.clone();
+                    let work = cx.background_executor().spawn(async move {
+                        std::fs::write(&to, &data).ok();
+                        crate::files::thumbnail(&data, max_w, max_h)
+                    });
+                    cx.spawn(async move |this, cx| {
+                        let Some(thumb) = work.await else { return };
+                        this.update(cx, |t, cx| {
+                            if let Some(ChatItem::Image(slot, ..)) = t.chat.iter_mut().find(|c| matches!(c, ChatItem::Image(None, _, p) if *p == path)) {
+                                *slot = Some(thumb);
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
                 }
                 None => self.push(ChatItem::Notice(format!("[{mime} image]"))),
             },
             Some(Media::Link { uri, name }) => self.push(ChatItem::Link { uri, name }),
             None => {}
+        }
+    }
+
+    /// The images and files attached to a message, as a row under it. The
+    /// row keeps thumbnails and paths, not the images: a pasted image or a
+    /// screenshot is written to the temp folder (off the main thread) so
+    /// clicking it opens the file.
+    pub(super) fn push_sent(&mut self, out: &Outgoing, cx: &mut Context<Self>) {
+        let mut row = Vec::new();
+        for i in &out.images {
+            let path = match &i.path {
+                Some(p) => p.clone(),
+                None => {
+                    let p = crate::files::temp_image_path("paste", i.image.format);
+                    let (img, to) = (i.image.clone(), p.clone());
+                    cx.background_executor().spawn(async move { std::fs::write(to, img.bytes()).ok() }).detach();
+                    p
+                }
+            };
+            row.push(Sent::Image(i.thumb.clone(), crate::files::image_size(i.image.bytes()), path));
+        }
+        row.extend(out.files.iter().cloned().map(Sent::File));
+        if !row.is_empty() {
+            self.push(ChatItem::Files(row));
         }
     }
 
@@ -218,13 +262,29 @@ impl AgentTask {
                 .into_any_element(),
             // At its own size, at most 480 high and never wider than the
             // chat; the aspect ratio keeps the height right when it shrinks.
-            ChatItem::Image(image, (w, h)) => {
+            // Click shows it full size. A blank frame of its size until
+            // it's decoded.
+            ChatItem::Image(thumb, (w, h), path) => {
                 let (w, h) = (*w as f32, *h as f32);
                 let width = w * (480. / h).min(1.);
+                let preview = Preview::File(path.clone());
+                let frame = match thumb {
+                    Some(t) => img(t.clone()).w_full().aspect_ratio(w / h).rounded(look.z(4.)).border_1().border_color(look.c(ui.border)).into_any_element(),
+                    None => div().w_full().aspect_ratio(w / h).rounded(look.z(4.)).border_1().border_color(look.c(ui.border)).bg(look.c(ui.panel_bg)).into_any_element(),
+                };
                 pad(div())
-                    .child(img(image.clone()).w(look.z(width)).max_w_full().aspect_ratio(w / h).rounded(look.z(4.)).border_1().border_color(look.c(ui.border)))
+                    .child(
+                        div()
+                            .id(("image", ix))
+                            .w(look.z(width))
+                            .max_w_full()
+                            .cursor_pointer()
+                            .child(frame)
+                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(AgentEvent::Preview(preview.clone())))),
+                    )
                     .into_any_element()
             }
+            ChatItem::Files(files) => pad(div()).pt(px(0.)).child(self.sent_row(ix, files, look, cx)).into_any_element(),
             ChatItem::Link { uri, name } => {
                 let target = uri.clone();
                 pad(div())
@@ -253,6 +313,28 @@ impl AgentTask {
             }
             ChatItem::Failure(f) => pad(div()).child(self.failure_callout(ix, f, look, hl, cx)).into_any_element(),
             ChatItem::Turn(n) => pad(div()).child(self.turn_line(ix, *n, look, cx)).into_any_element(),
+            ChatItem::Earlier => {
+                let n = self.history.hidden;
+                pad(div())
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .id("show-earlier")
+                            .relative()
+                            .px(look.z(10.))
+                            .py(look.z(3.))
+                            .rounded(look.z(4.))
+                            .cursor_pointer()
+                            .text_size(look.text(-1.))
+                            .text_color(look.c(ui.text_secondary))
+                            .hover(|d| d.bg(look.c(ui.hover_bg)).text_color(look.c(ui.text)))
+                            .child(format!("Show earlier messages ({n} more)"))
+                            .children(crate::script::mark(|| "show-earlier".into()))
+                            .on_click(cx.listener(|t, _, _, cx| t.show_earlier(cx))),
+                    )
+                    .into_any_element()
+            }
             // Two or more calls in a row are one group: a summary line
             // ("Read 4 files, ran 2 commands ▸") that unfolds to the calls.
             // Folded, a call still shows while it runs, failed, waits for
@@ -269,6 +351,57 @@ impl AgentTask {
                 div().w_full().flex().flex_col().child(self.group_header(run, open, look, cx)).children(row).into_any_element()
             }
         }
+    }
+
+    /// A message's attachments: images as thumbnails (at most 96 high), files
+    /// as chips. Click shows one: the viewer, or the code modal for text.
+    fn sent_row(&self, ix: usize, files: &[Sent], look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = &look.theme.ui;
+        div().flex().flex_wrap().gap(look.z(6.)).children(files.iter().enumerate().map(|(i, f)| {
+            let (preview, el) = match f {
+                Sent::Image(thumb, size, path) => {
+                    let (w, h) = size.map_or((96., 96.), |(w, h)| (w as f32, h as f32));
+                    let height = h.min(96.);
+                    let width = (w * height / h).min(320.);
+                    let el = match thumb {
+                        Some(t) => img(t.clone())
+                            .w(look.z(width))
+                            .h(look.z(height))
+                            .object_fit(gpui::ObjectFit::Cover)
+                            .rounded(look.z(4.))
+                            .border_1()
+                            .border_color(look.c(ui.border))
+                            .into_any_element(),
+                        None => div().w(look.z(width)).h(look.z(height)).rounded(look.z(4.)).border_1().border_color(look.c(ui.border)).bg(look.c(ui.panel_bg)).into_any_element(),
+                    };
+                    (Preview::File(path.clone()), el)
+                }
+                Sent::File(p) => {
+                    let el = div()
+                        .flex()
+                        .items_center()
+                        .gap(look.z(6.))
+                        .px(look.z(8.))
+                        .py(look.z(2.))
+                        .rounded(look.z(4.))
+                        .border_1()
+                        .border_color(look.c(ui.border))
+                        .bg(look.c(ui.panel_bg))
+                        .text_size(look.text(-1.))
+                        .text_color(look.c(ui.text_secondary))
+                        .hover(|d| d.text_color(look.c(ui.text)).border_color(look.c(ui.border_strong)))
+                        .child(div().flex_none().text_color(look.c(ui.text_muted)).child("▤"))
+                        .child(div().max_w(look.z(260.)).truncate().child(crate::files::chip_name(p)))
+                        .into_any_element();
+                    (Preview::File(p.clone()), el)
+                }
+            };
+            div()
+                .id(SharedString::from(format!("sent-{ix}-{i}")))
+                .cursor_pointer()
+                .child(el)
+                .on_click(cx.listener(move |_, _, _, cx| cx.emit(AgentEvent::Preview(preview.clone()))))
+        }))
     }
 
     /// One tool call's row: kind, title, counts, status, and its body when

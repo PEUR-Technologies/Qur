@@ -18,12 +18,16 @@ use crate::look::Look;
 
 pub enum ChangesEvent {
     Merge,
+    /// Push the task's branch and open a pull request (pull_request.rs).
+    PullRequest,
     KeepWorking,
     Discard,
     /// Send these review comments to the agent as one prompt.
     SendComments(String),
     /// Open a file (absolute path) in the code modal at a line.
     Open(PathBuf, Option<u32>),
+    /// Rewind to before this turn (the turn strip's Rewind…; asks first).
+    Rewind(u32),
 }
 
 #[derive(Clone)]
@@ -32,6 +36,19 @@ pub struct Comment {
     pub line: u32,
     pub quote: String,
     pub text: String,
+}
+
+/// The line-comment field's hint (the Changes view and plan comments).
+pub const COMMENT_PLACEHOLDER: &str = "Comment for the agent… (↩ add, esc cancel)";
+
+/// Line comments as one message for the agent: `intro`, then each comment
+/// numbered with where it is, the line's text and what you wrote.
+pub fn comments_prompt<'a>(intro: &str, comments: impl IntoIterator<Item = (String, &'a str, &'a str)>) -> String {
+    let mut s = format!("{intro}\n\n");
+    for (i, (at, quote, text)) in comments.into_iter().enumerate() {
+        s.push_str(&format!("{}. `{at}` — `{}`\n   {text}\n\n", i + 1, quote.trim()));
+    }
+    s
 }
 
 /// One visual row of a diff list.
@@ -176,8 +193,14 @@ pub struct TurnFilter {
 
 pub struct ChangesView {
     pub worktree: PathBuf,
-    /// Showing one turn's changes instead of the whole task's.
+    /// Showing one turn's changes instead of the whole task's. Any task with turn
+    /// checkpoints can show one (`show_turn`); today only ACP agents record them.
     pub turn: Option<TurnFilter>,
+    /// The task's turns for the strip under the header (Agent Terminals,
+    /// which have no chat to put turn lines in). Empty: no strip.
+    turns: Vec<qur_agents::Turn>,
+    /// The whole task's changes are against this (`TaskRecord::diff_base`): a commit,
+    /// or `HEAD` (resolved at each refresh) for an agent in the project folder.
     base: String,
     pub files: Vec<FileDiff>,
     pub totals: (u32, u32),
@@ -194,6 +217,13 @@ pub struct ChangesView {
     scroll: UniformListScrollHandle,
     refresh_task: Option<Task<()>>,
     pub merged: bool,
+    /// The diff was let go while out of sight (`release`); `wake` reloads it.
+    released: bool,
+    /// The task's pull request, once opened; and a push in progress or its
+    /// failure (text, is an error).
+    pub pr_url: Option<String>,
+    pub pr_busy: bool,
+    pub pr_note: Option<(String, bool)>,
     _subs: Vec<Subscription>,
 }
 
@@ -204,6 +234,7 @@ impl ChangesView {
         let mut v = ChangesView {
             worktree,
             turn: None,
+            turns: Vec::new(),
             base,
             files: Vec::new(),
             totals: (0, 0),
@@ -218,10 +249,19 @@ impl ChangesView {
             scroll: UniformListScrollHandle::new(),
             refresh_task: None,
             merged: false,
+            released: false,
+            pr_url: None,
+            pr_busy: false,
+            pr_note: None,
             _subs: Vec::new(),
         };
         v.refresh(cx);
         v
+    }
+
+    pub fn with_pr(mut self, url: Option<String>) -> Self {
+        self.pr_url = url;
+        self
     }
 
     /// Show what one turn changed (the chat's View, Show Last Turn's Changes).
@@ -235,6 +275,12 @@ impl ChangesView {
         self.refresh(cx);
     }
 
+    /// The turns listed in the strip (newest last).
+    pub fn set_turns(&mut self, turns: Vec<qur_agents::Turn>, cx: &mut Context<Self>) {
+        self.turns = turns;
+        cx.notify();
+    }
+
     /// Back to everything the task changed (Review Changes, Show All).
     pub fn show_all(&mut self, cx: &mut Context<Self>) {
         if self.turn.take().is_some() {
@@ -245,8 +291,24 @@ impl ChangesView {
         self.refresh(cx);
     }
 
+    /// Idle release: drop the diff's text (totals, conflicts and your
+    /// comments stay), unless a comment is being written or it's loading.
+    pub fn release(&mut self) {
+        if self.draft.is_none() && !self.loading && !self.files.is_empty() {
+            self.files = Vec::new();
+            self.released = true;
+        }
+    }
+
+    pub fn wake(&mut self, cx: &mut Context<Self>) {
+        if self.released {
+            self.refresh(cx);
+        }
+    }
+
     /// Recompute the diff and the conflict pre-check off the UI thread.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.released = false;
         let (wt, base, root, branch) = (self.worktree.clone(), self.base.clone(), self.root.clone(), self.branch.clone());
         let turn = self.turn.clone();
         let bg = cx.background_executor().clone();
@@ -260,8 +322,13 @@ impl ChangesView {
                     };
                     // Pre-check what the merge would do, including uncommitted work:
                     // `git stash create` makes a commit object without touching anything.
-                    let tip = qur_worktree::git(&wt, &["stash", "create"]).ok().filter(|s| !s.is_empty()).unwrap_or(branch);
-                    let conflicts = qur_git::precheck(&root, &tip).unwrap_or_default();
+                    // An agent in the project folder has nothing to merge.
+                    let conflicts = if wt == root {
+                        Vec::new()
+                    } else {
+                        let tip = qur_worktree::git(&wt, &["stash", "create"]).ok().filter(|s| !s.is_empty()).unwrap_or(branch);
+                        qur_git::precheck(&root, &tip).unwrap_or_default()
+                    };
                     (diff, conflicts)
                 })
                 .await;
@@ -286,7 +353,7 @@ impl ChangesView {
     }
 
     fn start_comment(&mut self, key: (usize, usize, usize), window: &mut Window, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| TextInput::new("Comment for the agent… (↩ add, esc cancel)", cx));
+        let input = cx.new(|cx| TextInput::new(COMMENT_PLACEHOLDER, cx));
         let sub = cx.subscribe_in(&input, window, move |this, input, ev: &InputEvent, _, cx| match ev {
             InputEvent::Confirm { .. } => {
                 let text = input.read(cx).text.trim().to_string();
@@ -321,10 +388,10 @@ impl ChangesView {
         if self.comments.is_empty() {
             return;
         }
-        let mut s = String::from("Review comments on your changes. Please address each one:\n\n");
-        for (i, c) in self.comments.iter().enumerate() {
-            s.push_str(&format!("{}. `{}:{}` — `{}`\n   {}\n\n", i + 1, c.path.display(), c.line, c.quote.trim(), c.text));
-        }
+        let s = comments_prompt(
+            "Review comments on your changes. Please address each one:",
+            self.comments.iter().map(|c| (format!("{}:{}", c.path.display(), c.line), c.quote.as_str(), c.text.as_str())),
+        );
         self.comments.clear();
         cx.emit(ChangesEvent::SendComments(s));
         cx.notify();
@@ -333,6 +400,70 @@ impl ChangesView {
     pub fn abs(&self, rel: &Path) -> PathBuf {
         self.worktree.join(rel)
     }
+
+    /// "Turns  #2 · 3 files  #3 · 1 file  Rewind…": the newest turns as
+    /// chips (click: just that turn), and Rewind for the one shown.
+    fn turn_strip(&self, look: &Look, cx: &mut Context<Self>) -> gpui::Div {
+        let ui = &look.theme.ui;
+        let shown = self.turn.as_ref().map(|t| t.n);
+        let skip = self.turns.len().saturating_sub(MAX_TURN_CHIPS);
+        let chips = self.turns[skip..].iter().map(|t| {
+            let (n, start, end) = (t.n, t.start.clone(), t.end.clone());
+            let on = shown == Some(n);
+            div()
+                .id(("turn-chip", n as usize))
+                .relative()
+                .flex_none()
+                .px(look.z(6.))
+                .py(look.z(1.))
+                .rounded(look.z(4.))
+                .cursor_pointer()
+                .children(crate::script::mark(|| format!("turn:{n}")))
+                .when(on, |d| d.bg(look.c(ui.active_bg)).text_color(look.c(ui.text)))
+                .when(!on, |d| d.hover(|d| d.bg(look.c(ui.hover_bg))))
+                .when(t.rewound, |d| d.text_color(look.c(ui.text_muted)))
+                .child(turn_chip_label(t))
+                .on_click(cx.listener(move |v, _, _, cx| v.show_turn(n, start.clone(), end.clone(), cx)))
+        });
+        let rewind = shown.filter(|n| self.turns.iter().any(|t| t.n == *n && !t.rewound));
+        div()
+            .flex_none()
+            .px(look.z(12.))
+            .py(look.z(4.))
+            .flex()
+            .items_center()
+            .gap(look.z(4.))
+            .border_b_1()
+            .border_color(look.c(ui.border))
+            .text_size(look.text(-2.))
+            .text_color(look.c(ui.text_secondary))
+            .child(div().flex_none().mr(look.z(4.)).text_color(look.c(ui.text_muted)).child("Turns"))
+            .when(skip > 0, |d| d.child(div().flex_none().text_color(look.c(ui.text_muted)).child(format!("{skip} earlier ·"))))
+            .children(chips)
+            .child(div().flex_1())
+            .children(rewind.map(|n| {
+                div()
+                    .id("turn-rewind")
+                    .relative()
+                    .flex_none()
+                    .cursor_pointer()
+                    .children(crate::script::mark(|| "turn:rewind".to_string()))
+                    .hover(|d| d.text_color(look.c(ui.text)))
+                    .child("Rewind…")
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(ChangesEvent::Rewind(n))))
+            }))
+    }
+}
+
+/// How many turns the strip lists (the newest).
+const MAX_TURN_CHIPS: usize = 8;
+
+/// A turn chip: "#3 · 2 files +12 −4", or "#3 rewound".
+fn turn_chip_label(t: &qur_agents::Turn) -> String {
+    if t.rewound {
+        return format!("#{} rewound", t.n);
+    }
+    format!("#{} · {} file{} +{} −{}", t.n, t.files, if t.files == 1 { "" } else { "s" }, t.added, t.removed)
 }
 
 impl Render for ChangesView {
@@ -382,6 +513,11 @@ impl Render for ChangesView {
                         d.child(div().truncate().text_size(look.text(-2.)).text_color(look.c(ui.warning)).child(format!("⚠ would conflict with your branch: {names}{}", if self.conflicts.len() > 3 { "…" } else { "" })))
                     })
                     .when(self.merged, |d| d.child(div().text_size(look.text(-2.)).text_color(look.c(ui.success)).child("Merged into your branch.")))
+                    .children(self.pr_url.clone().map(|u| {
+                        let open = u.clone();
+                        div().id("changes-pr-url").truncate().cursor_pointer().underline().text_size(look.text(-2.)).text_color(look.c(ui.success)).child(format!("Pull request: {u}")).on_click(move |_, _, cx| cx.open_url(&open))
+                    }))
+                    .children(self.pr_note.clone().map(|(t, err)| div().truncate().text_size(look.text(-2.)).text_color(look.c(if err { ui.error } else { ui.text_muted })).child(t)))
                     .children(self.error.clone().map(|e| div().text_size(look.text(-2.)).text_color(look.c(ui.error)).child(e))),
             )
             .child(div().flex_1())
@@ -393,7 +529,12 @@ impl Render for ChangesView {
             .child(button("Refresh".into(), "changes-refresh", false).on_click(cx.listener(|v, _, _, cx| v.refresh(cx))))
             .child(button("Discard…".into(), "changes-discard", false).on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesEvent::Discard))))
             .child(button("Keep working".into(), "changes-keep", false).on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesEvent::KeepWorking))))
+            .child(match self.pr_url.clone() {
+                Some(u) => button("Open Pull Request".into(), "changes-pr", false).on_click(move |_, _, cx| cx.open_url(&u)),
+                None => button(if self.pr_busy { "Pushing…" } else { "Pull Request…" }.into(), "changes-pr", false).on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesEvent::PullRequest))),
+            })
             .child(button("Merge".into(), "changes-merge", true).on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesEvent::Merge))));
+        let strip = (!self.turns.is_empty()).then(|| self.turn_strip(&look, cx));
         let rows = self.rows();
         let count = rows.len();
         let body = if n == 0 && !self.loading {
@@ -508,6 +649,26 @@ impl Render for ChangesView {
             .text_size(look.text(-2.))
             .text_color(look.c(ui.text_muted))
             .child("Click a line to comment · ⌘-click to open the file · comments go to the agent in one message");
-        div().size_full().flex().flex_col().bg(look.surface(ui.editor_bg)).child(header).child(body).child(hint)
+        div().size_full().flex().flex_col().bg(look.surface(ui.editor_bg)).child(header).children(strip).child(body).child(hint)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_chips() {
+        let t = qur_agents::Turn { n: 3, start: "a".into(), end: Some("b".into()), files: 1, added: 12, removed: 4, rewound: false };
+        assert_eq!(turn_chip_label(&t), "#3 · 1 file +12 −4");
+        let t = qur_agents::Turn { files: 2, ..t };
+        assert_eq!(turn_chip_label(&t), "#3 · 2 files +12 −4");
+        assert_eq!(turn_chip_label(&qur_agents::Turn { rewound: true, ..t }), "#3 rewound");
+    }
+
+    #[test]
+    fn comments_go_as_one_numbered_message() {
+        let s = comments_prompt("Review comments on your changes. Please address each one:", [("src/a.rs:3".to_string(), "  let x = 1;", "Name it count"), ("b.md:1".into(), "# Title", "Shorter")]);
+        assert_eq!(s, "Review comments on your changes. Please address each one:\n\n1. `src/a.rs:3` — `let x = 1;`\n   Name it count\n\n2. `b.md:1` — `# Title`\n   Shorter\n\n");
     }
 }

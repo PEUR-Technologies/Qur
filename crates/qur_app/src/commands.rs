@@ -28,6 +28,12 @@ pub mod qur {
             RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge, Caffeinate, ShowKeepAwake, SwitchSession, ZenMode,
             Gaps, ToggleGaps, AutoHideSidebar, SidebarOnRight,
             ShowLastTurn, RewindLastTurn, ReviewWork, ReviewPlan, SendReviewFindings,
+            PlanMode, CommentOnPlan, ApprovePlan, SendPlanComments,
+            PushPullRequest, OpenPullRequest,
+            NextChange, PrevChange, ShowChange, RevertChange, AcceptChange, ChangesLastTurn,
+            OpenFile, OpenAsText, ReopenWithEncoding, ConvertToEncoding, ConvertLineEndings, ShowWhitespace,
+            RevealInFinder, CopyPath, CopyRelativePath,
+            CleanUpWorktrees,
         ]
     );
 
@@ -192,7 +198,8 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::VimMode, "Edit", "Vim Mode", "", W, R),
     cmd!(qur::NewWindow, "File", "New Window", "cmd-n", W, R),
     cmd!(qur::NewAgentTask, "Agent", "New Agent Task…", "cmd-shift-n", W, R),
-    cmd!(qur::OpenFolder, "File", "Open Folder…", "cmd-o", W, R),
+    cmd!(qur::OpenFile, "File", "Open File…", "cmd-o", W, R),
+    cmd!(qur::OpenFolder, "File", "Open Folder…", "cmd-k cmd-o", NT, R),
     cmd!(qur::ProjectSwitcher, "File", "Switch Project…", "cmd-alt-o", W, R),
     cmd!(qur::CloseWindow, "File", "Close Window", "cmd-shift-w", W, R),
     cmd!(qur::Minimize, "Window", "Minimize", "cmd-m", W, R),
@@ -211,12 +218,30 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(editor::Save, "File", "Save", "cmd-s", E, R),
     cmd!(qur::SaveAll, "File", "Save All", "cmd-alt-s", W, R),
     cmd!(qur::RevertFile, "File", "Revert File", "", W, R),
+    // Notepad++'s Encoding menu.
+    cmd!(qur::OpenAsText, "File", "Open as Text", "", W, R),
+    cmd!(qur::ReopenWithEncoding, "File", "Reopen with Encoding…", "", W, R),
+    cmd!(qur::ConvertToEncoding, "File", "Convert to Encoding…", "", W, R),
+    cmd!(qur::ConvertLineEndings, "File", "Convert Line Endings (LF ⇄ CRLF)", "", W, R),
+    // The file in the code modal (the Files tree's right-click menu has them too).
+    // VS Code's Opt+Cmd+R and Opt+Cmd+C are Qur's find toggles, so only Copy
+    // Relative Path takes VS Code's key.
+    cmd!(qur::RevealInFinder, "File", "Reveal in Finder", "", W, R),
+    cmd!(qur::CopyPath, "File", "Copy Path", "", W, R),
+    cmd!(qur::CopyRelativePath, "File", "Copy Relative Path", "cmd-alt-shift-c", W, R),
     cmd!(qur::RevealInFiles, "View", "Files Dropdown", "cmd-shift-e", W, R),
     cmd!(qur::GoToLine, "Go", "Go to Line…", "ctrl-g", NT, R),
     cmd!(qur::NavBack, "Go", "Back", "ctrl--", NT, R),
     cmd!(qur::NavForward, "Go", "Forward", "ctrl-shift--", NT, R),
     cmd!(qur::GoToSymbol, "Go", "Go to Symbol in File…", "cmd-shift-o", W, R),
     cmd!(editor::JumpToBracket, "Go", "Jump to Matching Bracket", "cmd-shift-\\", E, R),
+    // Inline diff review in the code modal (VS Code's Alt+F5 / Alt+F3)
+    cmd!(qur::NextChange, "Go", "Next Change", "alt-f5", E, R),
+    cmd!(qur::PrevChange, "Go", "Previous Change", "shift-alt-f5", E, R),
+    cmd!(qur::ShowChange, "Changes", "Show Change", "alt-f3", E, R),
+    cmd!(qur::RevertChange, "Changes", "Revert Change", "", W, R),
+    cmd!(qur::AcceptChange, "Changes", "Accept Change", "", W, R),
+    cmd!(qur::ChangesLastTurn, "Changes", "Last Turn Only", "", W, R),
     // Editing
     cmd!(edit::Undo, "Edit", "Undo", "cmd-z", W, R),
     cmd!(edit::Redo, "Edit", "Redo", "cmd-shift-z", W, R),
@@ -277,6 +302,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(editor::TrimWhitespace, "Edit", "Trim Trailing Whitespace", "cmd-k cmd-x", E, R),
     cmd!(editor::Escape, "Editor", "Collapse Selection / Close Find", "escape", E, R),
     cmd!(editor::ToggleSoftWrap, "View", "Soft Wrap", "alt-z", W, R),
+    cmd!(qur::ShowWhitespace, "View", "Show Whitespace", "", W, R),
     cmd!(editor::Newline, "Editor", "Newline", "enter|shift-enter", E, R),
     // Find
     cmd!(editor::Find, "Edit", "Find", "cmd-f", W, R),
@@ -340,6 +366,11 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(agent::FindInChat, "Agent", "Find in Chat", "cmd-f", CHAT, R),
     cmd!(agent::CopyChatMarkdown, "Agent", "Copy Chat as Markdown", "", W, R),
     cmd!(agent::CycleMode, "Agent", "Next Mode (Default / Accept Edits / Plan…)", "shift-tab", Some("AgentView"), R),
+    // Plan mode (in the New Agent Task dialog: start the task in it).
+    cmd!(qur::PlanMode, "Agent", "Plan Mode", "cmd-alt-p", W, R),
+    cmd!(qur::CommentOnPlan, "Agent", "Comment on Plan…", "", W, R),
+    cmd!(qur::ApprovePlan, "Agent", "Approve Plan", "", W, R),
+    cmd!(qur::SendPlanComments, "Agent", "Send Plan Comments", "", W, R),
     cmd!(qur::ReviewChanges, "Agent", "Review Changes", "", W, R),
     cmd!(qur::ShowLastTurn, "Agent", "Show Last Turn's Changes", "", W, R),
     cmd!(qur::RewindLastTurn, "Agent", "Rewind Last Turn…", "", W, R),
@@ -347,11 +378,15 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::ReviewPlan, "Agent", "Review Agent's Plan…", "", W, R),
     cmd!(qur::SendReviewFindings, "Agent", "Send Review Findings to Agent", "", W, R),
     cmd!(qur::Merge, "Agent", "Merge into My Branch", "", W, R),
+    // Run by the user's own git and gh, with their logins (pull_request.rs).
+    cmd!(qur::PushPullRequest, "Agent", "Push and Open Pull Request…", "", W, R),
+    cmd!(qur::OpenPullRequest, "Agent", "Open Pull Request", "", W, R),
     cmd!(qur::KeepWorking, "Agent", "Keep Working", "", W, R),
     cmd!(qur::RenameAgent, "Agent", "Rename Agent…", "", W, R),
     cmd!(qur::RunChecks, "Agent", "Run Checks Now", "", W, R),
     cmd!(qur::RunProject, "Agent", "Run Project in Worktree", "", W, R),
     cmd!(qur::DiscardTask, "Agent", "Discard Task…", "", W, R),
+    cmd!(qur::CleanUpWorktrees, "Agent", "Clean Up Worktrees…", "", W, R),
     cmd!(qur::NextConflict, "Merge", "Next Conflict", "", W, R),
     cmd!(qur::PrevConflict, "Merge", "Previous Conflict", "", W, R),
     cmd!(qur::AcceptOurs, "Merge", "Accept Ours", "", W, R),
@@ -422,6 +457,39 @@ pub fn needs_pending(c: &Cmd) -> bool {
     (c.action)().partial_eq(&agent::AllowAllPending)
 }
 
+/// Commands that only mean something in a project window: the empty window
+/// (no project) leaves them unhandled, so their menu items grey out and their
+/// keys do nothing. New Agent Task and New Agent Terminal aren't here: in the
+/// empty window they ask for the folder to work in.
+const PROJECT_ONLY: &[&str] = &[
+    "qur::QuickOpen", "qur::RevealInFiles", "qur::UseDefaultTheme", "qur::FindInProject", "qur::ReplaceInProject",
+    "qur::SearchPanel", "qur::FocusPrompt", "qur::StopAgent", "qur::TakeOver", "qur::RenameAgent",
+    "agent::AllowOnce", "agent::AllowAlways", "agent::Deny", "agent::AllowAllPending", "agent::FindInChat",
+    "agent::CopyChatMarkdown", "qur::ReviewChanges", "qur::ShowLastTurn", "qur::RewindLastTurn", "qur::ReviewWork",
+    "qur::ReviewPlan", "qur::SendReviewFindings", "qur::Merge", "qur::KeepWorking", "qur::RunChecks", "qur::RunProject",
+    "qur::DiscardTask", "qur::OpenWorktreeInTerminal", "qur::RevealWorktree", "qur::CyclePeekLayout",
+    "qur::ChooseLayout", "qur::PeekLayoutA", "qur::PeekLayoutB", "qur::PeekLayoutC", "qur::PeekLive", "qur::PeekTodo",
+    "qur::PeekChat", "qur::PeekChanges", "qur::PeekBrowser", "qur::ToggleInspect", "qur::FollowAgent",
+    "qur::CleanUpWorktrees", "qur::PlanMode", "qur::CommentOnPlan", "qur::ApprovePlan", "qur::SendPlanComments",
+    "qur::PushPullRequest", "qur::OpenPullRequest", "qur::NextChange", "qur::PrevChange", "qur::ShowChange",
+    "qur::RevertChange", "qur::AcceptChange", "qur::ChangesLastTurn",
+];
+
+/// Commands that need the project to be a git repository (a plain folder
+/// opens as a project without them).
+const REPO_ONLY: &[&str] = &[
+    "qur::GitPanel", "qur::GitStageAll", "qur::GitUnstageAll", "qur::GitCommit", "qur::NextConflict", "qur::PrevConflict",
+    "qur::AcceptOurs", "qur::AcceptTheirs", "qur::AcceptBoth", "qur::FinishMerge", "qur::AbortMerge",
+];
+
+/// Whether `c` can run in a window with (`project`) or without a project,
+/// and in a git repository (`repo`) or a plain folder.
+pub fn available_in(c: &Cmd, project: bool, repo: bool) -> bool {
+    let name = c.action_name();
+    let repo_only = REPO_ONLY.contains(&name);
+    (project || (!PROJECT_ONLY.contains(&name) && !repo_only)) && (repo || !repo_only)
+}
+
 /// What the selected agent offers for review (disabled, not hidden, without it).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReviewState {
@@ -442,6 +510,33 @@ pub fn review_available(c: &Cmd, s: ReviewState) -> bool {
         s.plan
     } else if a.partial_eq(&qur::SendReviewFindings) {
         s.findings
+    } else {
+        true
+    }
+}
+
+/// The selected agent's plan mode (Agent menu).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlanState {
+    /// A structured agent is selected (or the New Agent Task dialog is open): Plan Mode.
+    pub agent: bool,
+    /// It's in plan mode (the checkmark).
+    pub on: bool,
+    /// It has a plan to comment on: Comment on Plan…, Approve Plan.
+    pub plan: bool,
+    /// …and comments on it: Send Plan Comments.
+    pub comments: bool,
+}
+
+/// Is a plan command available in `s`? Other commands always are.
+pub fn plan_available(c: &Cmd, s: PlanState) -> bool {
+    let a = (c.action)();
+    if a.partial_eq(&qur::PlanMode) {
+        s.agent
+    } else if a.partial_eq(&qur::CommentOnPlan) || a.partial_eq(&qur::ApprovePlan) {
+        s.plan
+    } else if a.partial_eq(&qur::SendPlanComments) {
+        s.comments
     } else {
         true
     }
@@ -576,15 +671,21 @@ pub struct MenuState {
     pub sidebar_auto: bool,
     pub sidebar_right: bool,
     pub soft_wrap: bool,
+    /// `[editor] show_whitespace`.
+    pub show_whitespace: bool,
     pub recent: Vec<PathBuf>,
     /// A merge stopped on conflicts: the Merge Conflicts items are enabled.
     pub merging: bool,
+    /// Change markers show a task's last turn only (Changes > Last Turn Only).
+    pub diff_last_turn: bool,
     /// The selected agent has a turn to show or rewind (ACP agents only).
     pub turns: bool,
     /// An agent has a permission request waiting (Allow All Pending).
     pub pending: bool,
     /// Review Agent's Work… / Plan… / Send Review Findings for the selected agent.
     pub review: ReviewState,
+    /// Plan Mode and the plan's commands for the selected agent.
+    pub plan: PlanState,
     pub vim: bool,
     pub keep_awake: bool,
     pub zen: bool,
@@ -639,6 +740,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::NewAgentTerminal),
             item(qur::NewWindow),
             sep(),
+            item(qur::OpenFile),
             item(qur::OpenFolder),
             M::submenu(Menu::new("Open Recent").items(recent)),
             item(qur::ProjectSwitcher),
@@ -647,6 +749,18 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(editor::Save),
             item(qur::SaveAll),
             item(qur::RevertFile),
+            sep(),
+            item(qur::OpenAsText),
+            M::submenu(Menu::new("Encoding").items([
+                item(qur::ReopenWithEncoding),
+                item(qur::ConvertToEncoding),
+                sep(),
+                item(qur::ConvertLineEndings),
+            ])),
+            sep(),
+            item(qur::RevealInFinder),
+            item(qur::CopyPath),
+            item(qur::CopyRelativePath),
             sep(),
             item(qur::CloseTerminal),
             item(qur::CloseWindow),
@@ -673,6 +787,16 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(editor::Indent),
             item(editor::Outdent),
             item(editor::TrimWhitespace),
+            sep(),
+            M::submenu(Menu::new("Changes").items([
+                item(qur::NextChange),
+                item(qur::PrevChange),
+                item(qur::ShowChange),
+                item(qur::RevertChange),
+                item(qur::AcceptChange),
+                sep(),
+                item(qur::ChangesLastTurn).checked(s.diff_last_turn),
+            ])),
             sep(),
             item(qur::VimMode).checked(s.vim),
         ]),
@@ -726,6 +850,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::FollowAgent).checked(s.follow),
             sep(),
             item(editor::ToggleSoftWrap).checked(s.soft_wrap),
+            item(qur::ShowWhitespace).checked(s.show_whitespace),
             item(qur::ZoomIn),
             item(qur::ZoomOut),
             item(qur::ZoomReset),
@@ -751,6 +876,9 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::NavForward),
             item(qur::RecentFile),
             item(editor::JumpToBracket),
+            sep(),
+            item(qur::NextChange),
+            item(qur::PrevChange),
         ]),
         Menu::new("Agent").items([
             item(qur::NewAgentTask),
@@ -768,6 +896,11 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(agent::FindInChat),
             item(agent::CopyChatMarkdown),
             sep(),
+            item(qur::PlanMode).checked(s.plan.on).disabled(!s.plan.agent),
+            item(qur::CommentOnPlan).disabled(!s.plan.plan),
+            item(qur::ApprovePlan).disabled(!s.plan.plan),
+            item(qur::SendPlanComments).disabled(!s.plan.comments),
+            sep(),
             item(qur::NextAgent),
             item(qur::PrevAgent),
             item(qur::SwitchSession),
@@ -779,6 +912,8 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::ReviewPlan).disabled(!s.review.plan),
             item(qur::SendReviewFindings).disabled(!s.review.findings),
             item(qur::Merge),
+            item(qur::PushPullRequest),
+            item(qur::OpenPullRequest),
             item(qur::KeepWorking),
             item(qur::RunChecks),
             item(qur::RunProject),
@@ -795,6 +930,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             sep(),
             item(qur::OpenWorktreeInTerminal),
             item(qur::RevealWorktree),
+            item(qur::CleanUpWorktrees),
         ]),
         Menu::new("Terminal").items([
             item(qur::NewTerminal),
@@ -858,6 +994,24 @@ mod tests {
         assert_eq!(COMMANDS[resolve("Edit: Vim Mode").unwrap()].action_name(), "qur::VimMode");
     }
 
+    /// The empty window's and plain folders' lists name real commands, and
+    /// opening a project or a folder, terminals and settings work everywhere.
+    #[test]
+    fn project_and_repo_only_commands() {
+        for name in PROJECT_ONLY.iter().chain(REPO_ONLY) {
+            assert!(resolve(name).is_ok(), "{name} isn't a command");
+        }
+        let c = |name: &str| &COMMANDS[resolve(name).unwrap()];
+        for name in ["qur::OpenFolder", "qur::NewWindow", "qur::ProjectSwitcher", "qur::NewTerminal", "qur::NewAgentTerminal", "qur::NewAgentTask", "qur::CheckSetup", "qur::ThemePicker", "editor::Save"] {
+            assert!(available_in(c(name), false, false), "{name} should work without a project");
+        }
+        assert!(!available_in(c("qur::QuickOpen"), false, false));
+        assert!(available_in(c("qur::QuickOpen"), true, false));
+        assert!(!available_in(c("qur::GitPanel"), true, false));
+        assert!(!available_in(c("qur::GitPanel"), false, true));
+        assert!(available_in(c("qur::GitPanel"), true, true));
+    }
+
     #[test]
     fn nothing_left_greyed_out() {
         for c in COMMANDS {
@@ -869,5 +1023,32 @@ mod tests {
         }
         assert_eq!(COMMANDS[resolve("qur::ExpandSelection").unwrap()].keys(), "ctrl-shift-cmd-right");
         assert_eq!(COMMANDS[resolve("qur::ShrinkSelection").unwrap()].keys(), "ctrl-shift-cmd-left");
+    }
+
+    /// Cmd+O opens a file (any path); Open Folder moves to Cmd+K Cmd+O, and
+    /// no other command has either key.
+    #[test]
+    fn open_file_and_folder_keys() {
+        assert_eq!(COMMANDS[resolve("qur::OpenFile").unwrap()].keys(), "cmd-o");
+        assert_eq!(COMMANDS[resolve("qur::OpenFolder").unwrap()].keys(), "cmd-k cmd-o");
+        for keys in ["cmd-o", "cmd-k cmd-o"] {
+            let bound: Vec<&str> = COMMANDS.iter().filter(|c| c.keys().split('|').any(|k| k == keys)).map(|c| c.action_name()).collect();
+            assert_eq!(bound.len(), 1, "{keys}: {bound:?}");
+        }
+        for a in ["qur::OpenAsText", "qur::ReopenWithEncoding", "qur::ConvertToEncoding", "qur::ConvertLineEndings", "qur::ShowWhitespace"] {
+            assert!(COMMANDS[resolve(a).unwrap()].ready());
+        }
+    }
+
+    /// VS Code's keys for the file path commands, where Qur has them free:
+    /// Opt+Cmd+R and Opt+Cmd+C stay the find toggles.
+    #[test]
+    fn file_path_keys() {
+        let bound = |k: &str| -> Vec<&str> { COMMANDS.iter().filter(|c| c.keys().split('|').any(|x| x == k)).map(|c| c.action_name()).collect() };
+        assert_eq!(bound("cmd-alt-shift-c"), ["qur::CopyRelativePath"]);
+        assert_eq!(bound("cmd-alt-r"), ["editor::ToggleRegex"]);
+        assert_eq!(bound("cmd-alt-c"), ["editor::ToggleCase"]);
+        assert_eq!(COMMANDS[resolve("qur::RevealInFinder").unwrap()].keys(), "");
+        assert_eq!(COMMANDS[resolve("qur::CopyPath").unwrap()].keys(), "");
     }
 }

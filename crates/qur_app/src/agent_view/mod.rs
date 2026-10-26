@@ -3,7 +3,10 @@
 //! header, To-do strip, Chat, permission bar and prompt bar.
 
 mod chat;
+mod exchanges;
 mod find;
+mod plan;
+pub mod history;
 mod second_opinion;
 mod session;
 mod stage;
@@ -36,6 +39,7 @@ use crate::changes_view::{ChangesEvent, ChangesView};
 use crate::dock::{self, Docks, Kind, Panel};
 use crate::input::{InputEvent, TextInput};
 use crate::live::{LiveEvent, LivePane};
+use crate::files::Preview;
 use crate::look::Look;
 use crate::markdown::{FindHl, find_all};
 use crate::monitor::{TaskMonitor, heat_kind, heat_status};
@@ -99,6 +103,8 @@ pub enum AgentEvent {
     Changed,
     /// The user clicked a file in a tool call: open it in the code modal.
     OpenFile(PathBuf, Option<u32>),
+    /// The user clicked an attachment (in the prompt or a sent message).
+    Preview(Preview),
     /// `@` typed in the prompt: open the mention picker for this worktree.
     MentionRequested,
     /// `/` typed: offer this agent's settings and slash commands.
@@ -107,6 +113,8 @@ pub enum AgentEvent {
     Subagents,
     /// Changes view: merge this task's branch into the user's branch.
     Merge,
+    /// Changes view: push the task's branch and open a pull request.
+    PullRequest,
     /// Changes view: discard the task.
     Discard,
     /// A turn ended after changing files: run the project's checks.
@@ -121,6 +129,10 @@ pub enum AgentEvent {
     PermissionsChanged,
     /// The task's reviewer started, changed state or went away (save, sidebar).
     Review,
+    /// A released agent is back where it was (no new status to alert for).
+    Resumed,
+    /// Plan mode went on or off, or a plan's comments changed (menus).
+    PlanChanged,
 }
 
 /// What makes an `AgentTask` a reviewer: a second-opinion session on
@@ -144,14 +156,30 @@ enum ChatItem {
     Notice(String),
     /// Command output (worktree setup), shown in the code font.
     Output(String),
-    /// An image in a message, and its size in pixels.
-    Image(Arc<gpui::Image>, (u32, u32)),
+    /// An image in a message: decoded small (None until it is), its size in
+    /// pixels, and the temp file it's saved to (click opens it).
+    Image(Option<Arc<gpui::RenderImage>>, (u32, u32), PathBuf),
     /// A file or web link in a message: click opens it.
     Link { uri: String, name: String },
+    /// What you attached to the message above: images and files, shown
+    /// small under it; click shows one.
+    Files(Vec<Sent>),
     /// A failed or cut-short turn, or the agent exiting.
     Failure(Failure),
     /// End of turn N: "3 files · +12 −4 · View · Rewind".
     Turn(u32),
+    /// "Show N earlier messages": the chat's first row while older rows
+    /// are on disk (history.rs).
+    Earlier,
+}
+
+/// One attachment shown under a sent message.
+#[derive(Clone)]
+enum Sent {
+    /// Its thumbnail, its size in pixels (None for SVG), and its file (a
+    /// pasted image's is in the temp folder). The image itself isn't kept.
+    Image(Option<Arc<gpui::RenderImage>>, Option<(u32, u32)>, PathBuf),
+    File(PathBuf),
 }
 
 /// What an error callout shows: a line, the full error (stderr tail…), and
@@ -257,15 +285,28 @@ struct Outgoing {
     /// What the user typed (shown in the chat).
     text: String,
     mentions: Vec<PathBuf>,
-    /// Browser picks: context text for the agent, plus screenshots.
+    /// Browser picks: context text for the agent, and their chip labels.
     context: Vec<String>,
     labels: Vec<String>,
-    images: Vec<Vec<u8>>,
+    /// Screenshots, pasted images and image files.
+    images: Vec<OutImage>,
+    /// Other files pasted or dropped in: sent as links.
+    files: Vec<PathBuf>,
+}
+
+/// An image going out with a message.
+#[derive(Clone)]
+struct OutImage {
+    /// As it's sent (`files::sendable_image`).
+    image: Arc<gpui::Image>,
+    thumb: Option<Arc<gpui::RenderImage>>,
+    /// The file it came from; None for a pasted image or a screenshot.
+    path: Option<PathBuf>,
 }
 
 impl Outgoing {
     fn plain(text: String, mentions: Vec<PathBuf>) -> Self {
-        Outgoing { text, mentions, context: Vec::new(), labels: Vec::new(), images: Vec::new() }
+        Outgoing { text, mentions, context: Vec::new(), labels: Vec::new(), images: Vec::new(), files: Vec::new() }
     }
     fn shown(&self) -> String {
         if self.labels.is_empty() { self.text.clone() } else { format!("{}\n\n＋ {}", self.text, self.labels.join(", ")) }
@@ -291,8 +332,11 @@ pub struct AgentTask {
     sign_in: Option<SignIn>,
     /// The last message sent (Retry / Edit & resend).
     last_sent: Option<Outgoing>,
+    /// The chat's rows in memory (its older part is on disk: `history`).
     chat: Vec<ChatItem>,
     tools: HashMap<ToolCallId, ToolCall>,
+    /// The saved chat, and how much of it is only on disk.
+    history: history::History,
     list: ListState,
     /// Text sizes and zoom the chat rows were measured at; the list caches
     /// row heights, so a change re-measures them.
@@ -324,6 +368,14 @@ pub struct AgentTask {
     toggled: HashSet<String>,
     /// Context tokens used / window, and session cost (USD) if known.
     usage: Option<(u64, u64, Option<f64>)>,
+    /// Tokens this task's turns used since Qur started it (`TurnUsage`).
+    tokens: u64,
+    /// Plan mode: the plan shown and your comments on it (plan.rs).
+    plan_review: plan::PlanReview,
+    /// The mode the task was in before Qur put it in plan mode.
+    pre_plan_mode: Option<String>,
+    /// Put the session in plan mode as soon as it opens (Plan first).
+    pub plan_first: bool,
     /// Subagents this agent started, oldest first (shown under it in the sidebar).
     pub subagents: Vec<Subagent>,
     /// The subagent shown in place of the chat (clicked in the sidebar).
@@ -354,9 +406,25 @@ pub struct AgentTask {
     pub open_review: bool,
     /// The reviewer finished while you weren't looking at it.
     pub review_unread: bool,
+    /// When the task last did or showed anything (idle release counts from here).
+    last_active: Instant,
+    /// Set while the agent's process is released for being idle: how to
+    /// pick up again (see `release`).
+    resume: Option<Resume>,
+    /// A released session is loading again: the history it replays is
+    /// already in the chat, so it's skipped until `Event::Loaded`.
+    replaying: bool,
     _review_subs: Vec<Subscription>,
     _events: Option<Task<()>>,
     _subs: Vec<Subscription>,
+}
+
+/// What a released agent goes back to once its session is loaded again.
+struct Resume {
+    status: Status,
+    /// Session settings the user had (mode, model…) as (id, value): a
+    /// loaded session may start from the agent's defaults.
+    settings: Vec<(String, String)>,
 }
 
 impl EventEmitter<AgentEvent> for AgentTask {}
@@ -373,9 +441,10 @@ impl AgentTask {
     #[allow(clippy::too_many_arguments)]
     pub fn new(root: PathBuf, record: TaskRecord, def: AgentDef, accent: Rgba, layout: Layout, wrap: bool, tab: usize, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let project_root = root.clone();
-        let changes = cx.new(|cx| ChangesView::new(root, record.worktree.clone(), record.base.clone(), record.branch.clone(), cx));
+        let changes = cx.new(|cx| ChangesView::new(root, record.worktree.clone(), record.diff_base().to_string(), record.branch.clone(), cx).with_pr(record.pr_url.clone()));
         let changes_sub = cx.subscribe_in(&changes, window, |this, _, ev: &ChangesEvent, window, cx| match ev {
             ChangesEvent::Merge => cx.emit(AgentEvent::Merge),
+            ChangesEvent::PullRequest => cx.emit(AgentEvent::PullRequest),
             ChangesEvent::Discard => cx.emit(AgentEvent::Discard),
             ChangesEvent::KeepWorking => {
                 let f = this.prompt.read(cx).focus.clone();
@@ -387,8 +456,10 @@ impl AgentTask {
                 this.submit(cx);
             }
             ChangesEvent::Open(p, line) => cx.emit(AgentEvent::OpenFile(p.clone(), *line)),
+            ChangesEvent::Rewind(n) => cx.emit(AgentEvent::Rewind(*n)),
         });
-        let monitor = cx.new(|cx| TaskMonitor::new(record.worktree.clone(), record.base.clone(), accent, record.in_root, cx));
+        let shared = if record.in_root { qur_heat::Shared::Tools } else { qur_heat::Shared::No };
+        let monitor = cx.new(|cx| TaskMonitor::new(record.worktree.clone(), record.diff_base().to_string(), accent, shared, cx));
         let label = def.label.clone();
         let live = cx.new(|cx| LivePane::new(monitor.clone(), label, wrap, tab, window, cx));
         let live_sub = cx.subscribe_in(&live, window, |this, _, ev: &LiveEvent, _, cx| match ev {
@@ -396,12 +467,11 @@ impl AgentTask {
             LiveEvent::Open(p) => cx.emit(AgentEvent::OpenFile(p.clone(), None)),
         });
         let monitor_sub = cx.observe(&monitor, |_, _, cx| cx.notify());
-        let files_sub = cx.subscribe(&monitor, |this, _, ev: &crate::monitor::MonitorEvent, _| {
-            if let crate::monitor::MonitorEvent::Files(_) = ev
-                && matches!(this.status, Status::Working | Status::NeedsYou)
-            {
-                this.turn_wrote = true;
-            }
+        let files_sub = cx.subscribe(&monitor, |this, _, ev: &crate::monitor::MonitorEvent, cx| match ev {
+            crate::monitor::MonitorEvent::Files(_) if matches!(this.status, Status::Working | Status::NeedsYou) => this.turn_wrote = true,
+            // You committed in the project folder: the diff against HEAD is stale.
+            crate::monitor::MonitorEvent::BaseMoved => this.changes.update(cx, |c, cx| c.refresh(cx)),
+            _ => {}
         });
         let browser = cx.new(|cx| BrowserPane::new(record.browser_url.clone(), accent, window, cx));
         let browser_sub = cx.subscribe_in(&browser, window, |this, _, ev: &BrowserPaneEvent, window, cx| match ev {
@@ -450,6 +520,8 @@ impl AgentTask {
         cx: &mut Context<Self>,
     ) -> Self {
         let Parts { monitor, live, browser, changes } = parts;
+        let id = cx.entity_id().as_u64();
+        subs.push(cx.on_release(move |_, _| crate::crash::forget_agent(id)));
         let wt = record.worktree.clone();
         let placeholder = match &review {
             Some(_) => format!("Ask {} a follow-up (read-only)…", def.label),
@@ -462,6 +534,7 @@ impl AgentTask {
             PromptEvent::MentionRequested => cx.emit(AgentEvent::MentionRequested),
             PromptEvent::SlashRequested => cx.emit(AgentEvent::SlashRequested),
             PromptEvent::UpInEmpty => this.edit_queued(this.pending.len().wrapping_sub(1), cx),
+            PromptEvent::Preview(p) => cx.emit(AgentEvent::Preview(p.clone())),
             PromptEvent::Changed => {}
         });
         let list = ListState::new(0, ListAlignment::Bottom, px(400.));
@@ -474,7 +547,14 @@ impl AgentTask {
         let record_queue = record
             .queued
             .iter()
-            .map(|q| Outgoing { text: q.text.clone(), mentions: q.mentions.clone(), context: q.context.clone(), labels: q.labels.clone(), images: Vec::new() })
+            .map(|q| Outgoing {
+                text: q.text.clone(),
+                mentions: q.mentions.clone(),
+                context: q.context.clone(),
+                labels: q.labels.clone(),
+                images: Vec::new(),
+                files: q.files.clone(),
+            })
             .collect();
         AgentTask {
             record,
@@ -493,6 +573,7 @@ impl AgentTask {
             last_sent: None,
             chat: Vec::new(),
             tools: HashMap::new(),
+            history: history::History::default(),
             list,
             measured_at: (0., 0., 0.),
             plan: Vec::new(),
@@ -510,6 +591,10 @@ impl AgentTask {
             settings: Vec::new(),
             toggled: HashSet::new(),
             usage: None,
+            tokens: 0,
+            plan_review: plan::PlanReview::default(),
+            pre_plan_mode: None,
+            plan_first: false,
             subagents: Vec::new(),
             open_subagent: None,
             setting_up: false,
@@ -526,6 +611,9 @@ impl AgentTask {
             reviewer: None,
             open_review: false,
             review_unread: false,
+            last_active: Instant::now(),
+            resume: None,
+            replaying: false,
             _review_subs: Vec::new(),
             _events: None,
             _subs: {
@@ -726,7 +814,7 @@ fn chat_markdown(title: &str, agent: &str, chat: &[ChatItem], tools: &HashMap<To
                 spoke = false;
             }
             ChatItem::Agent(t) if !t.trim().is_empty() => add(&mut out, t.trim(), false, &mut prev_tool),
-            ChatItem::Agent(_) | ChatItem::Thought(_) => {}
+            ChatItem::Agent(_) | ChatItem::Thought(_) | ChatItem::Earlier => {}
             ChatItem::Tool(id) => {
                 let Some(t) = tools.get(id) else { continue };
                 let glyph = match t.status {
@@ -753,8 +841,17 @@ fn chat_markdown(title: &str, agent: &str, chat: &[ChatItem], tools: &HashMap<To
                 let fence = if t.contains("```") { "````" } else { "```" };
                 add(&mut out, &format!("{fence}\n{}\n{fence}", t.trim_end()), false, &mut prev_tool);
             }
-            ChatItem::Image(_, (w, h)) => add(&mut out, &format!("*[image {w}×{h}]*"), false, &mut prev_tool),
+            ChatItem::Image(_, (w, h), _) => add(&mut out, &format!("*[image {w}×{h}]*"), false, &mut prev_tool),
             ChatItem::Link { uri, name } => add(&mut out, &format!("[{name}]({uri})"), false, &mut prev_tool),
+            ChatItem::Files(files) => {
+                let names: Vec<String> = files
+                    .iter()
+                    .map(|f| match f {
+                        Sent::Image(_, _, p) | Sent::File(p) => format!("[{}](file://{})", crate::files::chip_name(p), p.display()),
+                    })
+                    .collect();
+                add(&mut out, &format!("> ＋ {}", names.join(", ")), false, &mut prev_tool);
+            }
             ChatItem::Failure(f) => {
                 let text = match &f.summary {
                     Some(s) => format!("**{}**\n{s}", f.title),
@@ -861,6 +958,7 @@ impl Render for AgentTask {
             self.measured_at = sizes;
             self.list.remeasure();
         }
+        self.sync_plan();
         let ui = look.theme.ui.clone();
         // A reviewer is shown inside its task's chat panel (`review_view`):
         // just its chat and prompt.
@@ -1061,6 +1159,17 @@ You're welcome.
 ";
         assert_eq!(md, want);
         assert!(!md.contains("secret"), "thoughts are left out");
+    }
+
+    #[test]
+    fn usage_in_the_header() {
+        use stage::usage_readout;
+        assert_eq!(usage_readout(121_175, Some(0.11930126)).as_deref(), Some("121.2k tokens · $0.12"));
+        assert_eq!(usage_readout(640, None).as_deref(), Some("640 tokens"));
+        assert_eq!(usage_readout(2_350_000, Some(1.5)).as_deref(), Some("2.4M tokens · $1.50"));
+        assert_eq!(usage_readout(0, Some(0.04)).as_deref(), Some("$0.04"));
+        assert_eq!(usage_readout(0, None), None, "nothing reported, nothing shown");
+        assert_eq!(usage_readout(0, Some(0.)), None);
     }
 
     #[test]

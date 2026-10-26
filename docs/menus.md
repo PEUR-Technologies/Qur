@@ -18,18 +18,34 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - ---
 - Quit Qur `Cmd+Q`
 
+## The empty window (no project)
+
+Qur opens a window without a project when it has none to show: launched (from Finder or the Dock) with no last project, the last project moved or deleted, `qur ~` or `qur /`, the last project window closed, or File > New Window. Its stage lists recent projects and Open Folder…, New Terminal, New Agent Terminal in… and New Agent Task in…; its terminals start in the home folder, and files open in the code modal. Commands that need a project are disabled there: Quick Open, Files Dropdown, Use Default Theme for This Project, Find/Replace in Project, Search, Source Control and its Git items, the whole Agent menu except New Agent Task… and New Agent Terminal (which ask for the folder to work in and open it as a project), Peek Layout, Peek, Inspect Element and Follow Agent. Theme and Transparency changes there apply to all projects. Opening a project closes the empty window unless it has terminals or unsaved files; closing the empty window when it's the last one quits Qur.
+
+A folder that isn't a git repository opens as a project without git: Source Control, its Git items and Merge Conflicts are disabled. Its first Agent Terminal works in the folder itself; New Agent Task… and further Agent Terminals need a worktree, so they first offer **Initialize Git** (`git init` and a first commit of the folder's files, minus anything `.gitignore`d).
+
 ## File
-- New Agent Task… `Cmd+Shift+N`
+- New Agent Task… `Cmd+Shift+N` (in the empty window: asks for the folder first)
 - New Terminal `Cmd+T`
-- New Agent Terminal `Cmd+Shift+T`
-- New Window `Cmd+N`
+- New Agent Terminal `Cmd+Shift+T` (in the empty window: asks for the folder first)
+- New Window `Cmd+N` (the empty window; an idle one is brought forward)
 - ---
-- Open Folder… `Cmd+O`
+- Open File… `Cmd+O` (any file, also outside the project)
+- Open Folder… `Cmd+K Cmd+O`
 - Open Recent ▸ (projects)
 - Quick Open… `Cmd+P`
 - ---
 - Save `Cmd+S` · Save All `Cmd+Opt+S`
 - Revert File
+- ---
+- Open as Text (the file viewer's file, in the code modal or, when large, as paged text)
+- Encoding ▸ (like Notepad++'s Encoding menu)
+  - Reopen with Encoding… (UTF-8, UTF-8 BOM, UTF-16 LE, UTF-16 BE, Windows-1252)
+  - Convert to Encoding… (saved in it from now on; undoable)
+  - ---
+  - Convert Line Endings (LF ⇄ CRLF; undoable)
+- ---
+- Reveal in Finder · Copy Path · Copy Relative Path `Shift+Opt+Cmd+C` (the file in the code modal; also in the Files tree's right-click menu)
 - ---
 - Close Terminal or Agent `Cmd+W` (in a terminal or an agent; an agent asks first)
 - Close Window `Cmd+Shift+W`
@@ -45,6 +61,8 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Toggle Line Comment `Cmd+/` · Toggle Block Comment `Shift+Opt+A`
 - Indent `Cmd+]` · Outdent `Cmd+[`
 - Trim Trailing Whitespace
+- ---
+- Changes ▸ Next Change `Opt+F5` · Previous Change `Shift+Opt+F5` · Show Change `Opt+F3` · Revert Change · Accept Change · --- · Last Turn Only (checkmark) (the code modal's change markers: an agent's changes vs its task's base, your own files vs HEAD)
 - ---
 - Vim Mode (checkmark)
 - ---
@@ -70,7 +88,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Browser: Inspect Element `Cmd+Shift+C`
 - Follow Agent (checkmark)
 - ---
-- Soft Wrap `Opt+Z` (checkmark)
+- Soft Wrap `Opt+Z` (checkmark) · Show Whitespace (checkmark; `[editor] show_whitespace`)
 - Zoom In `Cmd+=` · Zoom Out `Cmd+-` · Reset Zoom `Cmd+0`
 - ---
 - Appearance ▸
@@ -89,6 +107,8 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Back `Ctrl+-` · Forward `Ctrl+Shift+-`
 - Next / Previous Recent File `Ctrl+Tab`
 - Jump to Matching Bracket
+- ---
+- Next Change `Opt+F5` · Previous Change `Shift+Opt+F5` (also in Edit > Changes)
 
 ## Agent
 - New Agent Task… `Cmd+Shift+N` · New Agent Terminal `Cmd+Shift+T`
@@ -101,9 +121,12 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - ---
 - Find in Chat `Cmd+F` (in a structured agent's view) · Copy Chat as Markdown (also in the sidebar's right-click menu, with Allow All Pending)
 - ---
+- Plan Mode `Cmd+Opt+P` (checkmark; the selected agent's plan or read-only mode, or back to the mode it was in; in the New Agent Task dialog it toggles **Plan first**) · Comment on Plan… (shows the plan the agent proposed, or in plan mode its latest reply; click a line to comment) · Approve Plan · Send Plan Comments (disabled when there's no plan, or no comments). Structured agents only.
+- ---
 - Next Agent · Previous Agent · Switch Agent or Terminal… `Ctrl+T` · Agent 1–9 `Ctrl+1..9`
 - ---
 - Review Changes `Cmd+4` · Merge into My Branch · Keep Working · Discard Task…
+- Push and Open Pull Request… (asks first; commits the task's uncommitted work as "qur: <title>" like Merge, runs your own `git push -u <remote> <task branch>` (the remote of your current branch, else `origin`), then `gh pr create` into your branch; without `gh` or its login, GitHub's compare page opens in the browser, and other hosts just get the push. The PR's address is kept on the task and shown in the Changes view; a second run pushes new work to the same PR. Remote branches are never deleted, also on Discard) · Open Pull Request (once the task has one). Also in the agent's right-click menu, and as a button next to Merge in the Changes view.
 - Show Last Turn's Changes · Rewind Last Turn… (structured agents with a turn that changed files; disabled otherwise, and for Agent Terminals)
 - Review Agent's Work… · Review Agent's Plan… (a read-only second opinion from another agent or model; Plan only when the agent has a plan) · Send Review Findings to Agent (once its reviewer has findings). Disabled otherwise, and for Agent Terminals. Also in the agent's right-click menu.
 - Run Checks Now (the project's `[checks] command`, decision 29)
@@ -112,6 +135,7 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - ---
 - Open Task Worktree in Terminal
 - Reveal Worktree in Finder
+- Clean Up Worktrees… (per project: each Qur worktree, `qur/*` branch without a worktree, worktree whose folder is gone and leftover turn checkpoints, with its size on disk, the task that owns it, unmerged commits and uncommitted changes. Leftovers with no task, nothing unmerged and nothing uncommitted come selected; removing anything with unmerged commits or uncommitted changes asks again and names them. A task's own worktree is removed with Discard Task…; `qur doctor` shows the total)
 
 ## Terminal
 - New Terminal `Cmd+T` · New Agent Terminal `Cmd+Shift+T`
@@ -132,9 +156,14 @@ Ellipsis (…) means the item opens a picker, popover or dialog.
 - Report a Problem… (opens the GitHub issues page in the browser; no in-app network call)
 - About Qur
 
+## Right-click menus
+
+- **An agent's button** in the sidebar: its Agent menu commands (Rename…, Review Changes, Merge, Run Checks Now, Run Project, Reveal in Finder, Open Folder in Terminal, turn, review and permission commands, Stop, Close/Delete Agent…).
+- **A Files tree row** (the project or a task's worktree): Open · Open in Default App (files only) · Reveal in Finder · Copy Path · Copy Relative Path (relative to the tree's root). A deleted file's row shows them all greyed out. Esc or a click outside closes it.
+
 ## What this removes from the window
 
 - No toolbar, no gear icon. The one settings screen is **Qur > Settings…** (`Cmd+,`), the macOS place for it: Agents, Appearance (theme, accent, transparency, top bar, traffic lights), Editor (Vim mode, keys), Layout, and links to the settings files. Each of its settings is also a menu command or popover (View > Appearance, Edit > Vim Mode, View > Zen Mode, View > Peek Layout), and each change there saves the same way.
 - Peek header keeps only the Follow toggle and Live/To-do/Chat/Changes segments (layout B). Layout switching moves to the **View** menu and shortcut.
-- Merge/Discard keep their buttons only in the Changes view (handoff section 10), since they are the action of that view; they are also in the **Agent** menu.
+- Merge/Discard (and Pull Request…) keep their buttons only in the Changes view (handoff section 10), since they are the action of that view; they are also in the **Agent** menu.
 - The quick popovers stay: Theme… (picker), Accent Color…, Transparency… and Gaps… open in place without the settings screen.

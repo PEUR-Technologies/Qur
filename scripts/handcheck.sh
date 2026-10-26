@@ -40,9 +40,12 @@ EOF
 }
 
 # drive <steps> [qur arg]: run Qur until the steps end (they should end in qur::Quit).
+# An arg of "-" runs it with none.
 drive() {
-  QUR_DEBUG_ACTIONS="$1" perl -e 'alarm shift; exec @ARGV' 90 "$BIN" "${2:-$REPO}" </dev/null >"$LOG" 2>&1
-  grep -hE '^(STATE|FLASH|PROMPT|QUR_DEBUG)' "$LOG" | sed 's/^/    /'
+  local args=("${2:-$REPO}")
+  [ "${2:-}" = "-" ] && args=()
+  QUR_DEBUG_ACTIONS="$1" perl -e 'alarm shift; exec @ARGV' 90 "$BIN" ${args[@]+"${args[@]}"} </dev/null >"$LOG" 2>&1
+  grep -hE '^(STATE|FLASH|PROMPT|WINDOW|QUR_DEBUG)' "$LOG" | sed 's/^/    /'
 }
 
 # ok <description> <command...>: one assertion.
@@ -89,6 +92,32 @@ check_git_commit() {  # Git panel: Commit Staged… focuses the message; type; C
   ok "message typed into the field" grep -qF 'message="typed commit message"' "$LOG"
   ok "commit made with that message" test "$(git_ log -1 --format=%s)" = "typed commit message"
   ok "field cleared, nothing left staged" state_has 'message="" '
+}
+
+check_commit_message() {  # an agent in the project folder: the Git panel offers a message from its work.
+  setup commit_message
+  drive "wait:1500,qur::NewAgentTerminal,wait:1500,qur::Quit"
+  echo four >> "$REPO/a.txt"; printf 'new\n' > "$REPO/b.txt"
+  drive "wait:2000,qur::GitPanel,wait:1500,state,qur::GitStageAll,wait:800,qur::GitCommit,wait:1000,state,qur::Quit"
+  ok "the empty commit box got a subject and a body" grep -qF 'message="Update 2 files" body="- a.txt (+1 -0)\n- b.txt (+1 -0)\n\n2 files changed, +2 -0"' "$LOG"
+  ok "Commit used both" test "$(git_ log -1 --format=%B)" = "$(printf 'Update 2 files\n\n- a.txt (+1 -0)\n- b.txt (+1 -0)\n\n2 files changed, +2 -0')"
+  ok "and cleared them" state_has 'message="" body="" '
+}
+
+check_merge_message() {  # Merge: the task's commit and the merge commit carry a message from its turns.
+  setup merge_message
+  local id wt base
+  id=$(git_ rev-list --max-parents=0 HEAD | cut -c1-12); wt="$QUR_HOME/worktrees/$id/dark-mode"; base=$(git_ rev-parse HEAD)
+  mkdir -p "$(dirname "$wt")"; git_ worktree add -q -b qur/dark-mode "$wt"
+  printf 'one\ntwo\nTHREE\n' > "$wt/a.txt"; printf 'pub fn theme() {}\n' > "$wt/theme.rs"
+  # An ACP task with one recorded turn; its agent never starts (it isn't sent anything).
+  printf '[[agent]]\nid = "fake"\nlabel = "Fake"\nmode = "acp"\ncommand = "/usr/bin/false"\n' >> "$QUR_HOME/agents.toml"
+  mkdir -p "$QUR_HOME/projects"
+  printf '[[task]]\nid = "dark-mode"\nagent = "fake"\ntitle = "can you add a dark mode toggle please"\nbranch = "qur/dark-mode"\nworktree = "%s"\nbase = "%s"\ncreated = 1\nmode = "acp"\n\n[[task.turns]]\nn = 1\nstart = "x"\nend = "y"\nfiles = 2\nadded = 2\nremoved = 1\n' "$wt" "$base" > "$QUR_HOME/projects/$id.tasks.toml"
+  QUR_DEBUG_PROMPT="1" drive "wait:2000,qur::NextAgent,wait:500,qur::Merge,wait:3000,qur::Quit"
+  ok "the task's work was committed with the generated message" test "$(git_ log -1 --format=%B qur/dark-mode)" = "$(printf 'Add a dark mode toggle\n\n- a.txt (+1 -1)\n- theme.rs (+1 -0)\n\n2 files changed, +2 -1')"
+  ok "the merge commit too, under Merge <branch>:" test "$(git_ log -1 --format=%B)" = "$(printf 'Merge qur/dark-mode: Add a dark mode toggle\n\n- a.txt (+1 -1)\n- theme.rs (+1 -0)\n\n2 files changed, +2 -1')"
+  git_ worktree remove --force "$wt" >/dev/null 2>&1
 }
 
 esc_closed_menu() { grep '^STATE' "$LOG" | grep -A1 -F 'overlay=agent_menu:root-1' | sed -n 2p | grep -qF 'overlay=none'; }
@@ -202,7 +231,130 @@ check_first_run() {  # QUR_DEBUG_SETUP=1: the first-run welcome; Done (or Skip f
   ok "Done closed it" state_has 'overlay=none'
 }
 
-ALL=(vim find_terminal rename rename_click dock cmd_click git_commit git_stage panels gaps gaps_terminal sidebar settings first_run)
+check_diff_review() {  # an agent's changes in the code modal: markers, Next/Previous Change, peek, Revert, Accept, undo.
+  setup diff_review
+  printf 'one\ntwo\nthree\nfour\nfive\n' > "$REPO/a.txt"; git_ commit -qam five
+  # The second Agent Terminal gets a worktree; its shell plays the agent.
+  drive "wait:1500,qur::NewAgentTerminal,wait:1000,qur::NewAgentTerminal,wait:2000,type:sed -i '' -e s/one/ONE/ -e /three/d a.txt; echo added >> a.txt\n,wait:1000,qur::QuickOpen,wait:400,type:a.txt,wait:300,key:enter,wait:1000,state,key:alt-f5,key:alt-f5,key:shift-alt-f5,key:alt-f3,wait:100,qur::RevertChange,wait:600,state,qur::AcceptChange,wait:100,state,key:cmd-z,wait:600,state,qur::Quit"
+  local wt; wt=$(git_ worktree list --porcelain | sed -n 's/^worktree //p' | grep -v "^$REPO$" | head -1)
+  ok "markers vs the task's base" grep -qF 'changes=[Modified@1 Removed@3 Added@5] peek=0 vs "the task'"'"'s base"' "$LOG"
+  ok "Opt+F5 went to the removal" grep -qF 'CHANGE next line=3 ' "$LOG"
+  ok "then to the addition" grep -qF 'CHANGE next line=5 ' "$LOG"
+  ok "Shift+Opt+F5 went back" grep -qF 'CHANGE prev line=3 ' "$LOG"
+  ok "Opt+F3 opened the peek on it" grep -qF 'CHANGE peek line=3 [Modified@1 Removed@3 Added@5] peek=2' "$LOG"
+  ok "Revert put the removed line back; the peek moved on" grep -qF 'changes=[Modified@1 Added@6] peek=2' "$LOG"
+  ok "in the buffer only" grep -qF 'dirty=true changes=[Modified@1 Added@6] peek=2 vs "the task'"'"'s base" format="UTF-8 · LF" text="ONE\ntwo\nthree\nfour\nfive\nadded\n"' "$LOG"
+  ok "Accept hid the addition" grep -qF 'changes=[Modified@1] peek=0' "$LOG"
+  ok "Cmd+Z undid the revert (the accepted change stays hidden)" state_has 'changes=[Modified@1 Removed@3] peek=0'
+  ok "the worktree's file is the agent's" cmp -s "$wt/a.txt" <(printf 'ONE\ntwo\nfour\nfive\nadded\n')
+  ok "its index untouched" git -C "$wt" diff --cached --quiet
+}
+
+check_diff_head() {  # your own file shows its changes vs HEAD; Revert Change in the main checkout.
+  setup diff_head
+  printf 'one\nTWO\nthree\nmore\n' > "$REPO/a.txt"
+  drive "wait:1500,state,key:alt-f3,wait:100,state,key:escape,wait:100,state,qur::RevertChange,wait:600,state,qur::Quit" "$REPO/a.txt"
+  ok "markers vs HEAD" grep -qF 'changes=[Modified@2 Added@4] peek=0 vs "HEAD"' "$LOG"
+  ok "Opt+F3 went to the next change and opened its peek" grep -qF 'code=a.txt@2:1 vim=- dirty=false changes=[Modified@2 Added@4] peek=1' "$LOG"
+  ok "Esc closed the peek, not the modal" grep -qF 'code=a.txt@2:1 vim=- dirty=false changes=[Modified@2 Added@4] peek=0' "$LOG"
+  ok "Revert at the cursor's change only" state_has 'changes=[Added@4] peek=0 vs "HEAD" format="UTF-8 · LF" text="one\ntwo\nthree\nmore\n"'
+  ok "nothing staged" git_ diff --cached --quiet
+}
+
+check_cleanup() {  # Clean Up Worktrees…: orphans preselected and removed; unmerged/dirty only after a second yes; a task's own kept.
+  setup cleanup
+  local W="$QUR_HOME/worktrees/$(git_ rev-list --max-parents=0 HEAD | cut -c1-12)"
+  mkdir -p "$W" "$QUR_HOME/worktrees/ffffffffffff/stray"
+  git_ worktree add -q -b qur/claude/orphan "$W/orphan"
+  git_ worktree add -q -b qur/claude/work "$W/work"
+  echo w > "$W/work/w.txt"; git -C "$W/work" add -A; git -C "$W/work" -c user.name=hc -c user.email=hc@localhost -c commit.gpgsign=false commit -qm work
+  git_ worktree add -q -b qur/claude/wip "$W/wip"; echo edited > "$W/wip/a.txt"
+  git_ worktree add -q -b qur/claude/gone "$W/gone"; rm -rf "${W:?}/gone"
+  git_ branch qur/claude/left
+  git_ update-ref refs/qur/turns/dead/1/start "$(git_ rev-parse 'HEAD^{tree}')"
+  echo x > "$QUR_HOME/worktrees/ffffffffffff/stray/x.txt"
+  touch -t 202601010000 "$W"/* "$QUR_HOME/worktrees/ffffffffffff/stray"  # old enough to preselect
+  # Two Agent Terminals: the second works in its own (owned, brand-new) worktree.
+  QUR_DEBUG_PROMPT="1,0" drive "wait:1500,qur::NewAgentTerminal,wait:800,qur::NewAgentTerminal,wait:1500,qur::CleanUpWorktrees,wait:2500,state,click:@cleanup:remove,wait:2500,state,click:@cleanup:row:qur/claude/work,click:@cleanup:row:qur/claude/wip,click:@cleanup:remove,wait:2000,state,click:@cleanup:remove,wait:2500,state,key:escape,state,qur::Quit"
+  ok "orphans listed and preselected" grep -qE '^CLEANUP qur/claude/orphan \| no task · merged · clean \| .* \| picked' "$LOG"
+  ok "the folder-gone worktree, the lone branch and dead turn refs too" test "$(grep -cE '^CLEANUP (qur/claude/gone \(folder gone\)|qur/claude/left \(no worktree\)|turn checkpoints of “dead”).*\| picked$' "$LOG")" -eq 3
+  ok "unmerged, dirty and the unknown folder are not preselected" test "$(grep -cE '^CLEANUP (qur/claude/work \| 1 unmerged commit|qur/claude/wip \| uncommitted changes|stray \(unknown folder\)).*\| -$' "$LOG")" -ge 3
+  ok "the live task's worktree shows its task and isn't selected" grep -qE '^CLEANUP .*\| task “.*\| -$' "$LOG"
+  ok "the first Remove took the 4 orphans" has 'FLASH Removed 4,'
+  ok "Keep Them left the unmerged and dirty ones" grep -qE '^PROMPT Remove 2 items with unsaved work\? -> 1' "$LOG"
+  ok "Remove Them Too removed them" has 'FLASH Removed 2,'
+  ok "git agrees: only the task's branch is left" test "$(git_ for-each-ref --format='%(refname)' refs/heads/qur refs/qur | tr '\n' ' ')" = "refs/heads/qur/claude/term-2 "
+  ok "the stray folder stays (it asks first)" test -d "$QUR_HOME/worktrees/ffffffffffff/stray"
+  ok "the project folder is untouched" test "$(git_ status --porcelain)" = ""
+  ok "Esc closed it" state_has 'overlay=none'
+}
+
+# A plain folder (no git, outside any checkout: $HC may sit in one), and a
+# state.toml whose most recent project is gone.
+plain_and_recent() {
+  PLAIN="${TMPDIR:-/tmp}/qur-hc-$1/plain"
+  rm -rf "${PLAIN:?}"; mkdir -p "$PLAIN"; printf 'notes\n' > "$PLAIN/notes.txt"
+  PLAIN=$(cd "$PLAIN" && pwd -P)
+  printf 'recent_projects = ["%s", "%s", "%s"]\nsetup_done = true\n' "$HC/$1/gone" "$REPO" "$PLAIN" > "$QUR_HOME/state.toml"
+}
+
+check_empty_window() {  # no project to reopen: the empty window, terminals in ~, project commands off.
+  setup empty_window
+  drive "wait:1500,state,marks,qur::QuickOpen,qur::GitPanel,qur::FindInProject,wait:300,state,qur::NewTerminal,wait:1000,state,qur::Quit" -
+  ok "the empty window opened (no project)" has 'WINDOW empty'
+  ok "its stage offers Open Folder… and the rest" has 'BOUNDS home:open-folder'
+  ok "no sidebar while it has no terminals" grep -qE '^STATE.*project=none overlay=none selected=none .*visible=false' "$LOG"
+  ok "Go to File, Git and Find in Project do nothing there" test "$(grep -c '^STATE.*project=none overlay=none selected=none' "$LOG")" -eq 2
+  ok "New Terminal works, with the sidebar back" state_has 'visible=true'
+  ok "and the empty window isn't a recent project" test -z "$(grep -F recent_projects "$QUR_HOME/state.toml" | grep -F /)"
+}
+
+check_empty_recent() {  # the last project is gone: the empty window lists the others; a click opens one.
+  setup empty_recent
+  plain_and_recent empty_recent
+  drive "wait:1500,marks,click:@home:recent:repo,wait:1500,state,qur::Quit" -
+  ok "says the last project is gone" has "FLASH $HC/empty_recent/gone isn't there any more"
+  ok "lists the projects still there" has 'BOUNDS home:recent:plain'
+  ok "clicking one opened its window" has "WINDOW $REPO"
+  ok "and closed the empty window" has 'WINDOW closed empty'
+  ok "the script went on in the project" state_has 'project=repo:repo'
+}
+
+check_close_last() {  # closing the last project window leaves the empty window; closing that quits.
+  setup close_last
+  drive "wait:1500,qur::CloseWindow,wait:1000,state,qur::NewWindow,wait:500,qur::CloseWindow,wait:3000"
+  ok "closing the project window opened the empty window" grep -qE '^WINDOW closed \(0 left\)' "$LOG"
+  ok "the script followed it there" state_has 'project=none'
+  ok "New Window reused it (no second empty window)" test "$(grep -c '^WINDOW empty' "$LOG")" -eq 1
+  ok "closing the empty window quit Qur" has 'WINDOW closed empty (0 left)'
+}
+
+check_home_folder() {  # `qur ~` and a path that doesn't exist get the empty window.
+  setup home_folder
+  drive "wait:1200,state,qur::Quit" "$HOME"
+  ok "qur ~ opened the empty window" has 'WINDOW empty'
+  drive "wait:1200,qur::Quit" "$HC/home_folder/nowhere"
+  ok "a missing path did too, and said so" has "FLASH $HC/home_folder/nowhere doesn't exist"
+}
+
+check_plain_folder() {  # a folder without git: a project without Source Control; agents offer git init.
+  setup plain_folder
+  plain_and_recent plain_folder
+  export GIT_AUTHOR_NAME=hc GIT_AUTHOR_EMAIL=hc@localhost GIT_COMMITTER_NAME=hc GIT_COMMITTER_EMAIL=hc@localhost
+  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false
+  QUR_DEBUG_OPEN="$PLAIN" QUR_DEBUG_PROMPT=0 drive "wait:1500,qur::NewAgentTerminal,wait:2000,state,qur::GitPanel,wait:300,state,qur::NewAgentTerminal,wait:4000,state,qur::GitPanel,wait:800,state,qur::Quit" -
+  unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+  ok "New Agent Terminal in the empty window asked for a folder" has "OPEN_PANEL $PLAIN"
+  ok "and opened it as a project without git" has 'project=folder:plain'
+  ok "its first Agent Terminal works in the folder" has 'selected=task:root-1:'
+  ok "no Git panel there" grep -qE '^STATE.*project=folder:plain .*selected=task:root-1:.* git=\{none\}' "$LOG"
+  ok "a second one offered to initialize Git" has "PROMPT plain isn't a git repository -> 0"
+  ok "which made a first commit of the folder" test -n "$(git -C "$PLAIN" log -1 --format=%s 2>/dev/null)"
+  ok "then the agent started in its own worktree" has 'selected=task:term-2:'
+  ok "and Git came on" state_has 'project=repo:plain'
+}
+
+ALL=(vim find_terminal rename rename_click dock cmd_click git_commit git_stage commit_message merge_message panels gaps gaps_terminal sidebar settings first_run diff_review diff_head cleanup empty_window empty_recent close_last home_folder plain_folder)
 [ "${1:-}" = "-l" ] && { printf '%s\n' "${ALL[@]}"; exit 0; }
 for c in "${@:-${ALL[@]}}"; do
   echo "$c"

@@ -22,27 +22,30 @@ impl Workspace {
         }
     }
 
-    /// The selected ACP agent and its newest turn that can be shown or
-    /// rewound. Agent Terminals have no turn boundaries (none).
-    pub(super) fn selected_last_turn(&self, cx: &App) -> Option<(Entity<AgentTask>, u32)> {
-        let a = self.selected_agent()?;
-        let n = a.read(cx).record.last_turn()?.n;
-        Some((a, n))
+    /// The selected agent (ACP or Agent Terminal) and its newest turn that
+    /// can be shown or rewound.
+    pub(super) fn selected_last_turn(&self, cx: &App) -> Option<(String, u32)> {
+        let record = match &self.selected {
+            Some(Selected::Agent(id)) => &self.agent(id)?.read(cx).record,
+            Some(Selected::TermTask(id)) => &self.term_task(id)?.record,
+            _ => return None,
+        };
+        Some((record.id.clone(), record.last_turn()?.n))
     }
 
     pub(super) fn show_last_turn(&mut self, _: &qur::ShowLastTurn, _: &mut Window, cx: &mut Context<Self>) {
         match self.selected_last_turn(cx) {
-            Some((a, n)) => a.update(cx, |a, cx| a.show_turn(n, cx)),
+            Some((id, n)) => match self.agent(&id).cloned() {
+                Some(a) => a.update(cx, |a, cx| a.show_turn(n, cx)),
+                None => self.show_term_turn(&id, n, cx),
+            },
             None => self.no_turn_message(cx),
         }
     }
 
     pub(super) fn rewind_last_turn(&mut self, _: &qur::RewindLastTurn, window: &mut Window, cx: &mut Context<Self>) {
         match self.selected_last_turn(cx) {
-            Some((a, n)) => {
-                let id = a.read(cx).record.id.clone();
-                self.rewind_turn(&id, n, window, cx);
-            }
+            Some((id, n)) => self.rewind_turn(&id, n, window, cx),
             None => self.no_turn_message(cx),
         }
     }
@@ -183,8 +186,7 @@ impl Workspace {
 
     fn no_turn_message(&mut self, cx: &mut Context<Self>) {
         let msg = match &self.selected {
-            Some(Selected::TermTask(_)) => "Agent Terminals have no turns to show or rewind yet",
-            Some(Selected::Agent(_)) => "No turn has changed files yet",
+            Some(Selected::TermTask(_) | Selected::Agent(_)) => "No turn has changed files yet",
             _ => "Select an agent first",
         };
         self.flash(msg, cx);
@@ -193,7 +195,7 @@ impl Workspace {
     /// Rewind: ask (warning when files changed since the turn ended), then
     /// the agent stops if needed and its worktree goes back to before turn N.
     pub(super) fn rewind_turn(&mut self, id: &str, n: u32, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(a) = self.agent(id).cloned() else { return };
+        let Some(a) = self.agent(id).cloned() else { return self.rewind_term_turn(id, n, window, cx) };
         let (wt, label, running, turn, later, last_end) = {
             let t = a.read(cx);
             let r = &t.record;
@@ -315,5 +317,65 @@ Commits stay; {label} is told with your next message."));
         if let Some(a) = target {
             a.update(cx, |a, cx| a.answer_permission(kind, cx));
         }
+    }
+
+    // -- plan mode -----------------------------------------------------------------
+
+    pub(super) fn plan_state(&self, cx: &App) -> commands::PlanState {
+        if let Some(Overlay::NewTask { plan, agent, .. }) = &self.overlay {
+            let acp = self.roster.agents.get(*agent).is_some_and(|a| a.mode == Mode::Acp);
+            return commands::PlanState { agent: acp, on: *plan && acp, ..Default::default() };
+        }
+        let Some(a) = self.selected_agent() else { return commands::PlanState::default() };
+        let a = a.read(cx);
+        let plan = a.has_plan_to_review();
+        commands::PlanState { agent: a.review.is_none(), on: a.in_plan_mode(), plan, comments: plan && a.plan_comments() > 0 }
+    }
+
+    /// The New Agent Task dialog's Plan first.
+    pub(super) fn toggle_plan_first(&mut self, cx: &mut Context<Self>) {
+        if let Some(Overlay::NewTask { plan, .. }) = &mut self.overlay {
+            *plan = !*plan;
+        }
+        self.sync_menus(cx);
+        cx.notify();
+    }
+
+    /// Plan Mode (Cmd+Opt+P): the selected agent into its plan mode or back
+    /// out; in the New Agent Task dialog, Plan first.
+    pub(super) fn plan_mode(&mut self, _: &qur::PlanMode, _: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.overlay, Some(Overlay::NewTask { .. })) {
+            return self.toggle_plan_first(cx);
+        }
+        let Some(a) = self.selected_agent() else {
+            let msg = match self.selected {
+                Some(Selected::TermTask(_)) => "In an Agent Terminal, press Shift+Tab to cycle Claude Code's modes",
+                _ => "Select a chat agent first",
+            };
+            return self.flash(msg, cx);
+        };
+        let on = a.update(cx, |a, cx| {
+            a.toggle_plan_mode(cx);
+            a.in_plan_mode()
+        });
+        self.flash(if on { "Plan mode: the agent plans and asks before it changes anything" } else { "Plan mode off" }, cx);
+        self.sync_menus(cx);
+    }
+
+    pub(super) fn comment_on_plan(&mut self, _: &qur::CommentOnPlan, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(a) = self.selected_agent() else { return self.flash("Select a chat agent first", cx) };
+        if !a.update(cx, |a, cx| a.show_plan(cx)) {
+            self.flash("No plan to comment on yet: turn on Plan Mode (Cmd+Opt+P) and ask for one", cx);
+        }
+    }
+
+    pub(super) fn approve_plan(&mut self, _: &qur::ApprovePlan, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(a) = self.selected_agent().filter(|a| a.read(cx).has_plan_to_review()) else { return self.flash("No plan is waiting for approval", cx) };
+        a.update(cx, |a, cx| a.approve_plan(cx));
+    }
+
+    pub(super) fn send_plan_comments(&mut self, _: &qur::SendPlanComments, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(a) = self.selected_agent().filter(|a| a.read(cx).plan_comments() > 0) else { return self.flash("No plan comments to send: click a line of the plan to comment", cx) };
+        a.update(cx, |a, cx| a.send_plan_comments(cx));
     }
 }

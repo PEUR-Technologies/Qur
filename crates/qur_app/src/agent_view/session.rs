@@ -6,6 +6,11 @@ use super::*;
 impl AgentTask {
     // -- lifecycle ---------------------------------------------------------------
 
+    /// The ACP adapter's pid while it runs (About's memory readout).
+    pub fn agent_pid(&self) -> Option<i32> {
+        self.client.as_ref().map(|c| c.pid())
+    }
+
     /// Spawn the agent, initialize, then load the saved session (shows its
     /// history) or start a new one. Sends a queued prompt when ready.
     pub fn start(&mut self, cx: &mut Context<Self>) {
@@ -25,6 +30,7 @@ impl AgentTask {
         self.agent_cmd = Some(cmd);
         self.client = Some(client.clone());
         self.set_status(Status::Starting, cx);
+        self.debug_fill(cx);
         self._events = Some(cx.spawn(async move |this, cx| {
             let mut events = events;
             while let Some(ev) = events.next().await {
@@ -58,6 +64,11 @@ impl AgentTask {
         let saved = self.record.session_id.clone().filter(|_| self.load_session).map(SessionId::from);
         let cwd = self.record.worktree.clone();
         let role = self.review.clone();
+        // Back from an idle release or a restart: the chat already shows the history the
+        // load replays, and the user's settings go back on.
+        self.replaying = saved.is_some() && (self.resume.is_some() || self.history.restored);
+        let restore = self.resume.as_ref().map(|r| r.settings.clone()).unwrap_or_default();
+        let plan_first = self.plan_first && role.is_none();
         cx.spawn(async move |this, cx| {
             let session = match saved {
                 Some(id) => match client.load_session(&id, &cwd).await {
@@ -66,6 +77,7 @@ impl AgentTask {
                 },
                 None => None,
             };
+            let loaded = session.is_some();
             let (session, settings) = match session {
                 Some(s) => s,
                 None => match client.new_session(&cwd).await {
@@ -79,23 +91,140 @@ impl AgentTask {
             // anything is sent (also after a restart: modes aren't saved).
             let settings = match &role {
                 Some(role) => review_setup(&client, &session, settings, role).await,
+                None if loaded => restore_settings(&client, &session, settings, &restore).await,
                 None => settings,
             };
+            let (settings, pre_plan) = if plan_first { plan::plan_setup(&client, &session, settings).await } else { (settings, None) };
             this.update(cx, |t, cx| {
+                if plan_first {
+                    t.plan_first = false;
+                    t.pre_plan_mode = pre_plan;
+                }
                 t.sign_in = None;
                 t.settings = settings;
                 t.record.session_id = Some(session.to_string());
                 t.session_id = Some(session);
-                t.set_status(Status::Idle, cx);
-                if let Some(out) = t.queued.take() {
-                    t.send_out(out, cx);
-                } else {
-                    t.drain_pending(cx);
+                let resumed = t.resume.take();
+                if resumed.is_some() && !loaded {
+                    t.replaying = false;
+                    t.push(ChatItem::Notice(format!("Couldn't pick up the earlier session again: {} starts afresh and doesn't remember the chat above.", t.def.label)));
+                }
+                match resumed {
+                    // Nothing to send: back to how it was, with no new status to alert for.
+                    Some(r) if t.queued.is_none() && t.pending.is_empty() => {
+                        println!("RESUME {} {}", t.record.id, if loaded { "loaded" } else { "new session" });
+                        t.status = r.status;
+                        t.last_active = Instant::now();
+                        cx.emit(AgentEvent::Resumed);
+                        cx.notify();
+                    }
+                    _ => {
+                        t.set_status(Status::Idle, cx);
+                        if let Some(out) = t.queued.take() {
+                            t.send_out(out, cx);
+                        } else {
+                            t.drain_pending(cx);
+                        }
+                    }
                 }
             })
             .ok()
         })
         .detach();
+    }
+
+    // -- idle release --------------------------------------------------------------
+
+    /// Nothing is going on or waiting: no turn, queue, permission, sign-in,
+    /// setup or Rewind.
+    fn quiet(&self) -> bool {
+        matches!(self.status, Status::Done | Status::Idle)
+            && self.queued.is_none()
+            && self.pending.is_empty()
+            && self.permissions.is_empty()
+            && self.sign_in.is_none()
+            && !self.setting_up
+            && !self.rewinding
+            && !self.turn_running()
+            && self.rewind_after_stop.is_none()
+    }
+
+    /// Working, starting, or about to: a turn, setup or Rewind under way.
+    pub fn busy(&self) -> bool {
+        matches!(self.status, Status::Working | Status::NeedsYou | Status::Starting) || self.setting_up || self.rewinding || self.turn_running()
+    }
+
+    /// How long the task has gone without doing or showing anything (None
+    /// while it's busy).
+    pub fn idle_for(&self) -> Option<Duration> {
+        (!self.busy()).then(|| self.last_active.elapsed())
+    }
+
+    /// Restart the idle clock (the task was on screen).
+    pub fn touch(&mut self) {
+        self.last_active = Instant::now();
+    }
+
+    /// QUR_DEBUG_ACTIONS `state`: "id:status:process:chat=rows".
+    pub fn debug_state(&self) -> String {
+        let process = if self.is_released() {
+            "released"
+        } else if self.client.is_some() {
+            "running"
+        } else {
+            "none"
+        };
+        format!("{}:{:?}:{process}:chat={}", self.record.id, self.status.label(), self.chat.len())
+    }
+
+    /// Released for being idle: no process now, back on `start`.
+    pub fn is_released(&self) -> bool {
+        self.resume.is_some() && self.client.is_none()
+    }
+
+    /// Idle release, for a task out of sight: Live's copy of its file and
+    /// the Changes view's diff go (rebuilt by `wake`), and so does the
+    /// agent's process (the ACP adapter and the CLI under it, the bulk of an
+    /// agent's memory) when it's quiet and can load its session again. The
+    /// task, its chat and session id stay; `start` loads the session without
+    /// showing its history twice. Returns whether the process was stopped.
+    pub fn release(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.busy() {
+            return false;
+        }
+        // A reviewer borrows its task's views: they're the task's to release.
+        if self.review.is_none() {
+            self.live.update(cx, |l, cx| l.release(cx));
+            self.changes.update(cx, |c, _| c.release());
+        }
+        if !(self.quiet() && self.load_session && self.session_id.is_some()) {
+            return false;
+        }
+        let Some(client) = self.client.take() else { return false };
+        let pid = client.pid();
+        std::thread::spawn(move || client.shutdown(Duration::from_secs(2)));
+        let settings = self.settings.iter().map(|o| (o.id.clone(), o.current.clone())).collect();
+        self.resume = Some(Resume { status: self.status.clone(), settings });
+        self.session_id = None;
+        // Its exit isn't news: nothing reads the events any more.
+        self._events = None;
+        println!("RELEASE {} agent pid {pid} after {}s idle", self.record.id, self.last_active.elapsed().as_secs());
+        cx.notify();
+        true
+    }
+
+    /// The task is on screen again: rebuild what `release` let go, and start
+    /// the agent when it was released or stopped with a saved session (its
+    /// history loads; nothing is sent).
+    pub fn wake(&mut self, cx: &mut Context<Self>) {
+        self.touch();
+        if self.review.is_none() {
+            self.live.update(cx, |l, cx| l.wake(cx));
+            self.changes.update(cx, |c, cx| c.wake(cx));
+        }
+        if self.is_released() || (self.status == Status::Stopped && self.record.session_id.is_some()) {
+            self.start(cx);
+        }
     }
 
     // -- sign-in -------------------------------------------------------------------
@@ -169,12 +298,9 @@ impl AgentTask {
         }
         // The saved session's history is replayed on load: rebuild the chat
         // from it rather than show it twice.
-        if self.load_session && self.record.session_id.is_some() && self.session_id.is_some() {
-            self.chat.clear();
-            self.tools.clear();
-            self.toggled.clear();
-            self.list.reset(0);
-            self.chat_changed();
+        // (A chat restored from disk stays; the replay isn't shown then.)
+        if self.load_session && self.record.session_id.is_some() && self.session_id.is_some() && !self.history.restored {
+            self.clear_chat();
         }
         if let Some(c) = self.client.take() {
             std::thread::spawn(move || c.shutdown(Duration::from_secs(2)));
@@ -284,6 +410,7 @@ impl AgentTask {
     }
 
     fn set_status(&mut self, s: Status, cx: &mut Context<Self>) {
+        self.last_active = Instant::now();
         if s == Status::Working && self.status != Status::NeedsYou {
             self.turn_wrote = false;
         }
@@ -302,7 +429,17 @@ impl AgentTask {
             self.monitor.update(cx, |m, _| m.set_turn_active(active));
         }
         if self.status != s {
+            // For a crash report (only ever read by the panic hook).
+            let state = match &s {
+                Status::Error(_) => "Error".to_string(),
+                s => format!("{s:?}"),
+            };
+            crate::crash::note_agent(cx.entity_id().as_u64(), &self.def.label, &state);
             self.status = s;
+            // A turn started or ended: the chat is saved.
+            if self.status != Status::Starting {
+                self.save_chat();
+            }
             cx.emit(AgentEvent::Changed);
         }
         cx.notify();
@@ -318,12 +455,15 @@ impl AgentTask {
         self.follow_bottom();
         let mut out = Outgoing::plain(if text.trim().is_empty() { "Adjust this.".into() } else { text }, mentions);
         for a in atts {
-            out.labels.push(a.label.to_string());
+            // Picks show by name in the message; images and files as their own row under it.
             if !a.context.is_empty() {
+                out.labels.push(a.label.to_string());
                 out.context.push(a.context);
             }
-            if let Some(png) = a.png {
-                out.images.push(png);
+            match (a.image, a.path) {
+                (Some(image), path) => out.images.push(OutImage { image, thumb: a.thumb, path }),
+                (None, Some(path)) => out.files.push(path),
+                (None, None) => {}
             }
         }
         if matches!(self.status, Status::Working | Status::NeedsYou | Status::Starting) || self.setting_up || self.sign_in.is_some() || self.rewinding {
@@ -388,9 +528,13 @@ impl AgentTask {
             .context
             .iter()
             .enumerate()
-            .map(|(i, c)| Attachment { label: if named { o.labels[i].clone().into() } else { "Context".into() }, context: c.clone(), png: None })
+            .map(|(i, c)| Attachment::pick(if named { o.labels[i].clone().into() } else { "Context".into() }, c.clone(), None))
             .collect();
-        atts.extend(o.images.into_iter().map(|png| Attachment { label: "Image".into(), context: String::new(), png: Some(png) }));
+        atts.extend(o.images.into_iter().map(|i| {
+            let label = i.path.as_deref().map_or_else(|| "Image".into(), crate::files::chip_name);
+            Attachment::image(label.into(), i.image, i.thumb, i.path)
+        }));
+        atts.extend(o.files.into_iter().map(Attachment::file));
         self.prompt.update(cx, |p, cx| {
             let typed = p.text.trim().to_string();
             let text = if typed.is_empty() { o.text.clone() } else { format!("{}\n{typed}", o.text) };
@@ -409,7 +553,14 @@ impl AgentTask {
         self.record.queued = self
             .pending
             .iter()
-            .map(|o| QueuedMessage { text: o.text.clone(), mentions: o.mentions.clone(), context: o.context.clone(), labels: o.labels.clone() })
+            .map(|o| QueuedMessage {
+                text: o.text.clone(),
+                mentions: o.mentions.clone(),
+                context: o.context.clone(),
+                labels: o.labels.clone(),
+                // An image file comes back as a link to it (images aren't saved).
+                files: o.images.iter().filter_map(|i| i.path.clone()).chain(o.files.iter().cloned()).collect(),
+            })
             .collect();
         cx.emit(AgentEvent::Changed);
     }
@@ -433,6 +584,18 @@ impl AgentTask {
     pub fn notice(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.push(ChatItem::Notice(text.into()));
         cx.notify();
+    }
+
+    /// A notice with a link under it (the pull request opened for the task).
+    pub fn notice_link(&mut self, text: impl Into<String>, uri: String, cx: &mut Context<Self>) {
+        self.push(ChatItem::Notice(text.into()));
+        self.push(ChatItem::Link { name: uri.clone(), uri });
+        cx.notify();
+    }
+
+    /// What you asked this session, oldest first (a pull request's body).
+    pub fn user_prompts(&self) -> Vec<String> {
+        self.full_chat().0.into_iter().filter_map(|c| if let ChatItem::User(t) = c { Some(t) } else { None }).collect()
     }
 
     pub fn set_error(&mut self, msg: String, cx: &mut Context<Self>) {
@@ -463,28 +626,40 @@ impl AgentTask {
         }
         let shown = out.shown();
         let (Some(client), Some(session)) = (self.client.clone(), self.session_id.clone()) else {
-            self.queued = Some(out);
+            self.queued = Some(out.clone());
             self.push(ChatItem::User(shown));
+            self.push_sent(&out, cx);
             self.start(cx);
             return;
         };
-        if self.queued.is_none() && !matches!(self.chat.last(), Some(ChatItem::User(t)) if *t == shown) {
+        // The last message, past its attachments row.
+        let last = self.chat.iter().rev().find(|c| !matches!(c, ChatItem::Files(_)));
+        if self.queued.is_none() && !matches!(last, Some(ChatItem::User(t)) if *t == shown) {
             self.push(ChatItem::User(shown));
+            self.push_sent(&out, cx);
         }
         // Kept for Retry / Edit & resend, and re-queued if a sign-in is needed.
         self.last_sent = Some(out.clone());
         let sent = out.clone();
-        let Outgoing { text, mentions, context, images, .. } = out;
+        let Outgoing { text, mentions, context, images, files, .. } = out;
         let mut blocks = vec![PromptBlock::Text(text)];
         for c in context {
             blocks.push(PromptBlock::Text(c));
         }
-        if self.images_ok {
-            for png in images {
-                blocks.push(PromptBlock::Image { mime: "image/png".into(), data_base64: base64(&png) });
+        // An image file also says where it is (the agent may want to use it);
+        // an agent that takes no images gets just the link.
+        let mut links = Vec::new();
+        for OutImage { image: img, path, .. } in images {
+            if self.images_ok {
+                blocks.push(PromptBlock::Image { mime: img.format.mime_type().into(), data_base64: base64(img.bytes()) });
+                if let Some(p) = path {
+                    blocks.push(PromptBlock::Text(format!("(The image above is the file {}.)", p.display())));
+                }
+            } else {
+                links.extend(path);
             }
         }
-        for m in mentions {
+        for m in mentions.into_iter().chain(links).chain(files) {
             let name = m.strip_prefix(&self.record.worktree).unwrap_or(&m).to_string_lossy().into_owned();
             blocks.push(PromptBlock::ResourceLink { uri: format!("file://{}", m.display()), name });
         }
@@ -494,6 +669,7 @@ impl AgentTask {
         }
         self.turn_started = Some(Instant::now());
         self.turn_tools.clear();
+        self.drop_hidden_tools();
         self.turn_files.clear();
         self.set_status(Status::Working, cx);
         // Checkpoint the worktree before the agent can touch it, then send.
@@ -583,6 +759,7 @@ impl AgentTask {
         if !matches!(self.status, Status::Error(_)) {
             self.set_status(Status::Stopped, cx);
         }
+        self.save_chat();
         // The task's reviewer stops with it.
         let reviewer = self.reviewer.clone().and_then(|r| r.update(cx, |r, cx| r.shutdown(cx)));
         match (handle, reviewer) {
@@ -721,6 +898,18 @@ impl AgentTask {
     }
 
     fn on_event(&mut self, ev: Event, cx: &mut Context<Self>) {
+        self.last_active = Instant::now();
+        // A released session loading again: its history is in the chat
+        // already. Only what may have changed since (commands, settings,
+        // usage) is taken.
+        if self.replaying {
+            match &ev {
+                Event::Loaded(_) => self.replaying = false,
+                Event::Update { update: SessionUpdate::AvailableCommands(_) | SessionUpdate::ConfigOptions(_) | SessionUpdate::CurrentMode(_) | SessionUpdate::Usage { .. }, .. } => {}
+                Event::Update { .. } => return,
+                _ => {}
+            }
+        }
         match ev {
             // Our session id is known before session/load replays history, so
             // replayed subagent work is kept out of the chat too.
@@ -744,7 +933,7 @@ impl AgentTask {
                 cx.notify();
             }
             Event::Update { update, .. } => match update {
-                SessionUpdate::AgentMessage(c) | SessionUpdate::UserMessage(c) if c.media.is_some() => self.push_media(c.media),
+                SessionUpdate::AgentMessage(c) | SessionUpdate::UserMessage(c) if c.media.is_some() => self.push_media(c.media, cx),
                 SessionUpdate::AgentMessage(c) => self.append(false, &c.text),
                 SessionUpdate::AgentThought(c) => self.append(true, &c.text),
                 // The agent named the session: the task's title follows unless
@@ -769,7 +958,7 @@ impl AgentTask {
                 }
                 SessionUpdate::ToolCall(t) => {
                     let id = t.id.clone();
-                    let paths: Vec<PathBuf> = t.locations.iter().map(|l| l.path.clone()).collect();
+                    let paths = crate::monitor::tool_paths(&t.locations, &t.content);
                     let (k, st) = (heat_kind(t.kind), heat_status(t.status));
                     let lines: Vec<(PathBuf, u32)> = t.locations.iter().filter_map(|l| Some((l.path.clone(), l.line?))).collect();
                     // A reviewer's reads aren't the task agent's work: no heat.
@@ -787,7 +976,7 @@ impl AgentTask {
                 }
                 SessionUpdate::ToolCallUpdate(u) => {
                     let id = u.id.clone();
-                    let paths: Vec<PathBuf> = u.locations.iter().flatten().map(|l| l.path.clone()).collect();
+                    let paths = crate::monitor::tool_paths(u.locations.iter().flatten(), u.content.iter().flatten());
                     let (k, st) = (u.kind.map(heat_kind), u.status.map(heat_status));
                     let lines: Vec<(PathBuf, u32)> = u.locations.iter().flatten().filter_map(|l| Some((l.path.clone(), l.line?))).collect();
                     if self.review.is_none() {
@@ -798,8 +987,21 @@ impl AgentTask {
                             }
                         });
                     }
+                    // Its row is on disk (a long chat): dropped.
+                    if !self.tools.contains_key(&id) && self.tool_hidden(&id) {
+                        return;
+                    }
                     match self.tools.get_mut(&id) {
-                        Some(t) => t.apply(&u),
+                        Some(t) => {
+                            t.apply(&u);
+                            // Done: its raw input and output are only shown
+                            // when it has nothing else (file reads carry the
+                            // file twice otherwise).
+                            if matches!(t.status, ToolStatus::Completed | ToolStatus::Failed) && !history::raw_shown(t) {
+                                t.raw_input = None;
+                                t.raw_output = None;
+                            }
+                        }
                         None => {
                             let t = u.to_tool_call();
                             self.tools.insert(id.clone(), t);
@@ -823,6 +1025,7 @@ impl AgentTask {
                     let cost = cost.or(self.usage.and_then(|u| u.2));
                     self.usage = Some((used, size, cost));
                 }
+                SessionUpdate::TurnUsage(u) => self.tokens += u.total,
                 SessionUpdate::Subagent { id, title, state } => {
                     let ix = match self.subagents.iter().position(|s| s.id == id) {
                         Some(ix) => ix,
@@ -889,7 +1092,7 @@ impl AgentTask {
                     self.set_status(Status::Error(msg), cx);
                 }
             }
-            Event::Warning(_) => {}
+            Event::Warning(_) | Event::Loaded(_) => {}
         }
         cx.notify();
     }
@@ -902,7 +1105,7 @@ impl AgentTask {
 /// A reviewer's session settings: its read-only mode (`plan`, or Codex's
 /// read-only), then the model picked for it. Returns the settings as the
 /// agent now has them. A refusal is logged; Qur's deny still applies.
-async fn review_setup(client: &Client, session: &SessionId, mut settings: Vec<ConfigOption>, role: &ReviewRole) -> Vec<ConfigOption> {
+async fn review_setup(client: &Client, session: &SessionId, settings: Vec<ConfigOption>, role: &ReviewRole) -> Vec<ConfigOption> {
     let mut wanted: Vec<(String, String)> = Vec::new();
     match review::read_only_mode(&settings) {
         Some(m) => wanted.push(m),
@@ -915,21 +1118,39 @@ async fn review_setup(client: &Client, session: &SessionId, mut settings: Vec<Co
     {
         wanted.push((o.id.clone(), m.clone()));
     }
+    apply_settings(client, session, settings, wanted, "REVIEW").await
+}
+
+/// A session loaded again after an idle release: the settings the user had
+/// (mode, model…) go back on where the loaded session differs and still
+/// offers them.
+async fn restore_settings(client: &Client, session: &SessionId, settings: Vec<ConfigOption>, had: &[(String, String)]) -> Vec<ConfigOption> {
+    let wanted = had
+        .iter()
+        .filter(|(id, value)| settings.iter().any(|o| o.id == *id && o.current != *value && o.values.iter().any(|v| v.value == *value)))
+        .cloned()
+        .collect();
+    apply_settings(client, session, settings, wanted, "RESUME").await
+}
+
+/// Set each (id, value) in turn; returns the settings as the agent now has
+/// them. A refusal is logged under `tag`.
+async fn apply_settings(client: &Client, session: &SessionId, mut settings: Vec<ConfigOption>, wanted: Vec<(String, String)>, tag: &str) -> Vec<ConfigOption> {
     for (id, value) in wanted {
         let Some(opt) = settings.iter().find(|o| o.id == id).cloned() else { continue };
         match client.set_option(session, &opt, &value).await {
             Ok(Ok(Some(list))) => {
                 let legacy = settings.iter().find(|o| o.legacy_mode).cloned().filter(|_| !list.iter().any(ConfigOption::is_mode));
                 settings = legacy.into_iter().chain(list).collect();
-                println!("REVIEW {session} set {id}={value}");
+                println!("{tag} {session} set {id}={value}");
             }
             Ok(Ok(None)) => {
                 if let Some(o) = settings.iter_mut().find(|o| o.id == id) {
                     o.current = value.clone();
                 }
-                println!("REVIEW {session} set {id}={value}");
+                println!("{tag} {session} set {id}={value}");
             }
-            Ok(Err(e)) => eprintln!("REVIEW {session} couldn't set {id}={value}: {e}"),
+            Ok(Err(e)) => eprintln!("{tag} {session} couldn't set {id}={value}: {e}"),
             Err(_) => {}
         }
     }

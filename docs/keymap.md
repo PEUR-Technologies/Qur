@@ -13,7 +13,8 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+,` | Settings… (agents, appearance, editor, layout, files; changes apply and save at once, Esc closes) | Qur | ✅ |
 | `Cmd+N` | New Window | File | M1+ |
 | `Cmd+Shift+N` | New Agent Task (same as sidebar `+`) | File | M2 ✅ |
-| `Cmd+O` | Open Folder… | File | M1+ |
+| `Cmd+O` | Open File…: any file, also outside the project (text in the code modal; images, binaries and large files in the file viewer) | File | ✅ |
+| `Cmd+K Cmd+O` | Open Folder… (was `Cmd+O`) | File | ✅ |
 | `Cmd+Opt+O` | Switch Project… (also: click the project name in the top bar) | File | M1 |
 | `Cmd+Shift+W` | Close Window | File | S |
 | `Cmd+M` | Minimize | Window | S |
@@ -36,6 +37,26 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Ctrl+G` | Go to Line… | S |
 | `Ctrl+-` / `Ctrl+Shift+-` | Navigate Back / Forward | M1 |
 | `Cmd+Shift+O` | Go to Symbol in File (tree-sitter outline, no LSP; arrows preview, Esc goes back) | ✅ |
+| File menu / palette | Open as Text: the file viewer's file (an image, a binary) in the code modal, decoded as Windows-1252 when it isn't text; read-only if saving couldn't give the same bytes back. A large file opens as paged text in the viewer (no default keys) | ✅ |
+| File > Encoding / palette | Reopen with Encoding… / Convert to Encoding… (UTF-8, UTF-8 BOM, UTF-16 LE, UTF-16 BE, Windows-1252; converting marks the file unsaved, `Cmd+Z` undoes), Convert Line Endings (LF ⇄ CRLF, undoable). The code modal's header shows the encoding and line endings (no default keys) | ✅ |
+| View menu / palette | Show Whitespace: spaces as ·, tabs as →, line ends as ¬ in the code modal, saved as `[editor] show_whitespace` (no default keys) | ✅ |
+| File viewer (hex view) | Scroll, arrows, `PageUp`/`PageDown`, `Cmd+Up`/`Cmd+Down`; `Ctrl+G` Go to Offset (`0x1F00` or `7936`); drag or Shift-click to select bytes, `Cmd+A` all, `Cmd+C` copies them as hex; `Esc` closes the offset bar, then the viewer | ✅ |
+| File viewer (large file) | Read-only paged text: scroll and keys as in the hex view, `Ctrl+G` Go to Line, click or Shift-click lines and `Cmd+C`, `Cmd+F` Find (streams through the file; `Enter` / `Shift+Enter` or `Cmd+G` / `Cmd+Shift+G` next / previous; counts every match) | ✅ |
+
+## Reviewing changes in the code modal
+
+A file in an agent's worktree (the modal says "in <task>") shows the agent's changes in the gutter: a green bar beside added lines, an amber bar beside changed ones, a red tick where lines were removed, all against the task's base commit (or, with Edit > Changes > Last Turn Only, against the snapshot its last turn started from). Your own files in the main checkout get the same markers against HEAD; untracked files get none. The markers catch up a moment after you stop typing.
+
+| Keys | Command | Tier |
+|---|---|---|
+| `Opt+F5` / `Shift+Opt+F5` | Next / Previous Change (wraps around; VS Code's keys) | ✅ |
+| `Opt+F3` (or click a marker) | Show Change: a peek under the change with the removed lines and ‹ › Revert Accept ✕; again to close | ✅ |
+| Edit > Changes / palette / peek | Revert Change: put the base's lines back in the buffer as one undoable edit (`Cmd+Z` brings the agent's back; save to keep it; the index is never touched) | ✅ |
+| Edit > Changes / palette / peek | Accept Change: mark it reviewed; its marker goes until its text changes again (for this session), and the cursor moves to the next change | ✅ |
+| Edit > Changes | Last Turn Only (checkmark): a task's markers show what its last turn changed, not everything since it started | ✅ |
+| `Shift+Opt+Cmd+C` | Copy Relative Path of the file in the code modal (relative to its checkout: the project or the task's worktree; VS Code's key) | ✅ |
+| File menu / palette | Reveal in Finder, Copy Path (the file in the code modal). No default keys: VS Code's `Opt+Cmd+R` and `Opt+Cmd+C` are Qur's find toggles | ✅ |
+| Right-click a Files row | Open, Open in Default App (files), Reveal in Finder, Copy Path, Copy Relative Path (relative to the tree's root); a deleted file's row is greyed out. Drag a row out of the window to drop the file in Finder or another app | ✅ |
 
 ## Editing
 
@@ -64,7 +85,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+D` | Add selection to next match (multi-cursor) | M1 |
 | `Cmd+Shift+L` | Select all matches | M1 |
 | `Opt+Click` / `Cmd+Opt+Up/Down` | Add cursor | M1 |
-| `Esc` | Collapse to one cursor / close find | S |
+| `Esc` | Close a change's peek / collapse to one cursor / close find | S |
 | `Shift+Cmd+\` | Jump to matching bracket | M1 |
 | `Cmd+K Cmd+X` | Trim trailing whitespace | M1 |
 | `Opt+Z` | Toggle soft wrap | S |
@@ -128,6 +149,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Up` (empty prompt) | Pull the last queued message back into the prompt to edit it (each queued message also has Send now / Edit / ✕) | ✅ |
 | `Cmd+Z` / `Shift+Cmd+Z` (prompt, text fields) | Undo / redo in the prompt and the one-line fields (find, replace, go to line, pickers, address bar); typing groups into one step until a pause or a caret move | ✅ |
 | `Shift+Tab` (chat agent) | Next mode (Default / Accept Edits / Plan…), from the agent's session settings; click the Mode or Model chip above the prompt to choose | ✅ |
+| `Cmd+Opt+P` | Plan Mode: the selected chat agent into its plan (read-only) mode, or back to the mode it was in; in the New Agent Task dialog, Plan first (the task's first message goes in plan mode). When the agent proposes a plan it opens in place of the chat: click a line to comment, then **Send comments** (it keeps planning) or **Approve** (it starts, back in its earlier mode). Agent menu: Comment on Plan…, Approve Plan, Send Plan Comments (no default keys) | ✅ |
 | Agent menu | Discard Task…, Reveal Worktree in Finder, Open Task Worktree in Terminal | M2 ✅ |
 | `Cmd+K Cmd+L` | Cycle peek layout | M3 ✅ |
 | `Cmd+1..4` | Live / To-do / Chat / Changes (layout B) | M3 ✅ |
@@ -138,6 +160,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+=` `Cmd+-` `Cmd+0` (browser) | Page zoom in / out / actual size (instead of Qur's zoom while the browser has focus) | Browser ✅ |
 | `Cmd+C/X/V/A/Z`, `Shift+Cmd+Z` (in a page) | Copy, cut, paste, select all, undo, redo in the page | Browser ✅ |
 | Changes view / Agent menu | Merge into My Branch, Keep Working, Discard Task…, Review Changes | M4 ✅ |
+| Changes view / Agent menu | Push and Open Pull Request…, Open Pull Request (your own `git` and `gh`) | ✅ |
 | Agent menu | Run Checks Now, Run Project in Worktree (no default keys) | ✅ |
 | Agent menu / chat turn line | Show Last Turn's Changes, Rewind Last Turn… (structured agents; no default keys) | ✅ |
 | `Cmd+F` (in a terminal) | Find in Terminal (regex; ↩ older, ⇧↩ newer, Esc closes) | M5 ✅ |
@@ -152,7 +175,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | View > Git | Stage All Changes, Unstage All Changes, Commit Staged… (no default keys) | M4 ✅ |
 | Changes view: click a line / ⌘-click | Comment on the line (sent to the agent as one message) / open the file there | M4 ✅ |
 
-The code modal closes with `Esc`: first the find bar, then extra cursors, then the modal (decision 18).
+The code modal closes with `Esc`: first a change's peek, then the find bar, then extra cursors, then the modal (decision 18).
 
 ## Vim mode (optional, M6)
 

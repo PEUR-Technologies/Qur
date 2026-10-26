@@ -5,6 +5,10 @@ use super::*;
 
 impl Workspace {
     pub(super) fn select(&mut self, s: Option<Selected>, window: &mut Window, cx: &mut Context<Self>) {
+        // The agent you leave starts its idle clock now.
+        if let Some(a) = self.selected_agent() {
+            a.update(cx, |a, _| a.touch());
+        }
         self.selected = s;
         match &self.selected {
             Some(Selected::Agent(id)) | Some(Selected::TermTask(id)) => {
@@ -13,18 +17,18 @@ impl Workspace {
             }
             _ => {}
         }
-        let root = self.current_root(cx);
-        self.tree_for(&root, window, cx);
+        // The empty window has no file tree (it would list the home folder).
+        if !self.home {
+            let root = self.current_root(cx);
+            self.tree_for(&root, window, cx);
+        }
         match &self.selected {
             Some(Selected::Agent(id)) => {
                 if let Some(a) = self.agent(id).cloned() {
-                    // A stopped task with a saved session: start it so its
-                    // history loads. No prompt is sent.
-                    a.update(cx, |a, cx| {
-                        if a.status == Status::Stopped && a.record.session_id.is_some() {
-                            a.start(cx);
-                        }
-                    });
+                    // A stopped task with a saved session starts so its
+                    // history loads, and one released for being idle picks
+                    // up again. No prompt is sent.
+                    a.update(cx, |a, cx| a.wake(cx));
                     let f = a.read(cx).prompt.read(cx).focus.clone();
                     window.focus(&f, cx);
                 }
@@ -41,6 +45,7 @@ impl Workspace {
             }
             Some(Selected::Git) => {
                 self.git_panel(window, cx);
+                self.suggest_commit(cx);
                 window.focus(&self.focus, cx);
             }
             Some(Selected::Search) => {
@@ -443,6 +448,7 @@ impl Workspace {
                     return Self::stage_tile(look, ui.editor_bg, s.clone().into_any_element());
                 }
             }
+            None if self.home => return self.home_stage(look, cx),
             None => {}
         }
         let hint = |label: &'static str, keys: &str| {

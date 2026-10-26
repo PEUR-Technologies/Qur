@@ -49,6 +49,24 @@ pub struct Config {
     pub keys: KeysConfig,
     pub alerts: AlertsConfig,
     pub layout: LayoutConfig,
+    pub agents: AgentsConfig,
+    pub terminal: TerminalConfig,
+}
+
+/// Structured (ACP) agents.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AgentsConfig {
+    /// Minutes a finished agent may sit unused, out of sight, before Qur
+    /// stops its process (it resumes its session when you go back to it).
+    /// 0 = never.
+    pub idle_release: u64,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        AgentsConfig { idle_release: 10 }
+    }
 }
 
 /// The agent stage's arrangement (dock.rs), written by Qur as you drag tabs
@@ -58,6 +76,24 @@ pub struct Config {
 pub struct LayoutConfig {
     pub acp: Option<String>,
     pub terminal: Option<String>,
+}
+
+/// `[terminal]`.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct TerminalConfig {
+    /// Lines of scrollback kept per terminal (new terminals; open ones keep
+    /// theirs). A full line costs about 2.4 KB at 100 columns.
+    pub scrollback: usize,
+}
+
+pub const DEFAULT_SCROLLBACK: usize = 5000;
+pub const MAX_SCROLLBACK: usize = 100_000;
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        TerminalConfig { scrollback: DEFAULT_SCROLLBACK }
+    }
 }
 
 /// When an agent finishes, errors or needs you while you're elsewhere
@@ -96,6 +132,10 @@ pub struct EditorConfig {
     pub line_height: f32,
     pub soft_wrap: bool,
     pub tab_width: usize,
+    /// Draw spaces as ·, tabs as → and line ends as ¬ in the code modal.
+    pub show_whitespace: bool,
+    /// Files bigger than this (MB) open read-only, paged from disk.
+    pub large_file_mb: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -176,6 +216,8 @@ impl Default for Config {
             keys: KeysConfig::default(),
             alerts: AlertsConfig::default(),
             layout: LayoutConfig::default(),
+            agents: AgentsConfig::default(),
+            terminal: TerminalConfig::default(),
         }
     }
 }
@@ -188,7 +230,7 @@ impl Default for WindowConfig {
 
 impl Default for EditorConfig {
     fn default() -> Self {
-        EditorConfig { font_family: String::new(), font_size: 13.0, line_height: 1.5, soft_wrap: true, tab_width: 4 }
+        EditorConfig { font_family: String::new(), font_size: 13.0, line_height: 1.5, soft_wrap: true, tab_width: 4, show_whitespace: false, large_file_mb: 50 }
     }
 }
 
@@ -247,6 +289,8 @@ impl Config {
         self.editor.font_size = self.editor.font_size.clamp(6.0, 72.0);
         self.editor.line_height = self.editor.line_height.clamp(1.0, 3.0);
         self.editor.tab_width = self.editor.tab_width.clamp(1, 16);
+        self.terminal.scrollback = self.terminal.scrollback.min(MAX_SCROLLBACK);
+        self.editor.large_file_mb = self.editor.large_file_mb.max(1);
         self.window.opacity = self.window.opacity.clamp(0.0, 1.0);
         if !matches!(self.ui.sidebar.as_str(), "show" | "auto" | "hidden") {
             self.ui.sidebar = "show".into();
@@ -501,6 +545,9 @@ pub struct State {
     pub recent_projects: Vec<PathBuf>,
     /// The first-run picker was shown (or this home predates it).
     pub setup_done: bool,
+    /// The newest crash report (`crash-*.txt` in the logs folder) the user
+    /// has seen the "quit unexpectedly" notice for.
+    pub crash_seen: String,
 }
 
 pub fn state_path() -> PathBuf {
@@ -525,6 +572,9 @@ impl State {
         if self.setup_done {
             doc["setup_done"] = toml_edit::value(true);
         }
+        if !self.crash_seen.is_empty() {
+            doc["crash_seen"] = toml_edit::value(&self.crash_seen);
+        }
         let text = format!("# Managed by Qur. Edit config.toml instead.\n{doc}");
         write_atomic(&state_path(), text.as_bytes())
     }
@@ -541,7 +591,7 @@ impl State {
 // projects/<project-id>.state.toml (machine-managed)
 // ---------------------------------------------------------------------------
 
-/// Files restored with the project: more than this only slows opening.
+/// Files remembered with the project (Recent File, Go to File's first rows).
 pub const MAX_OPEN_FILES: usize = 20;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -561,6 +611,8 @@ pub struct OpenFile {
     /// Cursor, 0-based.
     pub line: usize,
     pub col: usize,
+    /// The line at the top of the view, 0-based.
+    pub top: usize,
 }
 
 pub fn project_state_path(id: &str) -> PathBuf {
@@ -590,6 +642,9 @@ impl ProjectState {
             t["path"] = toml_edit::value(f.path.to_string_lossy().as_ref());
             t["line"] = toml_edit::value(f.line as i64);
             t["col"] = toml_edit::value(f.col as i64);
+            if f.top > 0 {
+                t["top"] = toml_edit::value(f.top as i64);
+            }
             files.push(t);
         }
         doc["file"] = toml_edit::Item::ArrayOfTables(files);
@@ -768,6 +823,17 @@ mod tests {
         assert!(err.is_none());
         assert_eq!(c.theme, "Auto");
         assert!(c.editor.soft_wrap);
+        assert_eq!(c.agents.idle_release, 10);
+    }
+
+    #[test]
+    fn agents_idle_release() {
+        let d = tmp("agents");
+        let p = d.join("config.toml");
+        std::fs::write(&p, "[agents]\nidle_release = 0\n").unwrap();
+        let (c, err) = Config::load_from(&p);
+        assert!(err.is_none());
+        assert_eq!(c.agents.idle_release, 0);
     }
 
     #[test]
@@ -864,8 +930,8 @@ mod tests {
     fn project_state_round_trip() {
         let s = ProjectState {
             files: vec![
-                OpenFile { path: "/p/src/main.rs".into(), line: 41, col: 3 },
-                OpenFile { path: "/p/README.md".into(), line: 0, col: 0 },
+                OpenFile { path: "/p/src/main.rs".into(), line: 41, col: 3, top: 20 },
+                OpenFile { path: "/p/README.md".into(), line: 0, col: 0, top: 0 },
             ],
             code_open: true,
         };

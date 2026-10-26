@@ -524,6 +524,117 @@ fn crlf_bom_and_permissions_round_trip() {
 }
 
 #[test]
+fn every_encoding_saves_back_byte_for_byte() {
+    use encoding::{CHOICES, encode, label};
+    let dir = scratch_dir("enc");
+    for (i, (enc, bom)) in CHOICES.into_iter().enumerate() {
+        let path = dir.join(format!("f{i}.txt"));
+        let bytes = encode("Grüße “x” €\r\nzwei\r\n", enc, bom).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let mut e = Editor::open(&path, "    ").unwrap();
+        assert_eq!(e.encoding(), (enc, bom), "{}", label(enc, bom));
+        assert!(e.is_crlf() && !e.is_lossy());
+        assert_eq!(e.rope.to_string(), "Grüße “x” €\nzwei\n");
+        assert_eq!(e.read_disk_text().unwrap(), "Grüße “x” €\nzwei\n");
+        e.save().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "{}", label(enc, bom));
+    }
+}
+
+#[test]
+fn invalid_utf8_opens_as_windows_1252() {
+    let dir = scratch_dir("latin");
+    let path = dir.join("l.txt");
+    std::fs::write(&path, b"caf\xE9\n\x93q\x94\n").unwrap();
+    let mut e = Editor::open(&path, "    ").unwrap();
+    assert_eq!(e.encoding(), (encoding::Encoding::Windows1252, false));
+    assert_eq!(e.rope.to_string(), "café\n“q”\n");
+    assert!(!e.is_lossy());
+    e.click(Point { line: 1, col: 3 }, false, false);
+    run(&mut e, ins("!"));
+    e.save().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"caf\xE9\n\x93q\x94!\n");
+    // A char 1252 can't store: the save fails and the file is untouched.
+    run(&mut e, ins("✓"));
+    let err = e.save().unwrap_err();
+    assert!(err.to_string().contains("Windows-1252"), "{err}");
+    assert_eq!(std::fs::read(&path).unwrap(), b"caf\xE9\n\x93q\x94!\n");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+}
+
+#[test]
+fn binary_and_undecodable_files_are_lossy() {
+    let dir = scratch_dir("bin");
+    // NULs and a lone CR: opens (as Windows-1252) but can't save back exactly.
+    let path = dir.join("b.bin");
+    std::fs::write(&path, b"\x7FELF\0\x01\r\x02\xFF\n").unwrap();
+    let e = Editor::open(&path, "    ").unwrap();
+    assert_eq!(e.encoding().0, encoding::Encoding::Windows1252);
+    assert!(e.is_lossy());
+    // Binary without stray CRs round-trips through Windows-1252.
+    std::fs::write(&path, b"\0\x01\x02\xFF\n").unwrap();
+    assert!(!Editor::open(&path, "    ").unwrap().is_lossy());
+    // UTF-8 forced on bytes that aren't: replacement chars, lossy.
+    let path = dir.join("t.txt");
+    std::fs::write(&path, b"a\xFFb").unwrap();
+    let e = Editor::open_with(&path, "    ", Some((encoding::Encoding::Utf8, false))).unwrap();
+    assert_eq!(e.rope.to_string(), "a\u{FFFD}b");
+    assert!(e.is_lossy());
+    assert_eq!(e.forced_encoding(), Some((encoding::Encoding::Utf8, false)));
+    // Mixed line endings in a text file aren't lossy (evened out on save, as before).
+    std::fs::write(&path, b"a\r\nb\nc\r\n").unwrap();
+    assert!(!Editor::open(&path, "    ").unwrap().is_lossy());
+}
+
+#[test]
+fn line_ending_conversion_is_undoable() {
+    let dir = scratch_dir("eol");
+    let path = dir.join("e.txt");
+    std::fs::write(&path, "a\nb\n").unwrap();
+    let mut e = Editor::open(&path, "    ").unwrap();
+    e.now = fake_now;
+    assert!(!e.is_crlf() && !e.is_dirty());
+    assert!(e.set_line_endings(true));
+    assert!(!e.set_line_endings(true));
+    assert!(e.is_crlf() && e.is_dirty());
+    run(&mut e, Command::Undo);
+    assert!(!e.is_crlf() && !e.is_dirty());
+    run(&mut e, Command::Redo);
+    assert!(e.is_crlf() && e.is_dirty());
+    e.save().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"a\r\nb\r\n");
+    assert!(!e.is_dirty());
+    assert!(e.set_line_endings(false));
+    e.save().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"a\nb\n");
+}
+
+#[test]
+fn encoding_conversion_marks_dirty_and_undoes() {
+    use encoding::Encoding;
+    let dir = scratch_dir("conv");
+    let path = dir.join("c.txt");
+    std::fs::write(&path, "héllo\n").unwrap();
+    let mut e = Editor::open(&path, "    ").unwrap();
+    e.now = fake_now;
+    assert_eq!(e.set_encoding(Encoding::Utf16Le, true), Ok(true));
+    assert!(e.is_dirty());
+    e.save().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), encoding::encode("héllo\n", Encoding::Utf16Le, true).unwrap());
+    assert_eq!(e.set_encoding(Encoding::Utf16Le, true), Ok(false));
+    run(&mut e, ins("✓"));
+    assert_eq!(e.set_encoding(Encoding::Windows1252, false), Err('✓'));
+    assert_eq!(e.encoding(), (Encoding::Utf16Le, true));
+    run(&mut e, Command::Undo);
+    assert_eq!(e.set_encoding(Encoding::Windows1252, true), Ok(true));
+    // No BOM for Windows-1252.
+    assert_eq!(e.encoding(), (Encoding::Windows1252, false));
+    run(&mut e, Command::Undo);
+    assert_eq!(e.encoding(), (Encoding::Utf16Le, true));
+    assert!(!e.is_dirty());
+}
+
+#[test]
 fn indent_detection() {
     assert_eq!(Editor::from_text("a\n  b\n    c\n  d\n").indent_unit(), "  ");
     assert_eq!(Editor::from_text("a\n\tb\n\t\tc\n").indent_unit(), "\t");
@@ -881,4 +992,103 @@ fn shrink_forgets_after_a_move_or_an_edit() {
     assert_eq!(show(&e), "«x»");
     run(&mut e, Command::ShrinkSelection);
     assert_eq!(show(&e), "x|");
+}
+
+// --- Change markers (diff.rs) and hunk revert ---------------------------------
+
+fn hunks_of(old: &str, new: &str) -> Vec<diff::LineHunk> {
+    let (ol, nl) = (diff::line_ranges(old), diff::line_ranges(new));
+    diff::diff_lines(&diff::text_hashes(old, &ol), &diff::text_hashes(new, &nl))
+}
+
+fn hk(old: Range<usize>, new: Range<usize>) -> diff::LineHunk {
+    diff::LineHunk { old, new }
+}
+
+#[test]
+fn line_diff_hunks() {
+    use diff::HunkKind::*;
+    assert_eq!(hunks_of("a\nb\nc\n", "a\nb\nc\n"), vec![]);
+    // Changed, added, removed lines, each its own hunk.
+    let hs = hunks_of("a\nb\nc\nd\ne\nf\n", "a\nB\nc\nd\nnew\ne\n");
+    assert_eq!(hs, vec![hk(1..2, 1..2), hk(4..4, 4..5), hk(5..6, 6..6)]);
+    assert_eq!(hs.iter().map(|h| h.kind()).collect::<Vec<_>>(), vec![Modified, Added, Removed]);
+    // A new file is one added hunk; an emptied one, one removed hunk.
+    assert_eq!(hunks_of("", "x\ny\n"), vec![hk(0..0, 0..2)]);
+    assert_eq!(hunks_of("x\ny\n", ""), vec![hk(0..2, 0..0)]);
+    // Lines compare with their newline: a dropped final newline shows.
+    assert_eq!(hunks_of("a\nb\n", "a\nb"), vec![hk(1..2, 1..2)]);
+    // Insert at the top, delete at the end.
+    assert_eq!(hunks_of("b\nc\n", "a\nb\n"), vec![hk(0..0, 0..1), hk(1..2, 2..2)]);
+    // Rope hashes match text hashes, across chunk boundaries too.
+    let big: String = (0..3000).map(|i| format!("line {i} {}\n", "x".repeat(i % 50))).collect();
+    let rope = Rope::from_str(&big);
+    assert_eq!(diff::rope_hashes(&rope), diff::text_hashes(&big, &diff::line_ranges(&big)));
+    assert_eq!(diff::real_lines(&Rope::from_str("a\nb")), 2);
+    assert_eq!(diff::real_lines(&Rope::from_str("a\nb\n")), 2);
+    assert_eq!(diff::real_lines(&Rope::from_str("")), 0);
+}
+
+#[test]
+fn line_diff_falls_back_to_one_hunk() {
+    // More edits than MAX_D: the changed middle becomes one hunk.
+    let n = diff::MAX_D + 10;
+    let old: String = (0..n).map(|i| format!("o{i}\n")).collect();
+    let new: String = (0..n).map(|i| format!("n{i}\n")).collect();
+    let (old, new) = (format!("top\n{old}bottom\n"), format!("top\n{new}bottom\n"));
+    assert_eq!(hunks_of(&old, &new), vec![hk(1..1 + n, 1..1 + n)]);
+}
+
+/// Reverting every hunk (last first, so earlier line numbers hold) gives
+/// back the base text exactly, and each revert is one undo step.
+#[test]
+fn revert_hunks_restores_base() {
+    let cases = [
+        ("a\nb\nc\nd\ne\nf\n", "a\nB\nc\nd\nnew\ne\n"),
+        ("", "x\ny\n"),
+        ("x\ny\n", ""),
+        ("a\nb\n", "a\nb"),
+        ("a\nb", "a\nb\nc\n"),
+        ("fn main() {\n    one();\n    two();\n}\n", "// header\nfn main() {\n    two();\n    three();\n}\n"),
+    ];
+    for (base, cur) in cases {
+        let mut e = Editor::from_text(cur);
+        let lines = diff::line_ranges(base);
+        let hs = hunks_of(base, cur);
+        assert!(!hs.is_empty(), "{base:?} -> {cur:?}");
+        for h in hs.iter().rev() {
+            let text = if h.old.is_empty() { "" } else { &base[lines[h.old.start].start..lines[h.old.end - 1].end] };
+            assert!(e.replace_lines(h.new.clone(), text).text_changed);
+        }
+        assert_eq!(e.rope().to_string(), base, "{cur:?}");
+        assert!(hunks_of(base, &e.rope().to_string()).is_empty());
+        // Undo every revert: back to the agent's text.
+        for _ in &hs {
+            run(&mut e, Command::Undo);
+        }
+        assert_eq!(e.rope().to_string(), cur);
+    }
+    // One hunk of several: only that one goes back; the caret lands on it.
+    let mut e = Editor::from_text("a\nB\nc\nd\nnew\ne\n");
+    e.replace_lines(4..5, "");
+    assert_eq!(e.rope().to_string(), "a\nB\nc\nd\ne\n");
+    assert_eq!(e.primary().head, Point { line: 4, col: 0 });
+}
+
+/// Timing: `cargo test --release -p qur_editor -- --ignored --nocapture diff_timing`.
+#[test]
+#[ignore]
+fn diff_timing() {
+    let old: String = (0..10_000).map(|i| format!("    let value_{i} = compute({i}, \"some text\");\n")).collect();
+    let new: String = old
+        .lines()
+        .enumerate()
+        .filter(|(i, _)| i % 333 != 0)
+        .map(|(i, l)| if i % 50 == 0 { format!("{l} // changed\n") } else { format!("{l}\n") })
+        .collect();
+    let (ol, rope) = (diff::line_ranges(&old), Rope::from_str(&new));
+    let base = diff::text_hashes(&old, &ol);
+    let t = Instant::now();
+    let hs = diff::diff_lines(&base, &diff::rope_hashes(&rope));
+    println!("10k lines, {} hunks: {:.2} ms", hs.len(), t.elapsed().as_secs_f64() * 1000.0);
 }

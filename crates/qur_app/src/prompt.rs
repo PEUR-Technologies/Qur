@@ -2,10 +2,13 @@
 //! TextInput key context: Enter sends, Shift+Enter is a newline, Esc cancels.
 //! Text wraps to the field width; the field grows up to `MAX_LINES`.
 //! `@` asks the workspace for a file mention (Quick Open picker); dropped
-//! files from the tree are inserted as mentions too.
+//! files from the tree are inserted as mentions too. Files pasted or dropped
+//! from Finder, and pasted images, become chips above the text; clicking a
+//! chip shows it.
 
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
@@ -17,10 +20,17 @@ use smallvec::SmallVec;
 
 use crate::browser_view::Attachment;
 use crate::commands::{edit, input};
+use crate::files::{self, Preview};
 use crate::look::Look;
 use crate::undo::{History, Kind, insert_kind};
 
 const MAX_LINES: usize = 10;
+
+/// An image as it's sent, with its thumbnail (decoded from the sent bytes).
+fn with_thumb(img: Arc<gpui::Image>) -> (Arc<gpui::Image>, Option<Arc<gpui::RenderImage>>) {
+    let thumb = files::thumbnail(img.bytes(), files::THUMB.0, files::THUMB.1);
+    (img, thumb)
+}
 
 pub enum PromptEvent {
     Submit,
@@ -32,6 +42,8 @@ pub enum PromptEvent {
     /// Up in an empty field: the agent view pulls the last queued message back.
     UpInEmpty,
     Changed,
+    /// A chip was clicked: show the file or image.
+    Preview(Preview),
 }
 
 /// The field's text, caret and mentions at one point (an undo step).
@@ -154,6 +166,22 @@ impl PromptInput {
     }
 
     pub fn attach(&mut self, a: Attachment, cx: &mut Context<Self>) {
+        // An image without its thumbnail (a Browser pick's screenshot):
+        // decoded off the main thread, the chip shows it once it's ready.
+        if let (Some(img), None) = (a.image.clone(), &a.thumb) {
+            cx.spawn(async move |this, cx| {
+                let bytes = img.clone();
+                let Some(thumb) = cx.background_executor().spawn(async move { files::thumbnail(bytes.bytes(), files::THUMB.0, files::THUMB.1) }).await else { return };
+                this.update(cx, |t, cx| {
+                    if let Some(a) = t.attachments.iter_mut().find(|a| a.image.as_ref().is_some_and(|i| Arc::ptr_eq(i, &img))) {
+                        a.thumb = Some(thumb);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
         self.attachments.push(a);
         cx.emit(PromptEvent::Changed);
         cx.notify();
@@ -161,6 +189,44 @@ impl PromptInput {
 
     pub fn take_attachments(&mut self) -> Vec<Attachment> {
         std::mem::take(&mut self.attachments)
+    }
+
+    /// Files pasted or dropped from Finder: an image file is read (off the
+    /// main thread, with its thumbnail) and sent as an image, anything else
+    /// as a link to it.
+    pub fn attach_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        for p in paths {
+            if self.attachments.iter().any(|a| a.path.as_ref() == Some(p)) {
+                continue;
+            }
+            if !files::sendable_path(p) {
+                self.attach(Attachment::file(p.clone()), cx);
+                continue;
+            }
+            let p = p.clone();
+            cx.spawn(async move |this, cx| {
+                let read = p.clone();
+                let image = cx.background_executor().spawn(async move { std::fs::read(&read).ok().and_then(files::sendable_image).map(with_thumb) }).await;
+                this.update(cx, |t, cx| {
+                    let a = match image {
+                        Some((img, thumb)) => Attachment::image(files::chip_name(&p).into(), img, thumb, Some(p)),
+                        None => Attachment::file(p),
+                    };
+                    t.attach(a, cx);
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    /// A pasted image, fitted to what the agent takes (off the main thread).
+    fn attach_image_bytes(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let Some((img, thumb)) = cx.background_executor().spawn(async move { files::sendable_image(bytes).map(with_thumb) }).await else { return };
+            this.update(cx, |t, cx| t.attach(Attachment::image("Pasted image".into(), img, thumb, None), cx)).ok();
+        })
+        .detach();
     }
 
     /// Replace the whole text (slash command chosen), caret at the end.
@@ -355,12 +421,16 @@ impl PromptInput {
     }
     fn a_paste(&mut self, _: &edit::Paste, _: &mut Window, cx: &mut Context<Self>) {
         let Some(clip) = cx.read_from_clipboard() else { return };
-        // A screenshot or copied image: attach it, like a browser pick.
-        if let Some(gpui::ClipboardEntry::Image(img)) = clip.entries().first()
-            && img.format == gpui::ImageFormat::Png
-            && !img.bytes().is_empty()
-        {
-            return self.attach(Attachment { label: "Pasted image".into(), context: String::new(), png: Some(img.bytes().to_vec()) }, cx);
+        match clip.entries().first() {
+            // Files copied in Finder: chips, not their names as text.
+            Some(gpui::ClipboardEntry::ExternalPaths(paths)) => return self.attach_paths(paths.paths(), cx),
+            // A screenshot or copied image: attach it, like a browser pick.
+            Some(gpui::ClipboardEntry::Image(img)) if !img.bytes().is_empty() => return self.attach_image_bytes(img.bytes().to_vec(), cx),
+            _ => {}
+        }
+        // "Copy Image" in a browser: its address comes first, the image behind it.
+        if let Some(bytes) = files::image_behind_text(&clip.text().unwrap_or_default()) {
+            return self.attach_image_bytes(bytes, cx);
         }
         if let Some(t) = clip.text() {
             let t = t.replace("\r\n", "\n").replace('\r', "\n");
@@ -547,6 +617,20 @@ impl Render for PromptInput {
         let ui = look.theme.ui.clone();
         let chips = (!self.attachments.is_empty()).then(|| {
             div().flex().flex_wrap().gap(look.z(4.)).pb(look.z(6.)).children(self.attachments.iter().enumerate().map(|(i, a)| {
+                // Click shows it: a file in the viewer or code modal, an image
+                // that's only in memory in the viewer. Picks have nothing to show.
+                let preview = match (&a.path, &a.image) {
+                    (Some(p), _) => Some(Preview::File(p.clone())),
+                    (None, Some(img)) => Some(Preview::Image { label: a.label.clone(), image: img.clone() }),
+                    _ => None,
+                };
+                let icon = match (&a.thumb, &a.image, &a.path) {
+                    (Some(t), ..) => gpui::img(t.clone()).size(look.z(14.)).flex_none().rounded(look.z(2.)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
+                    // Its thumbnail is still being decoded.
+                    (None, Some(_), _) => div().size(look.z(14.)).flex_none().rounded(look.z(2.)).bg(look.c(ui.hover_bg)).into_any_element(),
+                    (None, None, Some(_)) => div().flex_none().child("▤").into_any_element(),
+                    _ => div().flex_none().child("❝").into_any_element(),
+                };
                 div()
                     .id(("attachment", i))
                     .flex()
@@ -558,7 +642,13 @@ impl Render for PromptInput {
                     .bg(look.c(ui.active_bg))
                     .text_size(look.text(-2.))
                     .text_color(look.c(ui.text_secondary))
-                    .child(if a.png.is_some() { "▣" } else { "❝" })
+                    .when_some(preview, |d, p| {
+                        d.cursor_pointer().hover(|d| d.text_color(look.c(ui.text))).on_click(cx.listener(move |_, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.emit(PromptEvent::Preview(p.clone()));
+                        }))
+                    })
+                    .child(icon)
                     .child(div().max_w(look.z(220.)).truncate().child(a.label.clone()))
                     .child(
                         div()
@@ -567,6 +657,7 @@ impl Render for PromptInput {
                             .text_color(look.c(ui.text_muted))
                             .child("×")
                             .on_click(cx.listener(move |t, _, _, cx| {
+                                cx.stop_propagation();
                                 if i < t.attachments.len() {
                                     t.attachments.remove(i);
                                 }
@@ -624,6 +715,11 @@ impl Render for PromptInput {
             .on_drop(cx.listener(|this, f: &DraggedFile, window, cx| {
                 window.focus(&this.focus, cx);
                 this.insert_mention(f.abs.clone(), cx);
+            }))
+            // Files from Finder: chips, as when pasted.
+            .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
+                window.focus(&this.focus, cx);
+                this.attach_paths(paths.paths(), cx);
             }))
             .child(PromptElement { input: cx.entity() })
     }

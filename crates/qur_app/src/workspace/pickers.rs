@@ -110,7 +110,7 @@ impl Workspace {
                 self.save_theme(&name, project_scope, window, cx);
                 self.restore_focus(window, cx);
             }
-            (PickerEvent::Tab, PickKind::Themes { project_scope, .. }) => {
+            (PickerEvent::Tab, PickKind::Themes { project_scope, .. }) if !self.home => {
                 *project_scope = !*project_scope;
                 let header = theme_scope_header(*project_scope, &self.project_name());
                 picker.update(cx, |p, cx| {
@@ -144,6 +144,11 @@ impl Workspace {
                 if let Some(code) = self.code.clone() {
                     code.update(cx, |c, cx| c.restore_selections(restore, cx));
                 }
+            }
+            (PickerEvent::Confirm(i), PickKind::Encoding(action)) => {
+                let (i, action) = (*i, *action);
+                self.close_overlays(window, cx);
+                self.encoding_chosen(i, action, window, cx);
             }
             (PickerEvent::Dismiss, _) => self.close_overlays(window, cx),
             _ => {}
@@ -179,6 +184,7 @@ impl Workspace {
         let turns = self.selected_last_turn(cx).is_some();
         let pending = self.agents.iter().any(|a| a.read(cx).has_permission());
         let review = self.review_state(cx);
+        let plan = self.plan_state(cx);
         let items = cmds
             .iter()
             .map(|c| {
@@ -186,7 +192,7 @@ impl Workspace {
                     commands::Tier::Ready => commands::display_keys(&c.first_keys()),
                     commands::Tier::Later(m) => format!("coming in {m}"),
                 };
-                let available = (turns || !commands::needs_turn(c)) && (pending || !commands::needs_pending(c)) && commands::review_available(c, review);
+                let available = (turns || !commands::needs_turn(c)) && (pending || !commands::needs_pending(c)) && commands::review_available(c, review) && commands::plan_available(c, plan) && commands::available_in(c, !self.home, self.repo);
                 PickItem::new(format!("{}: {}", c.category, c.title)).right(right).enabled(c.ready() && available)
             })
             .collect();
@@ -199,7 +205,7 @@ impl Workspace {
         // Recently opened files under this root first.
         let recent: Vec<PathBuf> = self
             .buffers
-            .paths(cx)
+            .paths()
             .into_iter()
             .filter_map(|p| p.strip_prefix(&root).ok().map(Path::to_path_buf))
             .collect();
@@ -223,11 +229,12 @@ impl Workspace {
             items.push(PickItem::new(t.name.clone()).detail(t.group));
         }
         let current = names.iter().position(|n| *n == eff.theme).unwrap_or(0);
-        let project_scope = true;
+        // The empty window has no project: its theme is for all projects.
+        let project_scope = !self.home;
         let header = theme_scope_header(project_scope, &self.project_name());
         let p = self.open_picker("Select a theme…", items, PickKind::Themes { names, project_scope }, false, window, cx);
         p.update(cx, |p, cx| {
-            p.header = Some(header);
+            p.header = project_scope.then_some(header);
             p.select_item(current, cx);
         });
     }
@@ -243,7 +250,8 @@ impl Workspace {
                 PickItem::new(name).detail(p.to_string_lossy().replacen(&home, "~", 1))
             })
             .collect();
-        items.push(PickItem::new("Open Folder…").right(commands::display_keys("cmd-o")));
+        let keys = commands::find(&qur::OpenFolder).map(|c| c.first_keys()).unwrap_or_default();
+        items.push(PickItem::new("Open Folder…").right(commands::display_keys(&keys)));
         self.open_picker("Switch project…", items, PickKind::Projects(list), false, window, cx);
     }
 

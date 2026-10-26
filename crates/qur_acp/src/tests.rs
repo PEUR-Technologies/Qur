@@ -161,6 +161,13 @@ fn json_shapes_we_send() {
     assert_eq!(PermissionOutcome::Cancelled.to_json(), json!({ "outcome": { "outcome": "cancelled" } }));
     assert_eq!(StopReason::parse(&json!({ "stopReason": "end_turn" })), StopReason::EndTurn);
     assert_eq!(StopReason::parse(&json!({ "stopReason": "later" })), StopReason::Other("later".into()));
+    // claude-agent-acp's turn usage; a total is worked out when missing.
+    let u = TurnUsage::parse(&json!({ "stopReason": "end_turn", "usage": { "inputTokens": 8, "outputTokens": 678, "cachedReadTokens": 89620, "cachedWriteTokens": 30869, "totalTokens": 121175 } }));
+    assert_eq!(u, Some(TurnUsage { input: 8, output: 678, cache_read: 89620, cache_write: 30869, total: 121175 }));
+    assert_eq!(TurnUsage::parse(&json!({ "usage": { "inputTokens": 5, "outputTokens": 7 } })).map(|u| u.total), Some(12));
+    assert_eq!(TurnUsage::parse(&json!({ "stopReason": "end_turn" })), None);
+    assert_eq!(TurnUsage::parse(&json!({ "usage": { "totalTokens": 0 } })), None);
+    assert_eq!(TurnUsage::parse(&json!({ "usage": null })), None);
     let init = InitializeResult::parse(json!({
         "protocolVersion": 1, "agentInfo": { "name": "x", "version": "1.2" },
         "agentCapabilities": { "loadSession": true }, "authMethods": [{ "id": "chat-gpt", "name": "ChatGPT" }]

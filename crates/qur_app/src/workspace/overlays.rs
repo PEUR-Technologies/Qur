@@ -26,6 +26,7 @@ impl Workspace {
             ("Rename…", || Box::new(qur::RenameAgent), true, false),
             ("Review Changes", || Box::new(qur::ReviewChanges), true, false),
             ("Merge into My Branch", || Box::new(qur::Merge), !in_root, false),
+            ("Push and Open Pull Request…", || Box::new(qur::PushPullRequest), !in_root, false),
             ("Run Checks Now", || Box::new(qur::RunChecks), true, false),
             ("Run Project", || Box::new(qur::RunProject), true, false),
             ("Reveal in Finder", || Box::new(qur::RevealWorktree), true, false),
@@ -47,6 +48,12 @@ impl Workspace {
             items.push(("Review Agent's Plan…", || Box::new(qur::ReviewPlan), plan, false));
             items.push(("Send Review Findings to Agent", || Box::new(qur::SendReviewFindings), findings, false));
             items.push(("Stop", || Box::new(qur::StopAgent), true, false));
+        }
+        if let Some(t) = self.term_task(id) {
+            let turns = t.record.last_turn().is_some();
+            items.push(("Show Last Turn's Changes", || Box::new(qur::ShowLastTurn), turns, false));
+            // Never in the project folder (Rewind would undo your own edits too).
+            items.push(("Rewind Last Turn…", || Box::new(qur::RewindLastTurn), turns && !in_root, false));
         }
         items.push((if in_root { "Close Agent…" } else { "Delete Agent…" }, || Box::new(qur::DiscardTask), true, true));
         let n = items.len();
@@ -289,12 +296,15 @@ impl Workspace {
         self.close_overlays(window, cx);
         self.prev_focus = window.focused(cx);
         window.focus(&self.focus, cx);
-        self.overlay = Some(Overlay::About);
+        // Sampled once, now (a few ms): no polling while it's open.
+        let mem = crate::mem::report(std::process::id() as i32, &memory_labels(cx));
+        self.overlay = Some(Overlay::About(Box::new(mem)));
         cx.notify();
     }
 
-    fn about_box(&self, look: &Look, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn about_box(&self, mem: &crate::mem::Report, look: &Look, cx: &mut Context<Self>) -> gpui::AnyElement {
         let ui = &look.theme.ui;
+        let small = |s: String| div().text_size(look.text(-2.)).text_color(look.c(ui.text_muted)).child(s);
         let credit = look.theme.credit.as_ref().map(|c| format!("Theme “{}” by {} ({})", look.theme.name, c.author, c.license));
         let line = |s: String| div().text_size(look.text(-1.)).text_color(look.c(ui.text_secondary)).child(s);
         div()
@@ -323,6 +333,10 @@ impl Workspace {
             .child(line(format!("Version {}", env!("CARGO_PKG_VERSION"))))
             .child(line("GPL-3.0-or-later · Inter (SIL OFL)".into()))
             .children(credit.map(line))
+            .child(div().h(look.z(6.)))
+            .child(line(format!("Memory: {}", crate::mem::mb(mem.total()))))
+            .child(small(mem.summary()))
+            .children(mem.lines().into_iter().map(small))
             .child(
                 div()
                     .id("about-ok")
@@ -468,10 +482,12 @@ impl Workspace {
             }
             Overlay::Picker(p, _) => Some(centered(p.clone().into_any_element())),
             Overlay::Setup(s) => Some(centered(s.clone().into_any_element())),
-            Overlay::About => Some(centered(self.about_box(look, cx))),
+            Overlay::About(mem) => Some(centered(self.about_box(mem, look, cx))),
             Overlay::Accent => Some(centered(self.accent_box(look, cx))),
             Overlay::AgentMenu { id, at } => Some(self.agent_menu(id, *at, look, cx)),
+            Overlay::FileMenu { abs, rel, is_dir, ghost, at } => Some(self.file_menu(abs, rel, *is_dir, *ghost, *at, look, cx)),
             Overlay::Layouts => Some(centered(self.layouts_box(look, cx))),
+            Overlay::Cleanup(c) => Some(centered(self.cleanup_box(c, look, cx))),
             Overlay::GoTo(g) | Overlay::Rename(g) => Some(centered(
                 div()
                     .w(look.z(360.))
@@ -486,9 +502,26 @@ impl Workspace {
             )),
             Overlay::Transparency { project_scope } => Some(self.transparency_popover(*project_scope, look, cx)),
             Overlay::Gaps => Some(self.gaps_popover(look, cx)),
-            Overlay::NewTask { input, agent } => {
+            Overlay::NewTask { input, agent, plan } => {
                 let agents = self.roster.agents.clone();
                 let chosen = *agent;
+                // Plan first (Cmd+Opt+P here too): structured agents only.
+                let plan_chip = agents.get(chosen).filter(|a| a.mode == Mode::Acp).map(|_| {
+                    let on = *plan;
+                    div()
+                        .id("plan-first")
+                        .px(look.z(8.))
+                        .py(look.z(2.))
+                        .rounded(look.z(4.))
+                        .cursor_pointer()
+                        .text_size(look.text(-1.))
+                        .border_1()
+                        .border_color(look.c(if on { ui.border_strong } else { ui.border }))
+                        .text_color(look.c(if on { ui.text } else { ui.text_muted }))
+                        .when(on, |d| d.bg(look.c(ui.active_bg)))
+                        .child(if on { "✓ Plan first" } else { "Plan first" })
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_plan_first(cx)))
+                });
                 let chips: Vec<_> = agents
                     .iter()
                     .enumerate()
@@ -542,6 +575,7 @@ impl Workspace {
                                         .gap(look.z(6.))
                                         .child(div().font_weight(gpui::FontWeight::MEDIUM).child("New agent task"))
                                         .child(div().flex_1())
+                                        .children(plan_chip)
                                         .children(chips),
                                 )
                                 .child(
@@ -692,7 +726,7 @@ impl Workspace {
             .rounded(look.z(6.))
             .text_size(look.text(-1.))
             .text_color(look.c(ui.text))
-            .child(div().flex().gap(look.z(4.)).child(scope("This project", project_scope, "scope-project", true)).child(scope("All projects", !project_scope, "scope-all", false)))
+            .when(!self.home, |d| d.child(div().flex().gap(look.z(4.)).child(scope("This project", project_scope, "scope-project", true)).child(scope("All projects", !project_scope, "scope-all", false))))
             .child(div().flex().justify_between().child("Window opacity").child(div().text_color(look.c(ui.text_muted)).child(format!("{pct}%"))))
             .child(
                 div()
@@ -842,4 +876,24 @@ fn hue_name(c: Rgba) -> &'static str {
         255..=289 => "purple",
         _ => "pink",
     }
+}
+
+/// Names for the processes Qur started, by pid, across its windows: each
+/// agent's ACP adapter and each terminal's shell.
+fn memory_labels(cx: &App) -> std::collections::HashMap<i32, String> {
+    let mut out = std::collections::HashMap::new();
+    for w in cx.windows() {
+        let Some(ws) = w.downcast::<Workspace>().and_then(|w| w.read(cx).ok()) else { continue };
+        for a in &ws.agents {
+            let a = a.read(cx);
+            if let Some(pid) = a.agent_pid() {
+                out.insert(pid, if a.record.title.is_empty() { a.def.label.clone() } else { a.record.title.clone() });
+            }
+        }
+        for s in &ws.terms.read(cx).sessions {
+            let task = ws.term_tasks.iter().find(|t| t.term_id == Some(s.id)).map(|t| t.record.title.clone());
+            out.insert(s.pid(), task.filter(|t| !t.is_empty()).unwrap_or_else(|| s.display_label()));
+        }
+    }
+    out
 }

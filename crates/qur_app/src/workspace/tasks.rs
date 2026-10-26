@@ -6,6 +6,11 @@ use super::*;
 impl Workspace {
     pub(super) fn restore_tasks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let store = TaskStore::load(&self.project_id);
+        // Saved chats of tasks that are gone.
+        let ids: Vec<String> = store.tasks.iter().map(|t| t.id.clone()).collect();
+        for dir in crate::agent_view::history::stale_chats(&qur_agents::chats_dir(&self.project_id), &ids) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
         for r in store.tasks {
             match r.mode {
                 Mode::Acp => {
@@ -22,10 +27,12 @@ impl Workspace {
         let todo_id = record.id.clone();
         let accent = Look::of(window, cx).theme.accents[0].base;
         let monitor = cx.new(|cx| {
-            let mut m = TaskMonitor::new(record.worktree.clone(), record.base.clone(), accent, record.in_root, cx);
-            // No turns in a terminal: in its own worktree every write counts as the
+            let shared = if record.in_root { qur_heat::Shared::Busy } else { qur_heat::Shared::No };
+            let mut m = TaskMonitor::new(record.worktree.clone(), record.diff_base().to_string(), accent, shared, cx);
+            // No agent-reported turns in a terminal: in its own worktree every write counts as the
             // agent's edit. In the project folder, only while it's busy (writing output;
-            // see terminal_activity), so your edits there stay yours.
+            // see terminal_activity) and never to a file you have open with unsaved
+            // changes, so your edits there stay yours.
             m.set_turn_active(!record.in_root);
             m
         });
@@ -39,7 +46,11 @@ impl Workspace {
             }
         });
         self._subs.push(sub);
-        let changes = cx.new(|cx| ChangesView::new(self.root.clone(), record.worktree.clone(), record.base.clone(), record.branch.clone(), cx));
+        let changes = cx.new(|cx| {
+            let mut c = ChangesView::new(self.root.clone(), record.worktree.clone(), record.diff_base().to_string(), record.branch.clone(), cx).with_pr(record.pr_url.clone());
+            c.set_turns(record.turns.clone(), cx);
+            c
+        });
         let id = record.id.clone();
         let sub = cx.subscribe_in(&changes, window, move |this, _, ev: &ChangesEvent, window, cx| this.on_changes_event(&id, ev, window, cx));
         self._subs.push(sub);
@@ -68,6 +79,12 @@ impl Workspace {
             was_busy: false,
             busy_since: None,
             wrote: false,
+            setup_marker: None,
+            turn_start: None,
+            turn_gen: 0,
+            known: None,
+            edits: 0,
+            rewinding: false,
             todos: Default::default(),
         });
         self.refresh_overlaps(cx);
@@ -97,6 +114,58 @@ impl Workspace {
         .detach();
     }
 
+    /// Idle release (`[agents] idle_release`, in minutes): every so often,
+    /// each agent that has sat out of sight, doing nothing, that long lets
+    /// go of what it can rebuild, its agent process above all (it resumes
+    /// its session when you go back to it). Agent Terminals and shells are
+    /// never touched: they hold your state. Dev/test:
+    /// QUR_DEBUG_AGENT_IDLE=<seconds> sets the time.
+    pub(super) fn watch_idle(&mut self, cx: &mut Context<Self>) {
+        let bg = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            while let Ok(wait) = this.update(cx, |this, cx| this.release_idle(cx)) {
+                bg.timer(wait).await;
+            }
+        })
+        .detach();
+    }
+
+    fn idle_limit(&self) -> Option<Duration> {
+        if let Some(secs) = std::env::var("QUR_DEBUG_AGENT_IDLE").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
+            return Some(Duration::from_secs(secs));
+        }
+        (self.config.agents.idle_release > 0).then(|| Duration::from_secs(self.config.agents.idle_release * 60))
+    }
+
+    /// One sweep; returns how long until the next.
+    fn release_idle(&mut self, cx: &mut Context<Self>) -> Duration {
+        let Some(limit) = self.idle_limit() else { return Duration::from_secs(60) };
+        let selected = self.selected_agent();
+        for a in self.agents.clone() {
+            let reviewer = a.read(cx).reviewer.clone();
+            // On screen (a reviewer shows in its task's stage): its clock restarts.
+            if selected.as_ref() == Some(&a) {
+                for t in std::iter::once(&a).chain(reviewer.as_ref()) {
+                    t.update(cx, |t, _| t.touch());
+                }
+                continue;
+            }
+            // A reviewer has a clock of its own; its task waits while it works.
+            if let Some(r) = &reviewer
+                && r.read(cx).idle_for().is_some_and(|d| d >= limit)
+            {
+                r.update(cx, |r, cx| r.release(cx));
+            }
+            if reviewer.is_some_and(|r| r.read(cx).busy()) {
+                continue;
+            }
+            if a.read(cx).idle_for().is_some_and(|d| d >= limit) {
+                a.update(cx, |a, cx| a.release(cx));
+            }
+        }
+        (limit / 4).clamp(Duration::from_secs(1), Duration::from_secs(60))
+    }
+
     /// An Inspect pick in an Agent Terminal's Browser: paste it into the
     /// agent's terminal (not sent), with the screenshot saved to a file so a
     /// CLI agent can read it.
@@ -105,9 +174,9 @@ impl Workspace {
             return self.flash("Start the agent's terminal first", cx);
         };
         let mut text = a.context.trim_end().to_string();
-        if let Some(png) = &a.png {
+        if let Some(img) = &a.image {
             let path = std::env::temp_dir().join(format!("qur-pick-{}.png", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())));
-            if std::fs::write(&path, png).is_ok() {
+            if std::fs::write(&path, img.bytes()).is_ok() {
                 text.push_str(&format!("\nScreenshot: {}", path.display()));
             }
         }
@@ -128,11 +197,20 @@ impl Workspace {
                 let root = m.read(cx).worktree.clone();
                 if let Some(t) = this.term_tasks.iter_mut().find(|t| t.record.worktree == root) {
                     t.wrote = true;
+                    t.edits += 1;
+                    t.known = None;
                 }
                 let paths = paths.clone();
                 this.files_changed(&root, &paths, window, cx);
             }
             MonitorEvent::Changed => cx.notify(),
+            // You committed in the project folder: its Agent Terminal's diff is stale.
+            MonitorEvent::BaseMoved => {
+                let root = m.read(cx).worktree.clone();
+                if let Some(t) = this.term_tasks.iter().find(|t| t.record.worktree == root) {
+                    t.changes.update(cx, |c, cx| c.refresh(cx));
+                }
+            }
         });
         self._subs.push(sub);
     }
@@ -173,7 +251,7 @@ impl Workspace {
             g.update(cx, |g, cx| g.refresh(cx));
         }
         // Open copies: clean ones reload, dirty ones get the banner.
-        for b in self.buffers.list.clone() {
+        for b in self.buffers.loaded_vec() {
             let hit = b.read(cx).path().is_some_and(|bp| paths.iter().any(|p| p == bp));
             if hit {
                 b.update(cx, |b, cx| {
@@ -201,6 +279,9 @@ impl Workspace {
         let (layout, wrap, tab) = (self.layout, self.config.editor.soft_wrap, self.config.editor.tab_width);
         let root = self.root.clone();
         let a = cx.new(|cx| AgentTask::new(root, record, def, accent, layout, wrap, tab, window, cx));
+        // Its chat from last time, if it was saved.
+        let chat = qur_agents::chat_dir(&self.project_id, &id);
+        a.update(cx, |a, cx| a.restore_chat(chat, cx));
         // Messages still queued when Qur last quit: start the agent so they go out.
         a.update(cx, |a, cx| {
             if !a.record.queued.is_empty() && a.status == Status::Stopped {
@@ -257,13 +338,13 @@ impl Workspace {
                 this.sync_menus(cx);
                 cx.notify();
             }
-            AgentEvent::Subagents => cx.notify(),
+            AgentEvent::Subagents | AgentEvent::Resumed => cx.notify(),
             AgentEvent::Review => {
                 this.save_tasks(cx);
                 this.sync_menus(cx);
                 cx.notify();
             }
-            AgentEvent::TurnsChanged | AgentEvent::PermissionsChanged => this.sync_menus(cx),
+            AgentEvent::TurnsChanged | AgentEvent::PermissionsChanged | AgentEvent::PlanChanged => this.sync_menus(cx),
             AgentEvent::Rewind(n) => {
                 let id = a.read(cx).record.id.clone();
                 this.rewind_turn(&id, *n, window, cx);
@@ -291,9 +372,14 @@ impl Workspace {
                 let at = line.map(|l| Point { line: (l as usize).saturating_sub(1), col: 0 });
                 this.open_path_at(&p, at, window, cx);
             }
+            AgentEvent::Preview(p) => this.preview(p.clone(), window, cx),
             AgentEvent::Merge => {
                 let id = a.read(cx).record.id.clone();
                 this.merge_task(&id, window, cx);
+            }
+            AgentEvent::PullRequest => {
+                let id = a.read(cx).record.id.clone();
+                this.push_pull_request(&id, window, cx);
             }
             AgentEvent::TurnChangedFiles => {
                 let id = a.read(cx).record.id.clone();
@@ -328,8 +414,9 @@ impl Workspace {
         a
     }
 
-    /// New Agent Task: worktree, then spawn the agent with the task as its first prompt.
-    pub(super) fn start_task(&mut self, agent_ix: usize, text: String, mentions: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    /// New Agent Task: worktree, then spawn the agent with the task as its
+    /// first prompt (`plan`: sent in the agent's plan mode).
+    pub(super) fn start_task(&mut self, agent_ix: usize, text: String, mentions: Vec<PathBuf>, plan: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(def) = self.roster.agents.get(agent_ix).cloned() else { return };
         let title = first_line(&text);
         let slug = qur_worktree::slugify(&title);
@@ -370,12 +457,13 @@ impl Workspace {
                         renamed: false,
                         in_root: false,
                         queued: Vec::new(),
-                        turns: Vec::new(), review: None,
+                        turns: Vec::new(), review: None, pr_url: None,
                     };
                     let debug_browser = std::env::var_os("QUR_DEBUG_BROWSER_URL").is_some();
                     match def.mode {
                         Mode::Acp => {
                             let a = this.add_agent(record, def, window, cx);
+                            a.update(cx, |a, _| a.plan_first = plan);
                             if debug_browser {
                                 a.update(cx, |a, cx| a.show_browser(true, cx));
                             }
@@ -447,6 +535,10 @@ impl Workspace {
         // itself. While one does, more get their own worktree so two agents
         // never edit the same files.
         let root_busy = self.term_tasks.iter().any(|t| t.record.in_root) || self.agents.iter().any(|a| a.read(cx).record.in_root);
+        // More need their own worktree: a folder without git gets offered one.
+        if root_busy && self.offer_git(|ws, window, cx| ws.new_agent_terminal(&qur::NewAgentTerminal, window, cx), window, cx) {
+            return;
+        }
         if !root_busy {
             let root = self.root.clone();
             let git = |args: &[&str]| qur_worktree::git(&root, args).ok();
@@ -464,7 +556,7 @@ impl Workspace {
                 renamed: false,
                 in_root: true,
                 queued: Vec::new(),
-                turns: Vec::new(), review: None,
+                turns: Vec::new(), review: None, pr_url: None,
             };
             let id = record.id.clone();
             self.add_term_task(record, window, cx);
@@ -503,7 +595,7 @@ impl Workspace {
                         renamed: false,
                         in_root: false,
                         queued: Vec::new(),
-                        turns: Vec::new(), review: None,
+                        turns: Vec::new(), review: None, pr_url: None,
                     };
                     this.add_term_task(record, window, cx);
                     this.apply_look(window, cx);
@@ -536,11 +628,11 @@ impl Workspace {
                     }
                 }
                 if let Some(setup) = first.setup {
-                    command = format!(
-                        "echo {}; if {setup}; then {command}; else echo; echo {}; fi",
-                        shell_quote(&format!("qur: running setup: {setup}")),
-                        shell_quote("qur: setup failed. Fix it, then start the agent from this shell.")
-                    );
+                    // Turns start counting once setup is over (term_turns.rs).
+                    let marker = std::env::temp_dir().join(format!("qur-setup-{}-{}", std::process::id(), self.term_tasks[ix].record.id));
+                    let _ = std::fs::remove_file(&marker);
+                    command = setup_wrapper(&setup, &command, &marker);
+                    self.term_tasks[ix].setup_marker = Some(marker);
                 }
             }
             let t = &self.term_tasks[ix];
@@ -554,8 +646,9 @@ impl Workspace {
         window.focus(&f, cx);
     }
 
-    /// Agent Terminals have no turns, so "busy, then quiet" stands in for one
-    /// (M5): deliver a typed first prompt once the agent is first quiet, and
+    /// Agent Terminals don't report turns, so "busy, then quiet" stands in
+    /// for one (M5): deliver a typed first prompt once the agent is first
+    /// quiet, take turn checkpoints (term_turns.rs) once setup is over, and
     /// after a busy stretch that changed files, run the project's checks if
     /// `[checks] terminal = true`.
     pub(super) fn terminal_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -564,6 +657,7 @@ impl Workspace {
         let mut finished = Vec::new();
         let mut renamed = false;
         let mut busy_flags = Vec::new();
+        let (mut began, mut ended) = (Vec::new(), Vec::new());
         {
             let panel = self.terms.read(cx);
             for t in &mut self.term_tasks {
@@ -582,6 +676,15 @@ impl Workspace {
                     busy_flags.push((t.monitor.clone(), busy));
                 }
                 let started = s.has_output();
+                // Setup isn't the agent's work: nothing counts until it ends.
+                if t.setup_marker.as_ref().is_some_and(|m| !m.exists()) {
+                    continue;
+                }
+                if let Some(m) = t.setup_marker.take() {
+                    let _ = std::fs::remove_file(m);
+                    t.was_busy = false;
+                    t.wrote = false;
+                }
                 if !busy && started && let Some(p) = t.pending_type.take() {
                     // Startup (and setup) isn't a turn: start counting from here.
                     typed.push((s.id, p));
@@ -593,6 +696,9 @@ impl Workspace {
                     continue;
                 }
                 if busy {
+                    if !t.was_busy {
+                        began.push(t.record.id.clone());
+                    }
                     t.was_busy = true;
                     t.busy_since.get_or_insert_with(Instant::now);
                 } else {
@@ -601,14 +707,24 @@ impl Workspace {
                     if t.busy_since.take().is_some_and(|b| b.elapsed() >= Duration::from_secs(7)) {
                         finished.push((t.record.id.clone(), t.record.title.clone()));
                     }
-                    if std::mem::take(&mut t.was_busy) && std::mem::take(&mut t.wrote) {
-                        turns.push(t.record.id.clone());
+                    if std::mem::take(&mut t.was_busy) {
+                        let wrote = std::mem::take(&mut t.wrote);
+                        ended.push((t.record.id.clone(), wrote));
+                        if wrote {
+                            turns.push(t.record.id.clone());
+                        }
                     }
                 }
             }
         }
         for (m, busy) in busy_flags {
             m.update(cx, |m, _| m.set_turn_active(busy));
+        }
+        for id in began {
+            self.term_turn_began(&id, cx);
+        }
+        for (id, wrote) in ended {
+            self.term_turn_ended(&id, wrote, cx);
         }
         if renamed {
             self.save_tasks(cx);
@@ -688,6 +804,9 @@ impl Workspace {
                 }
             });
         }
+        if let Some(m) = self.term_task(id).and_then(|t| t.setup_marker.clone()) {
+            let _ = std::fs::remove_file(m);
+        }
         self.term_tasks.retain(|t| t.record.id != id);
         self.checks.remove(id);
         self.trees.remove(wt);
@@ -701,13 +820,26 @@ impl Workspace {
     pub(super) fn remove_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some((wt, branch, _, _)) = self.task_parts(id, cx) else { return };
         let in_root = self.in_root(id, cx);
+        // Discard, Merge or Close: its saved chat goes too.
+        if let Some(a) = self.agent(id).cloned() {
+            a.update(cx, |a, cx| a.delete_chat(cx));
+        }
         let handle = self.stop_task(id, &wt, cx);
         self.save_tasks(cx);
+        let root = self.root.clone();
         if in_root {
-            // Its work is your folder: close it, delete nothing.
+            // Its work is your folder: close it, delete nothing but its
+            // turn checkpoints' refs.
+            let id = id.to_string();
+            cx.background_executor()
+                .spawn(async move {
+                    if let Err(e) = qur_git::delete_turn_refs(&root, &id) {
+                        eprintln!("TURN {id} refs: {e}");
+                    }
+                })
+                .detach();
             return cx.notify();
         }
-        let root = self.root.clone();
         let bg = cx.background_executor().clone();
         let id = id.to_string();
         cx.spawn_in(window, async move |this, cx| {
@@ -756,8 +888,9 @@ impl Workspace {
         }
         let dirty = qur_worktree::is_dirty(&wt);
         let detail = format!(
-            "This stops the agent and deletes its worktree and branch {branch}.{}",
-            if dirty { " Its uncommitted changes will be lost." } else { "" }
+            "This stops the agent and deletes its worktree and branch {branch}.{}{}",
+            if dirty { " Its uncommitted changes will be lost." } else { "" },
+            self.pr_discard_note(&id, cx)
         );
         let answer = ask(window, PromptLevel::Warning, "Discard this task?", Some(&detail), &["Discard", "Cancel"], cx);
         let root = self.root.clone();
@@ -876,17 +1009,30 @@ impl Workspace {
     }
 
     pub(super) fn new_agent_task(&mut self, _: &qur::NewAgentTask, window: &mut Window, cx: &mut Context<Self>) {
+        // A task works in its own worktree: a folder without git gets offered one first.
+        if self.offer_git(|ws, window, cx| ws.new_agent_task(&qur::NewAgentTask, window, cx), window, cx) {
+            return;
+        }
         self.close_overlays(window, cx);
         self.prev_focus = window.focused(cx);
         let input = cx.new(|cx| PromptInput::new("Describe the task…  (@ to mention a file, ⇧↩ for a new line)", self.root.clone(), cx));
         let sub = cx.subscribe_in(&input, window, |this, input, ev: &PromptEvent, window, cx| match ev {
             PromptEvent::Submit => {
-                let Some(Overlay::NewTask { agent, .. }) = &this.overlay else { return };
-                let agent = *agent;
-                let (text, mentions) = input.update(cx, |i, cx| i.take(cx));
+                let Some(Overlay::NewTask { agent, plan, .. }) = &this.overlay else { return };
+                let (agent, plan) = (*agent, *plan);
+                let (text, mut mentions) = input.update(cx, |i, cx| i.take(cx));
+                // A new task starts from text: attached files go as mentions,
+                // a pasted image as a file in the temp folder.
+                for a in input.update(cx, |i, _| i.take_attachments()) {
+                    match (a.path, a.image) {
+                        (Some(p), _) => mentions.push(p),
+                        (None, Some(img)) => mentions.extend(pasted_image_file(&img)),
+                        (None, None) => {}
+                    }
+                }
                 this.overlay = None;
                 this.prev_focus = None;
-                this.start_task(agent, text, mentions, window, cx);
+                this.start_task(agent, text, mentions, plan, window, cx);
             }
             PromptEvent::Cancel => {
                 if this.mention_over_dialog.take().is_none() {
@@ -918,12 +1064,13 @@ impl Workspace {
                 this.mention_over_dialog = Some(p);
                 cx.notify();
             }
+            PromptEvent::Preview(p) => this.preview(p.clone(), window, cx),
             PromptEvent::Changed | PromptEvent::SlashRequested | PromptEvent::UpInEmpty => {}
         });
         self._subs.push(sub);
         let f = input.read(cx).focus.clone();
         window.focus(&f, cx);
-        self.overlay = Some(Overlay::NewTask { input, agent: 0 });
+        self.overlay = Some(Overlay::NewTask { input, agent: 0, plan: false });
         cx.notify();
     }
 }
@@ -931,6 +1078,17 @@ impl Workspace {
 /// The command line a terminal-mode agent runs in its PTY.
 fn shell_command(def: &AgentDef) -> String {
     std::iter::once(def.command.as_str()).chain(def.args.iter().map(String::as_str)).map(shell_quote).collect::<Vec<_>>().join(" ")
+}
+
+/// Setup, then the agent (decision 22). The marker file is touched when setup
+/// ends, worked or not, so turns start counting from there.
+fn setup_wrapper(setup: &str, command: &str, marker: &Path) -> String {
+    let touch = format!(": > {}", shell_quote(&marker.to_string_lossy()));
+    format!(
+        "echo {}; if {setup}; then {touch}; {command}; else {touch}; echo; echo {}; fi",
+        shell_quote(&format!("qur: running setup: {setup}")),
+        shell_quote("qur: setup failed. Fix it, then start the agent from this shell.")
+    )
 }
 
 fn shell_quote(s: &str) -> String {
@@ -953,4 +1111,35 @@ fn first_line(text: &str) -> String {
 /// Notification tag for an agent: `qur:<window>:<task id>` (main.rs parses it).
 fn alert_tag(window: &Window, id: &str) -> String {
     format!("qur:{}:{id}", window.window_handle().window_id().as_u64())
+}
+
+/// A pasted image saved where an agent can read it (`qur-paste-…`).
+fn pasted_image_file(img: &gpui::Image) -> Option<PathBuf> {
+    let path = crate::files::temp_image_path("paste", img.format);
+    std::fs::write(&path, img.bytes()).ok().map(|_| path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_runs_before_the_agent_and_marks_its_end() {
+        let marker = Path::new("/tmp/qur setup-1");
+        let cmd = setup_wrapper("pnpm install", "claude 'fix it'", marker);
+        assert_eq!(
+            cmd,
+            "echo 'qur: running setup: pnpm install'; if pnpm install; then : > '/tmp/qur setup-1'; claude 'fix it'; else : > '/tmp/qur setup-1'; echo; echo 'qur: setup failed. Fix it, then start the agent from this shell.'; fi"
+        );
+        // It runs: setup, the marker, then the agent; a failed setup marks it too.
+        let d = std::env::temp_dir().join(format!("qur-setup-test-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        for (setup, agent_ran) in [("true", true), ("false", false)] {
+            let m = d.join(format!("marker-{setup}"));
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(setup_wrapper(setup, "echo agent", &m)).output().unwrap();
+            assert!(m.exists(), "{setup}: marker");
+            assert_eq!(String::from_utf8_lossy(&out.stdout).contains("\nagent\n"), agent_ran, "{setup}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

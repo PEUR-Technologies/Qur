@@ -17,7 +17,7 @@ Everything the [README](../README.md) leaves out: requirements, every feature, c
 
 ```sh
 git clone https://github.com/PEUR-Technologies/Qur.git && cd Qur
-scripts/bundle.sh                      # -> target/release/Qur.app (~25 MB, ad-hoc signed for this Mac)
+scripts/bundle.sh                      # -> target/release/Qur.app (~29 MB, ad-hoc signed for this Mac)
 cp -R target/release/Qur.app /Applications/
 ln -sf /Applications/Qur.app/Contents/MacOS/qur /usr/local/bin/qur   # optional: `qur <folder>` from a terminal
 qur doctor                             # checks git, the agents and their adapters, then a real ACP initialize
@@ -49,7 +49,11 @@ One window is one project. There's no permanent editor area: the window is for a
   - An Agent Terminal fills the stage as a real terminal; add Live, Browser or Changes beside it with the pane's **+** (or `Cmd+5` for the Browser). Inspect picks are pasted into its terminal, with a screenshot file path.
   - A structured (ACP) agent shows Live, Browser and Changes next to its Chat (with the permission bar and the prompt) and To-do.
   - Drag a tab, or a whole pane by its tab strip (the agent's own pane too), over another pane: a rounded preview shows where it will land, as macOS window tiling does. Near an edge it goes beside the pane on that side; on the middle or the tab strip it joins the pane. Let go and the panes glide into their new places. Drag the dividers to resize; × tucks a tab away and the pane's + menu brings it back. Your arrangement is saved. Split terminals glide the same way when you split (`Cmd+D`, `Cmd+Shift+D`), lay them out as a grid (`Cmd+Enter`) or close one.
-- **Code modal**: opening a file shows it in a modal with full editing. `Esc` closes it.
+- **Code modal**: opening a file shows it in a modal with full editing. `Esc` closes it. In an agent's worktree the gutter marks the agent's changes (yours against HEAD in your checkout): Next/Previous Change opens a peek with the removed lines, and Revert undoes one change at a time (undoable; the index is never touched).
+- **Files of any kind**: the modal detects the encoding (UTF-8, UTF-16, Windows-1252) and line endings, shows them in its header and saves them back; File > Reopen with Encoding…, Convert to Encoding… and Convert Line Endings change them. Images open in the file viewer; other binaries in a hex view (Open as Text shows them as text anyway). Files over 50 MB (`[editor] large_file_mb`) open read-only and paged from disk, so a 1 GB log costs almost no memory. View > Show Whitespace. A file changed on disk reloads by itself, or asks if you have unsaved edits. File > Open File… (`⌘O`) opens anything, in or outside the project. Closed files are dropped from memory (unsaved ones never are) and reopen where you left them.
+- **Files tree menu**: right-click a file for Open, Open in Default App, Reveal in Finder, Copy Path and Copy Relative Path (also in the File menu for the open file).
+- **No project**: opening Qur with no project (or closing the last one) shows a small window with recent projects, Open Folder… and terminals. A folder without git opens with git features off.
+- **File viewer**: an image (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, SVG) opens in a modal of its own, fitted to it and never enlarged, with its size in pixels and bytes. A file that isn't text gets its name and size instead of an error. Both offer **Open in Default App** and **Reveal in Finder**; `Esc` or a click outside closes it.
 - **Window gaps** (View > Toggle Gaps, or Qur > Appearance > Gaps… to adjust; also a row in Setup): like Hyprland, the top bar, the sidebar, every dock pane and every split terminal float as their own tiles with clear gaps between them and around the window's edge, so Qur looks like a stack of separate windows. The popover sets the gap (2–24 pt), rounded corners and their radius (0–16 pt), and a hairline border per tile; it previews as you drag and saves when it closes. Drag a gap between panes (or between the sidebar and the stage) to resize. The gaps show your desktop even at 100% opacity; below 100% with blur on they're blurred too, because macOS blurs the whole window. With zen mode on too, the top bar's tile slides down at the top edge and pushes the tiles below it down.
 - **Sidebar** (View > Sidebar `Cmd+B`, View > Auto-hide Sidebar, View > Sidebar on Right; also the Sidebar rows in Settings > Appearance): always shown, auto-hidden, or hidden until `Cmd+B`. Auto-hidden, it slides in when the mouse reaches its edge of the window (pushing the stage over) and away once the mouse leaves it, like Chrome's vertical tabs. It can sit on the left or the right. Drag a section header (AGENTS, TERMINALS, SOURCE CONTROL, FILES) onto another to reorder the sections. Saved as `[ui] sidebar`, `sidebar_side` and `sidebar_sections`.
 
@@ -67,6 +71,11 @@ One window is one project. There's no permanent editor area: the window is for a
   - **Find in Chat** (`Cmd+F` in the agent's view) searches your messages, the agent's replies, thoughts, and tool titles and output, ignoring case. `↩` goes to the older match, `⇧↩` the newer one, `Esc` closes; a folded thought, tool call or group opens to show the match.
   - **Copy Chat as Markdown** (Agent menu, the palette, or right-click the agent): the whole chat on the clipboard, with your messages quoted, the agent's Markdown as it wrote it, one line per tool call with ✓ / ✕, and thoughts left out.
   - Stop at any time. Messages sent mid-turn are queued; `@` mentions a file and `/` runs agent commands.
+  - **Files and images:** paste (`Cmd+V`) files copied in Finder, or drop them on the prompt, and they become chips above it; a pasted screenshot or copied image does too. Images go to the agent as images (scaled down when over the 5 MB limit; TIFF and BMP sent as PNG), any other file or folder as a link the agent reads itself. Click a chip, or a thumbnail or file under a sent message, to see it in the file viewer (text files in the code modal); × removes a chip. In the New Agent Task dialog, attached files become mentions.
+- **Plan mode** (Agent > Plan Mode `⌥⌘P`, or "Plan first" in New Agent Task): the agent plans before it edits. Its plan opens in place of the chat with numbered lines; click a line to comment, then **Send Comments** (it revises) or **Approve** (back to the mode you were in).
+- **Usage:** the agent's header shows tokens and cost when the adapter reports them ("121.2k tokens · $0.12"; on a subscription the cost is the adapter's figure).
+- **Idle agents let go of their memory.** A structured agent you haven't looked at, idle for 10 minutes, has its processes stopped (about 220 MB each for Claude); select it or send it a message and the session resumes where it was. Set `[agents] idle_release` in minutes, 0 for never. Agents that are working, waiting for you or have queued messages are never stopped, nor are Agent Terminals.
+- **Chats are kept.** A structured agent's chat survives a restart; only its last few hundred rows stay in memory, and **Show earlier messages** brings back the rest from disk.
 - **Unread markers** on agents that finished or need you while you were elsewhere.
 - **Turn-end checks.** Set `[checks] command` per project, and Qur runs it in the worktree after each agent turn that changed files. A failure marks the agent's button `✕ checks` and lands in the prompt (or the Agent Terminal's input line) for you to send back. Agent > Run Checks Now runs it any time.
 
@@ -87,16 +96,21 @@ One window is one project. There's no permanent editor area: the window is for a
 ### Review and merge
 
 - Review the task's diff and comment on lines; comments go back to the agent as one message.
-- **Turns** (structured agents): each turn that changed files ends with a line like "3 files · +12 −4 · View · Rewind". **View** shows just that turn's changes in Changes (comment as usual; **All changes** goes back). **Rewind** puts the worktree's files back to how they were before that turn, after asking: it stops the agent first if it's working, warns if files changed since the turn ended, and tells the agent with your next message. Commits stay. Also Agent > Show Last Turn's Changes and Rewind Last Turn…. Qur keeps a snapshot at the start and end of each turn (a git tree in the task's worktree, pinned under `refs/qur/turns/<task>/`, deleted on Discard or after Merge); your own checkout, index and stash are never touched. Agent Terminals have no turns yet.
+- **Turns** (structured agents): each turn that changed files ends with a line like "3 files · +12 −4 · View · Rewind". **View** shows just that turn's changes in Changes (comment as usual; **All changes** goes back). **Rewind** puts the worktree's files back to how they were before that turn, after asking: it stops the agent first if it's working, warns if files changed since the turn ended, and tells the agent with your next message. Commits stay. Also Agent > Show Last Turn's Changes and Rewind Last Turn…. Qur keeps a snapshot at the start and end of each turn (a git tree in the task's worktree, pinned under `refs/qur/turns/<task>/`, deleted on Discard or after Merge); your own checkout, index and stash are never touched. Agent Terminals get turns too: each busy-then-quiet stretch that changes files is one, listed in their Changes tab; Rewind waits until the agent is quiet and types a one-line note into its input line (not sent).
 - **Second opinion** (structured agents): Agent > **Review Agent's Work…** (or **Review Agent's Plan…** when the agent has a plan) starts a reviewer on the task. Pick who reviews (Up/Down or click): another agent from your roster, such as Codex reviewing a Claude task or the reverse, or another model of the same agent. The default is the other account when it's installed and signed in, else another model. An optional line tells it what to look at. The reviewer is a second session in the same worktree; it gets the task's diff and a summary of its chat (both capped in size) and answers with findings, each with a **Criticality N/10**. It shows as `↳ review · codex` under the agent in the sidebar; click it to watch it in the chat panel. It's **read-only by Qur's rule, not by an OS sandbox**: Qur denies every edit or command it asks to run (no permission bar; the chat says what was denied) and starts it in its plan or read-only mode. When it's done, **Send Findings to Agent** puts a reply request into the agent's prompt (per finding: Agree/Disagree, Why, Fix, then ask before changing anything), for you to edit and send; it queues if the agent is busy. A review costs one more session on the reviewer's own account. The reviewer is saved with the task (click it after a restart to see its findings again) and goes away on Close, Discard or Merge.
 - A pre-check warns about conflicts. **Merge** never touches your staged changes or stash.
+- **Push and Open Pull Request** (Agent menu, or next to Merge): pushes the task's branch with your git and opens a pull request with your `gh` (or GitHub's compare page without it). The link stays on the task; remote branches are never deleted.
 - Resolve conflicts in-app (Accept Ours / Theirs / Both, then Finish or Abort; also in Agent > Merge Conflicts), and stage and commit in the Git panel.
 - Discard removes the task's worktree and branch.
+- **Commit messages** are written from the agent's turns: the Git panel's box is prefilled, and Merge uses it.
+- **Clean Up Worktrees…** (Agent menu) lists every worktree and `qur/*` branch with its size; leftovers are preselected, and anything with unmerged commits or unsaved changes asks twice.
 
 ### Search and alerts
 
 - **Project search** (`Cmd+Shift+F`): the whole tree you're looking at (an agent's worktree or your checkout) in about 50 ms for 5,000 files, with case, whole-word and regex options and Replace All.
 - **Alerts:** when an agent finishes, errors or needs approval while you're elsewhere: a notification (click it to jump to the agent), a Dock badge and a soft chime. Each can be turned off in `config.toml` (`[alerts]`).
+- **Crash reports** stay on your Mac (`~/Library/Logs/Qur/crash-*.txt`, the newest 10). After a crash the next launch offers View Report, Report a Problem (opens the issue page; nothing is uploaded) or Dismiss.
+- **Memory:** About and `qur doctor` show what Qur, its agents and terminals use, and how much disk the worktrees take.
 
 ### Editor and looks
 
@@ -164,7 +178,7 @@ Measured on a MacBook Air M5 with `scripts/budget.sh` ([docs/budget.md](budget.m
 
 | | Target | Qur |
 |---|---|---|
-| App | < 40 MB | 25 MB (`Qur.app`), including 13 tree-sitter grammars (~11 MB) |
+| App | < 40 MB | 29 MB (`Qur.app`), including 13 tree-sitter grammars (~11 MB) |
 | Idle memory, project + small file (physical footprint) | < 80 MB | 73 MB |
 | Memory with 3 Claude agents active (Qur's process) | < 150 MB | 129 MB |
 | Start to first frame | < 250 ms | 113 ms |
@@ -182,14 +196,14 @@ Measured on a MacBook Air M5 with `scripts/budget.sh` ([docs/budget.md](budget.m
 
 | | Qur | Orca | Superset |
 |---|---|---|---|
-| Tech | Rust + GPUI, native; ~25 MB app | Electron + React; ~254 MB app | Electron + React; ~431 MB download (arm64 .dmg) |
+| Tech | Rust + GPUI, native; ~29 MB app | Electron + React; ~254 MB app | Electron + React; ~431 MB download (arm64 .dmg) |
 | License | GPL-3.0-or-later | MIT | Elastic License 2.0 (source-available) |
 | Account | None | None | Sign-in (GitHub or Google) |
 | Agents in isolated worktrees | Always, outside the repo | Yes | Yes, outside the repo |
 | Agent link | Terminal or ACP (structured) | Terminal by default; structured chat experimental | Terminal by default; optional ACP chat |
 | Live view of the agent's current file, with Take over | Yes | — | — |
 | File-tree heatmap of agent activity | Yes | — | — |
-| Permissions | Asked in a permission bar by default | Permission-bypass flags by default | Bypass flags by default for Claude Code and Codex |
+| Permissions | No bypass flags; asked in a permission bar (structured Claude sessions start in the adapter's `auto` mode, which asks less) | Permission-bypass flags by default | Bypass flags by default for Claude Code and Codex |
 | Shipping changes | Local Merge into your branch (index- and stash-safe) | Push and pull request | Commit, push and pull request |
 | Browser + element inspect | System WebKit, freed when idle | Bundled Chromium | Bundled Chromium (Electron webview) |
 | Telemetry / background daemon | None / none (`lsof` shows no sockets in Qur's process) | Opt-out telemetry / keeps terminals alive after quit | PostHog and Sentry / agents keep running after ⌘Q |
