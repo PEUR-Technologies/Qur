@@ -5,14 +5,15 @@ use super::*;
 impl AgentTask {
 // -- second-opinion review ------------------------------------------------------
 
-    /// The chat for a reviewer: messages and tool calls, oldest first.
+    /// The chat for a reviewer: messages and tool calls, oldest first (the
+    /// part on disk too).
     pub fn thread_entries(&self) -> Vec<review::Entry> {
-        self.chat
-            .iter()
+        let (chat, tools) = self.full_chat();
+        chat.iter()
             .filter_map(|c| match c {
                 ChatItem::User(t) => Some(review::Entry::new(review::Role::User, t.clone())),
                 ChatItem::Agent(t) => Some(review::Entry::new(review::Role::Agent, t.clone())),
-                ChatItem::Tool(id) => self.tools.get(id).map(|t| {
+                ChatItem::Tool(id) => tools.get(id).map(|t| {
                     let at = t.locations.first().map(|l| format!(" ({})", self.rel(&l.path))).unwrap_or_default();
                     review::Entry::new(review::Role::Tool, format!("{}{at}", t.title))
                 }),
@@ -117,7 +118,11 @@ impl AgentTask {
         record.queued.clear();
         record.turns.clear();
         record.review = None;
+        let chat = self.history_dir().map(|d| d.with_file_name(&record.id));
         let r = cx.new(|cx| AgentTask::new_reviewer(self, record, def, role, window, cx));
+        if let Some(chat) = chat {
+            r.update(cx, |r, cx| r.restore_chat(chat, cx));
+        }
         let sub = cx.subscribe(&r, |this, r, ev: &AgentEvent, cx| match ev {
             AgentEvent::Changed => {
                 let (sid, status, bytes) = {
@@ -150,8 +155,13 @@ impl AgentTask {
     pub fn close_review(&mut self, cx: &mut Context<Self>) {
         self._review_subs.clear();
         if let Some(r) = self.reviewer.take() {
-            // Shuts down on a thread of its own; nothing to wait for.
-            drop(r.update(cx, |r, cx| r.shutdown(cx)));
+            // Shuts down on a thread of its own; nothing to wait for. Its
+            // saved chat goes.
+            drop(r.update(cx, |r, cx| {
+                let h = r.shutdown(cx);
+                r.delete_chat(cx);
+                h
+            }));
         }
         self.open_review = false;
         self.review_unread = false;

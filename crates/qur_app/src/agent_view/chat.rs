@@ -18,6 +18,8 @@ impl AgentTask {
         if let Some(run) = tool_run(&self.chat, n).filter(|r| r.len() >= 2) {
             self.list.remeasure_items(run.start..n);
         }
+        // A long chat: its oldest rows move to disk.
+        self.spill_check();
     }
 
     /// Find in Chat counts matches again before it next draws.
@@ -266,6 +268,28 @@ impl AgentTask {
             }
             ChatItem::Failure(f) => pad(div()).child(self.failure_callout(ix, f, look, hl, cx)).into_any_element(),
             ChatItem::Turn(n) => pad(div()).child(self.turn_line(ix, *n, look, cx)).into_any_element(),
+            ChatItem::Earlier => {
+                let n = self.history.hidden;
+                pad(div())
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .id("show-earlier")
+                            .relative()
+                            .px(look.z(10.))
+                            .py(look.z(3.))
+                            .rounded(look.z(4.))
+                            .cursor_pointer()
+                            .text_size(look.text(-1.))
+                            .text_color(look.c(ui.text_secondary))
+                            .hover(|d| d.bg(look.c(ui.hover_bg)).text_color(look.c(ui.text)))
+                            .child(format!("Show earlier messages ({n} more)"))
+                            .children(crate::script::mark(|| "show-earlier".into()))
+                            .on_click(cx.listener(|t, _, _, cx| t.show_earlier(cx))),
+                    )
+                    .into_any_element()
+            }
             // Two or more calls in a row are one group: a summary line
             // ("Read 4 files, ran 2 commands ▸") that unfolds to the calls.
             // Folded, a call still shows while it runs, failed, waits for

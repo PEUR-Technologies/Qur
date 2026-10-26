@@ -6,6 +6,11 @@ use super::*;
 impl Workspace {
     pub(super) fn restore_tasks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let store = TaskStore::load(&self.project_id);
+        // Saved chats of tasks that are gone.
+        let ids: Vec<String> = store.tasks.iter().map(|t| t.id.clone()).collect();
+        for dir in crate::agent_view::history::stale_chats(&qur_agents::chats_dir(&self.project_id), &ids) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
         for r in store.tasks {
             match r.mode {
                 Mode::Acp => {
@@ -201,6 +206,9 @@ impl Workspace {
         let (layout, wrap, tab) = (self.layout, self.config.editor.soft_wrap, self.config.editor.tab_width);
         let root = self.root.clone();
         let a = cx.new(|cx| AgentTask::new(root, record, def, accent, layout, wrap, tab, window, cx));
+        // Its chat from last time, if it was saved.
+        let chat = qur_agents::chat_dir(&self.project_id, &id);
+        a.update(cx, |a, cx| a.restore_chat(chat, cx));
         // Messages still queued when Qur last quit: start the agent so they go out.
         a.update(cx, |a, cx| {
             if !a.record.queued.is_empty() && a.status == Status::Stopped {
@@ -702,6 +710,10 @@ impl Workspace {
     pub(super) fn remove_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some((wt, branch, _, _)) = self.task_parts(id, cx) else { return };
         let in_root = self.in_root(id, cx);
+        // Discard, Merge or Close: its saved chat goes too.
+        if let Some(a) = self.agent(id).cloned() {
+            a.update(cx, |a, cx| a.delete_chat(cx));
+        }
         let handle = self.stop_task(id, &wt, cx);
         self.save_tasks(cx);
         if in_root {

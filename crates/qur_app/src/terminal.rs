@@ -208,6 +208,13 @@ pub fn shell() -> String {
 
 type Spawned = (Arc<FairMutex<Term<Listener>>>, EventLoopSender, i32, futures::channel::mpsc::UnboundedReceiver<()>);
 
+/// Lines of scrollback for terminals opened from now on (`[terminal] scrollback`).
+static SCROLLBACK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(qur_config::DEFAULT_SCROLLBACK);
+
+pub fn set_scrollback(n: usize) {
+    SCROLLBACK.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize, title: TitleCell) -> std::io::Result<Spawned> {
     let (tx, rx) = unbounded();
     let reply = Reply::default();
@@ -233,7 +240,7 @@ fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize, title: TitleCell) -> std:
             ("PATH".into(), qur_agents::login_path().into()),
         ]),
     };
-    let term = Arc::new(FairMutex::new(Term::new(TermConfig::default(), &Dims { cols, lines }, listener.clone())));
+    let term = Arc::new(FairMutex::new(Term::new(TermConfig { scrolling_history: SCROLLBACK.load(std::sync::atomic::Ordering::Relaxed), ..TermConfig::default() }, &Dims { cols, lines }, listener.clone())));
     let pty = tty::new(&opts, WindowSize { num_lines: lines as u16, num_cols: cols as u16, cell_width: 8, cell_height: 16 }, id as u64)?;
     let pid = pty.child().id() as i32;
     let ev = EventLoop::new(term.clone(), listener, pty, false, false)?;

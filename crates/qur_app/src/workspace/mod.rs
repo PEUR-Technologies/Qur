@@ -268,6 +268,7 @@ impl Workspace {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         crate::mark("ws_new");
         let (config, err) = Config::load();
+        crate::terminal::set_scrollback(config.terminal.scrollback);
         if !cx.has_global::<Docks>() {
             Docks::load(&config, cx);
         }

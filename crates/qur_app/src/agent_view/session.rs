@@ -25,6 +25,8 @@ impl AgentTask {
         self.agent_cmd = Some(cmd);
         self.client = Some(client.clone());
         self.set_status(Status::Starting, cx);
+        self.begin_replay();
+        self.debug_fill(cx);
         self._events = Some(cx.spawn(async move |this, cx| {
             let mut events = events;
             while let Some(ev) = events.next().await {
@@ -169,12 +171,9 @@ impl AgentTask {
         }
         // The saved session's history is replayed on load: rebuild the chat
         // from it rather than show it twice.
-        if self.load_session && self.record.session_id.is_some() && self.session_id.is_some() {
-            self.chat.clear();
-            self.tools.clear();
-            self.toggled.clear();
-            self.list.reset(0);
-            self.chat_changed();
+        // (A chat restored from disk stays; the replay isn't shown then.)
+        if self.load_session && self.record.session_id.is_some() && self.session_id.is_some() && !self.history.restored {
+            self.clear_chat();
         }
         if let Some(c) = self.client.take() {
             std::thread::spawn(move || c.shutdown(Duration::from_secs(2)));
@@ -301,8 +300,15 @@ impl AgentTask {
         if self.review.is_none() {
             self.monitor.update(cx, |m, _| m.set_turn_active(active));
         }
+        if s != Status::Starting {
+            self.history.replaying = false;
+        }
         if self.status != s {
             self.status = s;
+            // A turn started or ended: the chat is saved.
+            if self.status != Status::Starting {
+                self.save_chat();
+            }
             cx.emit(AgentEvent::Changed);
         }
         cx.notify();
@@ -520,6 +526,7 @@ impl AgentTask {
         }
         self.turn_started = Some(Instant::now());
         self.turn_tools.clear();
+        self.drop_hidden_tools();
         self.turn_files.clear();
         self.set_status(Status::Working, cx);
         // Checkpoint the worktree before the agent can touch it, then send.
@@ -609,6 +616,7 @@ impl AgentTask {
         if !matches!(self.status, Status::Error(_)) {
             self.set_status(Status::Stopped, cx);
         }
+        self.save_chat();
         // The task's reviewer stops with it.
         let reviewer = self.reviewer.clone().and_then(|r| r.update(cx, |r, cx| r.shutdown(cx)));
         match (handle, reviewer) {
@@ -770,6 +778,9 @@ impl AgentTask {
                 cx.notify();
             }
             Event::Update { update, .. } => match update {
+                // session/load replaying a conversation restored from disk.
+                SessionUpdate::AgentMessage(_) | SessionUpdate::AgentThought(_) | SessionUpdate::UserMessage(_) | SessionUpdate::ToolCall(_) | SessionUpdate::ToolCallUpdate(_)
+                    if self.history.replaying => {}
                 SessionUpdate::AgentMessage(c) | SessionUpdate::UserMessage(c) if c.media.is_some() => self.push_media(c.media),
                 SessionUpdate::AgentMessage(c) => self.append(false, &c.text),
                 SessionUpdate::AgentThought(c) => self.append(true, &c.text),
@@ -824,8 +835,21 @@ impl AgentTask {
                             }
                         });
                     }
+                    // Its row is on disk (a long chat): dropped.
+                    if !self.tools.contains_key(&id) && self.tool_hidden(&id) {
+                        return;
+                    }
                     match self.tools.get_mut(&id) {
-                        Some(t) => t.apply(&u),
+                        Some(t) => {
+                            t.apply(&u);
+                            // Done: its raw input and output are only shown
+                            // when it has nothing else (file reads carry the
+                            // file twice otherwise).
+                            if matches!(t.status, ToolStatus::Completed | ToolStatus::Failed) && !history::raw_shown(t) {
+                                t.raw_input = None;
+                                t.raw_output = None;
+                            }
+                        }
                         None => {
                             let t = u.to_tool_call();
                             self.tools.insert(id.clone(), t);
