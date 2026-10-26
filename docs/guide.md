@@ -17,7 +17,7 @@ Everything the [README](../README.md) leaves out: requirements, every feature, c
 
 ```sh
 git clone https://github.com/PEUR-Technologies/Qur.git && cd Qur
-scripts/bundle.sh                      # -> target/release/Qur.app (~25 MB, ad-hoc signed for this Mac)
+scripts/bundle.sh                      # -> target/release/Qur.app (~29 MB, ad-hoc signed for this Mac)
 cp -R target/release/Qur.app /Applications/
 ln -sf /Applications/Qur.app/Contents/MacOS/qur /usr/local/bin/qur   # optional: `qur <folder>` from a terminal
 qur doctor                             # checks git, the agents and their adapters, then a real ACP initialize
