@@ -102,7 +102,7 @@ impl AgentTask {
                 }
                 count
             }
-            ChatItem::Image(..) | ChatItem::Files(_) | ChatItem::Turn(_) => 0,
+            ChatItem::Image(..) | ChatItem::Files(_) | ChatItem::Turn(_) | ChatItem::Earlier => 0,
         }
     }
 
@@ -217,9 +217,11 @@ impl AgentTask {
         )
     }
 
-    /// Copy Chat as Markdown (Agent menu, palette, the sidebar's right-click menu).
+    /// Copy Chat as Markdown (Agent menu, palette, the sidebar's right-click
+    /// menu): the whole chat, the part on disk too.
     pub fn chat_markdown(&self) -> String {
-        chat_markdown(&self.record.title, &self.def.label, &self.chat, &self.tools, &self.record.turns)
+        let (chat, tools) = self.full_chat();
+        chat_markdown(&self.record.title, &self.def.label, &chat, &tools, &self.record.turns)
     }
 
     /// `text` as Markdown; file links open in the code modal. `id`: unique

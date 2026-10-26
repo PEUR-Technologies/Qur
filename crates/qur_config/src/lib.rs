@@ -50,6 +50,7 @@ pub struct Config {
     pub alerts: AlertsConfig,
     pub layout: LayoutConfig,
     pub agents: AgentsConfig,
+    pub terminal: TerminalConfig,
 }
 
 /// Structured (ACP) agents.
@@ -75,6 +76,24 @@ impl Default for AgentsConfig {
 pub struct LayoutConfig {
     pub acp: Option<String>,
     pub terminal: Option<String>,
+}
+
+/// `[terminal]`.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct TerminalConfig {
+    /// Lines of scrollback kept per terminal (new terminals; open ones keep
+    /// theirs). A full line costs about 2.4 KB at 100 columns.
+    pub scrollback: usize,
+}
+
+pub const DEFAULT_SCROLLBACK: usize = 5000;
+pub const MAX_SCROLLBACK: usize = 100_000;
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        TerminalConfig { scrollback: DEFAULT_SCROLLBACK }
+    }
 }
 
 /// When an agent finishes, errors or needs you while you're elsewhere
@@ -194,6 +213,7 @@ impl Default for Config {
             alerts: AlertsConfig::default(),
             layout: LayoutConfig::default(),
             agents: AgentsConfig::default(),
+            terminal: TerminalConfig::default(),
         }
     }
 }
@@ -265,6 +285,7 @@ impl Config {
         self.editor.font_size = self.editor.font_size.clamp(6.0, 72.0);
         self.editor.line_height = self.editor.line_height.clamp(1.0, 3.0);
         self.editor.tab_width = self.editor.tab_width.clamp(1, 16);
+        self.terminal.scrollback = self.terminal.scrollback.min(MAX_SCROLLBACK);
         self.window.opacity = self.window.opacity.clamp(0.0, 1.0);
         if !matches!(self.ui.sidebar.as_str(), "show" | "auto" | "hidden") {
             self.ui.sidebar = "show".into();

@@ -62,6 +62,7 @@ impl Workspace {
     pub fn reload_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (config, err) = Config::load();
         self.config = config;
+        crate::terminal::set_scrollback(self.config.terminal.scrollback);
         Docks::load(&self.config, cx);
         self.project = ProjectSettings::load(&self.project_id);
         if let Some(e) = err {
@@ -442,6 +443,9 @@ const CONFIG_TEMPLATE: &str = r#"# Qur settings. Saved changes apply right away.
 # line_height = 1.5
 # soft_wrap = true
 # tab_width = 4
+
+[terminal]
+# scrollback = 5000         # lines kept per terminal (new terminals); about 2.4 KB a line
 
 [ui]
 # font_size = 13
