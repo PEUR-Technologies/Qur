@@ -3,11 +3,18 @@
 //! selected session's worktree, or the main checkout). The stage shows the
 //! selected session. Code opens in a modal over the window; Esc closes it.
 //! Also applies the project's look (theme, transparency; decisions 8, 13).
+//!
+//! The empty window is a workspace without a project (`home`): no tree,
+//! watcher, tasks or git, terminals in the home folder, and the stage lists
+//! recent projects (home.rs). A folder that isn't a git repository opens as a
+//! project without git (`repo` false): no Source Control, and agents that
+//! need a worktree offer to initialize git first.
 
 mod actions;
 mod checks;
 mod code;
 mod debug;
+mod home;
 mod merge;
 mod overlays;
 mod pickers;
@@ -171,7 +178,14 @@ enum Overlay {
 
 pub struct Workspace {
     focus: FocusHandle,
+    /// The project folder; the home folder in the empty window.
     pub root: PathBuf,
+    /// The empty window: no project.
+    home: bool,
+    /// The project is (inside) a git repository.
+    repo: bool,
+    /// The empty window's recent projects (those still there).
+    recent: Vec<PathBuf>,
     project_id: String,
     config: Config,
     project: ProjectSettings,
@@ -265,15 +279,20 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// A project's window, or with `root` None the empty window.
+    pub fn new(root: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         crate::mark("ws_new");
         let (config, err) = Config::load();
         if !cx.has_global::<Docks>() {
             Docks::load(&config, cx);
         }
-        let project_id = qur_config::project_id(&root);
+        let home = root.is_none();
+        let root = root.unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/")));
+        // The empty window has no project id (no git call) and no project settings.
+        let project_id = if home { String::new() } else { qur_config::project_id(&root) };
         crate::mark("project_id");
-        let project = ProjectSettings::load(&project_id);
+        let project = if home { ProjectSettings::default() } else { ProjectSettings::load(&project_id) };
+        let repo = !home && root.ancestors().any(|d| d.join(".git").exists());
         let (roster, roster_err) = Roster::load();
         let terms = cx.new(TerminalPanel::new);
         let subs = vec![
@@ -308,6 +327,7 @@ impl Workspace {
                     if let Some(Selected::Agent(id) | Selected::TermTask(id)) = this.selected.clone() {
                         this.seen(&id, window, cx);
                     }
+                    this.refresh_recent();
                     // Pick up files created outside Qur (the M3 watcher replaces this).
                     for t in this.trees.values() {
                         t.update(cx, |t, cx| t.refresh(cx));
@@ -317,7 +337,9 @@ impl Workspace {
             }),
         ];
         let mut state = qur_config::State::load();
-        state.touch_project(&root);
+        if !home {
+            state.touch_project(&root);
+        }
         // First run (M6): no config.toml yet. A home that already has one
         // predates the picker and is left alone.
         let first_run = !state.setup_done && !qur_config::config_path().exists();
@@ -328,6 +350,9 @@ impl Workspace {
         let mut ws = Workspace {
             focus: cx.focus_handle(),
             root: root.clone(),
+            home,
+            repo,
+            recent: Vec::new(),
             project_id,
             config,
             project,
@@ -390,14 +415,21 @@ impl Workspace {
             _subs: subs,
         };
         ws.layout = Layout::parse(&ws.config.peek_layout);
-        ws.tree_for(&root, window, cx);
+        ws.refresh_recent();
+        if !home {
+            ws.tree_for(&root, window, cx);
+        }
         crate::mark("tree_loaded");
         ws.apply_look(window, cx);
         crate::mark("look_applied");
-        ws.restore_tasks(window, cx);
+        if !home {
+            ws.restore_tasks(window, cx);
+        }
         // Something must hold focus, or shortcuts have nowhere to go.
         window.focus(&ws.focus, cx);
-        ws.restore_open_files(window, cx);
+        if !home {
+            ws.restore_open_files(window, cx);
+        }
         crate::mark("files_restored");
         // The first-run picker, once (not in scripted runs, unless asked).
         let scripted = ["QUR_DEBUG_ACTIONS", "QUR_DEBUG_TASKS", "QUR_BENCH"].iter().any(|v| std::env::var_os(v).is_some());
@@ -410,7 +442,15 @@ impl Workspace {
         ws
     }
 
+    /// Whether this window shows a project (not the empty window).
+    pub fn has_project(&self) -> bool {
+        !self.home
+    }
+
     pub fn project_name(&self) -> String {
+        if self.home {
+            return "No Project".into();
+        }
         self.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| self.root.to_string_lossy().into_owned())
     }
 
@@ -562,8 +602,10 @@ impl Workspace {
         for h in handles {
             let _ = h.join();
         }
-        self.save_tasks(cx);
-        self.save_open_files(cx);
+        if !self.home {
+            self.save_tasks(cx);
+            self.save_open_files(cx);
+        }
     }
 }
 
@@ -608,11 +650,15 @@ impl Render for Workspace {
                 // Menus and the main-checkout watcher start after the first frame.
                 me.update(cx, |ws, cx| {
                     ws.sync_menus(cx);
-                    ws.watch_root(window, cx);
+                    if !ws.home {
+                        ws.watch_root(window, cx);
+                    }
                 });
             });
             // Dev/test: QUR_DEBUG_TASKS="prompt one|prompt two" starts agent tasks at launch.
-            if let Ok(list) = std::env::var("QUR_DEBUG_TASKS") {
+            if let Ok(list) = std::env::var("QUR_DEBUG_TASKS")
+                && !self.home
+            {
                 for p in list.split('|').map(str::trim).filter(|p| !p.is_empty()) {
                     self.start_task(0, p.to_string(), Vec::new(), window, cx);
                 }
@@ -710,7 +756,6 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::auto_hide_sidebar))
             .on_action(cx.listener(Self::sidebar_on_right))
-            .on_action(cx.listener(Self::reveal_files))
             .on_action(cx.listener(Self::toggle_terminal))
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
@@ -734,9 +779,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::noop_undo))
             .on_action(cx.listener(Self::noop_redo))
             .on_action(cx.listener(Self::palette))
-            .on_action(cx.listener(Self::quick_open))
             .on_action(cx.listener(Self::theme_picker))
-            .on_action(cx.listener(Self::use_default_theme))
             .on_action(cx.listener(Self::project_switcher))
             .on_action(cx.listener(Self::goto_line))
             .on_action(cx.listener(Self::go_to_symbol))
@@ -747,8 +790,6 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::gaps))
             .on_action(cx.listener(Self::toggle_gaps))
             .on_action(cx.listener(Self::new_terminal))
-            .on_action(cx.listener(Self::new_agent_terminal))
-            .on_action(cx.listener(Self::new_agent_task))
             .on_action(cx.listener(Self::close_terminal))
             .on_action(cx.listener(Self::tile_terminal))
             .on_action(cx.listener(Self::caffeinate))
@@ -761,22 +802,6 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::switch_session))
             .on_action(cx.listener(Self::prev_session))
             .on_action(cx.listener(Self::select_session))
-            .on_action(cx.listener(Self::focus_prompt))
-            .on_action(cx.listener(Self::stop_agent))
-            .on_action(cx.listener(Self::allow_once))
-            .on_action(cx.listener(Self::allow_always))
-            .on_action(cx.listener(Self::deny))
-            .on_action(cx.listener(Self::allow_all_pending))
-            .on_action(cx.listener(Self::find_in_chat))
-            .on_action(cx.listener(Self::copy_chat))
-            .on_action(cx.listener(Self::reveal_worktree))
-            .on_action(cx.listener(Self::worktree_terminal))
-            .on_action(cx.listener(Self::discard_task))
-            .on_action(cx.listener(Self::show_git))
-            .on_action(cx.listener(Self::merge_action))
-            .on_action(cx.listener(Self::run_checks_action))
-            .on_action(cx.listener(Self::run_project))
-            .on_action(cx.listener(Self::rename_agent))
             .on_action(cx.listener(Self::open_setup))
             .on_action(cx.listener(Self::toggle_vim))
             .on_action(cx.listener(Self::toggle_keep_awake))
@@ -787,45 +812,74 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::report_problem))
             .on_action(cx.listener(Self::about))
             .on_action(cx.listener(Self::accent_color))
-            .on_action(cx.listener(Self::choose_layout))
             // Scripted runs may reach here before the picker is drawn.
             .on_action(cx.listener(|this, _: &commands::setup::Done, _, cx| {
                 if let Some(Overlay::Setup(v)) = &this.overlay {
                     v.clone().update(cx, |v, cx| v.close(cx));
                 }
             }))
-            .on_action(cx.listener(Self::find_in_project))
-            .on_action(cx.listener(Self::replace_in_project))
-            .on_action(cx.listener(Self::search_panel))
-            .on_action(cx.listener(Self::git_stage_all))
-            .on_action(cx.listener(Self::git_unstage_all))
-            .on_action(cx.listener(Self::git_commit))
-            .on_action(cx.listener(Self::accept_ours))
-            .on_action(cx.listener(Self::accept_theirs))
-            .on_action(cx.listener(Self::accept_both))
-            .on_action(cx.listener(Self::next_conflict))
-            .on_action(cx.listener(Self::prev_conflict))
-            .on_action(cx.listener(Self::finish_merge_action))
-            .on_action(cx.listener(Self::abort_merge_action))
-            .on_action(cx.listener(Self::review_changes))
-            .on_action(cx.listener(Self::show_last_turn))
-            .on_action(cx.listener(Self::rewind_last_turn))
-            .on_action(cx.listener(Self::review_work))
-            .on_action(cx.listener(Self::review_plan))
-            .on_action(cx.listener(Self::send_review_findings))
-            .on_action(cx.listener(Self::keep_working))
-            .on_action(cx.listener(Self::cycle_layout))
-            .on_action(cx.listener(Self::layout_a))
-            .on_action(cx.listener(Self::layout_b))
-            .on_action(cx.listener(Self::layout_c))
-            .on_action(cx.listener(Self::peek_live))
-            .on_action(cx.listener(Self::peek_todo))
-            .on_action(cx.listener(Self::peek_chat))
-            .on_action(cx.listener(Self::peek_changes))
-            .on_action(cx.listener(Self::peek_browser))
-            .on_action(cx.listener(Self::toggle_inspect))
-            .on_action(cx.listener(Self::follow_agent))
-            .on_action(cx.listener(Self::take_over))
+            // Commands that need a project, or a git repository (commands::available_in):
+            // left unhandled elsewhere, so their menu items grey out and their keys do nothing.
+            .when(!self.home, |d| {
+                d.on_action(cx.listener(Self::reveal_files))
+                    .on_action(cx.listener(Self::quick_open))
+                    .on_action(cx.listener(Self::use_default_theme))
+                    .on_action(cx.listener(Self::new_agent_terminal))
+                    .on_action(cx.listener(Self::new_agent_task))
+                    .on_action(cx.listener(Self::focus_prompt))
+                    .on_action(cx.listener(Self::stop_agent))
+                    .on_action(cx.listener(Self::allow_once))
+                    .on_action(cx.listener(Self::allow_always))
+                    .on_action(cx.listener(Self::deny))
+                    .on_action(cx.listener(Self::allow_all_pending))
+                    .on_action(cx.listener(Self::find_in_chat))
+                    .on_action(cx.listener(Self::copy_chat))
+                    .on_action(cx.listener(Self::reveal_worktree))
+                    .on_action(cx.listener(Self::worktree_terminal))
+                    .on_action(cx.listener(Self::discard_task))
+                    .on_action(cx.listener(Self::merge_action))
+                    .on_action(cx.listener(Self::run_checks_action))
+                    .on_action(cx.listener(Self::run_project))
+                    .on_action(cx.listener(Self::rename_agent))
+                    .on_action(cx.listener(Self::choose_layout))
+                    .on_action(cx.listener(Self::find_in_project))
+                    .on_action(cx.listener(Self::replace_in_project))
+                    .on_action(cx.listener(Self::search_panel))
+                    .on_action(cx.listener(Self::review_changes))
+                    .on_action(cx.listener(Self::show_last_turn))
+                    .on_action(cx.listener(Self::rewind_last_turn))
+                    .on_action(cx.listener(Self::review_work))
+                    .on_action(cx.listener(Self::review_plan))
+                    .on_action(cx.listener(Self::send_review_findings))
+                    .on_action(cx.listener(Self::keep_working))
+                    .on_action(cx.listener(Self::cycle_layout))
+                    .on_action(cx.listener(Self::layout_a))
+                    .on_action(cx.listener(Self::layout_b))
+                    .on_action(cx.listener(Self::layout_c))
+                    .on_action(cx.listener(Self::peek_live))
+                    .on_action(cx.listener(Self::peek_todo))
+                    .on_action(cx.listener(Self::peek_chat))
+                    .on_action(cx.listener(Self::peek_changes))
+                    .on_action(cx.listener(Self::peek_browser))
+                    .on_action(cx.listener(Self::toggle_inspect))
+                    .on_action(cx.listener(Self::follow_agent))
+                    .on_action(cx.listener(Self::take_over))
+            })
+            .when(self.repo, |d| {
+                d.on_action(cx.listener(Self::show_git))
+                    .on_action(cx.listener(Self::git_stage_all))
+                    .on_action(cx.listener(Self::git_unstage_all))
+                    .on_action(cx.listener(Self::git_commit))
+                    .on_action(cx.listener(Self::accept_ours))
+                    .on_action(cx.listener(Self::accept_theirs))
+                    .on_action(cx.listener(Self::accept_both))
+                    .on_action(cx.listener(Self::next_conflict))
+                    .on_action(cx.listener(Self::prev_conflict))
+                    .on_action(cx.listener(Self::finish_merge_action))
+                    .on_action(cx.listener(Self::abort_merge_action))
+            })
+            // The empty window: New Agent Task and New Agent Terminal ask for the folder first.
+            .when(self.home, |d| d.on_action(cx.listener(Self::home_new_agent_task)).on_action(cx.listener(Self::home_new_agent_terminal)))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::Transparency { .. } | Overlay::Gaps)) {
                     this.save_popover_transparency(cx);

@@ -40,9 +40,12 @@ EOF
 }
 
 # drive <steps> [qur arg]: run Qur until the steps end (they should end in qur::Quit).
+# An arg of "-" runs it with none.
 drive() {
-  QUR_DEBUG_ACTIONS="$1" perl -e 'alarm shift; exec @ARGV' 90 "$BIN" "${2:-$REPO}" </dev/null >"$LOG" 2>&1
-  grep -hE '^(STATE|FLASH|PROMPT|QUR_DEBUG)' "$LOG" | sed 's/^/    /'
+  local args=("${2:-$REPO}")
+  [ "${2:-}" = "-" ] && args=()
+  QUR_DEBUG_ACTIONS="$1" perl -e 'alarm shift; exec @ARGV' 90 "$BIN" ${args[@]+"${args[@]}"} </dev/null >"$LOG" 2>&1
+  grep -hE '^(STATE|FLASH|PROMPT|WINDOW|QUR_DEBUG)' "$LOG" | sed 's/^/    /'
 }
 
 # ok <description> <command...>: one assertion.
@@ -202,7 +205,72 @@ check_first_run() {  # QUR_DEBUG_SETUP=1: the first-run welcome; Done (or Skip f
   ok "Done closed it" state_has 'overlay=none'
 }
 
-ALL=(vim find_terminal rename rename_click dock cmd_click git_commit git_stage panels gaps gaps_terminal sidebar settings first_run)
+# A plain folder (no git, outside any checkout: $HC may sit in one), and a
+# state.toml whose most recent project is gone.
+plain_and_recent() {
+  PLAIN="${TMPDIR:-/tmp}/qur-hc-$1/plain"
+  rm -rf "${PLAIN:?}"; mkdir -p "$PLAIN"; printf 'notes\n' > "$PLAIN/notes.txt"
+  PLAIN=$(cd "$PLAIN" && pwd -P)
+  printf 'recent_projects = ["%s", "%s", "%s"]\nsetup_done = true\n' "$HC/$1/gone" "$REPO" "$PLAIN" > "$QUR_HOME/state.toml"
+}
+
+check_empty_window() {  # no project to reopen: the empty window, terminals in ~, project commands off.
+  setup empty_window
+  drive "wait:1500,state,marks,qur::QuickOpen,qur::GitPanel,qur::FindInProject,wait:300,state,qur::NewTerminal,wait:1000,state,qur::Quit" -
+  ok "the empty window opened (no project)" has 'WINDOW empty'
+  ok "its stage offers Open Folder… and the rest" has 'BOUNDS home:open-folder'
+  ok "no sidebar while it has no terminals" grep -qE '^STATE.*project=none overlay=none selected=none .*visible=false' "$LOG"
+  ok "Go to File, Git and Find in Project do nothing there" test "$(grep -c '^STATE.*project=none overlay=none selected=none' "$LOG")" -eq 2
+  ok "New Terminal works, with the sidebar back" state_has 'visible=true'
+  ok "and the empty window isn't a recent project" test -z "$(grep -F recent_projects "$QUR_HOME/state.toml" | grep -F /)"
+}
+
+check_empty_recent() {  # the last project is gone: the empty window lists the others; a click opens one.
+  setup empty_recent
+  plain_and_recent empty_recent
+  drive "wait:1500,marks,click:@home:recent:repo,wait:1500,state,qur::Quit" -
+  ok "says the last project is gone" has "FLASH $HC/empty_recent/gone isn't there any more"
+  ok "lists the projects still there" has 'BOUNDS home:recent:plain'
+  ok "clicking one opened its window" has "WINDOW $REPO"
+  ok "and closed the empty window" has 'WINDOW closed empty'
+  ok "the script went on in the project" state_has 'project=repo:repo'
+}
+
+check_close_last() {  # closing the last project window leaves the empty window; closing that quits.
+  setup close_last
+  drive "wait:1500,qur::CloseWindow,wait:1000,state,qur::NewWindow,wait:500,qur::CloseWindow,wait:3000"
+  ok "closing the project window opened the empty window" grep -qE '^WINDOW closed \(0 left\)' "$LOG"
+  ok "the script followed it there" state_has 'project=none'
+  ok "New Window reused it (no second empty window)" test "$(grep -c '^WINDOW empty' "$LOG")" -eq 1
+  ok "closing the empty window quit Qur" has 'WINDOW closed empty (0 left)'
+}
+
+check_home_folder() {  # `qur ~` and a path that doesn't exist get the empty window.
+  setup home_folder
+  drive "wait:1200,state,qur::Quit" "$HOME"
+  ok "qur ~ opened the empty window" has 'WINDOW empty'
+  drive "wait:1200,qur::Quit" "$HC/home_folder/nowhere"
+  ok "a missing path did too, and said so" has "FLASH $HC/home_folder/nowhere doesn't exist"
+}
+
+check_plain_folder() {  # a folder without git: a project without Source Control; agents offer git init.
+  setup plain_folder
+  plain_and_recent plain_folder
+  export GIT_AUTHOR_NAME=hc GIT_AUTHOR_EMAIL=hc@localhost GIT_COMMITTER_NAME=hc GIT_COMMITTER_EMAIL=hc@localhost
+  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false
+  QUR_DEBUG_OPEN="$PLAIN" QUR_DEBUG_PROMPT=0 drive "wait:1500,qur::NewAgentTerminal,wait:2000,state,qur::GitPanel,wait:300,state,qur::NewAgentTerminal,wait:4000,state,qur::GitPanel,wait:800,state,qur::Quit" -
+  unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+  ok "New Agent Terminal in the empty window asked for a folder" has "OPEN_PANEL $PLAIN"
+  ok "and opened it as a project without git" has 'project=folder:plain'
+  ok "its first Agent Terminal works in the folder" has 'selected=task:root-1:'
+  ok "no Git panel there" grep -qE '^STATE.*project=folder:plain .*selected=task:root-1:.* git=\{none\}' "$LOG"
+  ok "a second one offered to initialize Git" has "PROMPT plain isn't a git repository -> 0"
+  ok "which made a first commit of the folder" test -n "$(git -C "$PLAIN" log -1 --format=%s 2>/dev/null)"
+  ok "then the agent started in its own worktree" has 'selected=task:term-2:'
+  ok "and Git came on" state_has 'project=repo:plain'
+}
+
+ALL=(vim find_terminal rename rename_click dock cmd_click git_commit git_stage panels gaps gaps_terminal sidebar settings first_run empty_window empty_recent close_last home_folder plain_folder)
 [ "${1:-}" = "-l" ] && { printf '%s\n' "${ALL[@]}"; exit 0; }
 for c in "${@:-${ALL[@]}}"; do
   echo "$c"

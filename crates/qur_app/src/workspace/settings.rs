@@ -76,7 +76,8 @@ impl Workspace {
     }
 
     pub(super) fn write_setting(&mut self, project_scope: bool, key: &str, value: Option<Value>, cx: &mut Context<Self>) {
-        let path = if project_scope { qur_config::project_settings_path(&self.project_id) } else { qur_config::config_path() };
+        // The empty window has no project: its changes go to all projects.
+        let path = if project_scope && !self.home { qur_config::project_settings_path(&self.project_id) } else { qur_config::config_path() };
         if let Err(e) = qur_config::write_key(&path, key, value) {
             self.flash(format!("Couldn't save {}: {e}", path.display()), cx);
         }
@@ -205,7 +206,7 @@ impl Workspace {
         let custom = Docks::get(cx, dock::Kind::Acp) != dock::Dock::preset(dock::Kind::Acp, preset) || Docks::get(cx, dock::Kind::Terminal) != dock::Dock::preset(dock::Kind::Terminal, preset);
         let (hue, brightness) = self.preview_tune.unwrap_or((self.config.ui.accent_hue, self.config.ui.accent_brightness));
         setup_view::Current {
-            project: self.project_name(),
+            project: if self.home { String::new() } else { self.project_name() },
             theme: self.preview_theme.clone().unwrap_or(eff.theme),
             theme_is_project: eff.theme_is_project,
             opacity: eff.opacity.clamp(qur_theme::MIN_OPACITY, 1.0),

@@ -110,7 +110,7 @@ impl Workspace {
                 self.save_theme(&name, project_scope, window, cx);
                 self.restore_focus(window, cx);
             }
-            (PickerEvent::Tab, PickKind::Themes { project_scope, .. }) => {
+            (PickerEvent::Tab, PickKind::Themes { project_scope, .. }) if !self.home => {
                 *project_scope = !*project_scope;
                 let header = theme_scope_header(*project_scope, &self.project_name());
                 picker.update(cx, |p, cx| {
@@ -186,7 +186,10 @@ impl Workspace {
                     commands::Tier::Ready => commands::display_keys(&c.first_keys()),
                     commands::Tier::Later(m) => format!("coming in {m}"),
                 };
-                let available = (turns || !commands::needs_turn(c)) && (pending || !commands::needs_pending(c)) && commands::review_available(c, review);
+                let available = (turns || !commands::needs_turn(c))
+                    && (pending || !commands::needs_pending(c))
+                    && commands::review_available(c, review)
+                    && commands::available_in(c, !self.home, self.repo);
                 PickItem::new(format!("{}: {}", c.category, c.title)).right(right).enabled(c.ready() && available)
             })
             .collect();
@@ -223,11 +226,12 @@ impl Workspace {
             items.push(PickItem::new(t.name.clone()).detail(t.group));
         }
         let current = names.iter().position(|n| *n == eff.theme).unwrap_or(0);
-        let project_scope = true;
+        // The empty window has no project: its theme is for all projects.
+        let project_scope = !self.home;
         let header = theme_scope_header(project_scope, &self.project_name());
         let p = self.open_picker("Select a theme…", items, PickKind::Themes { names, project_scope }, false, window, cx);
         p.update(cx, |p, cx| {
-            p.header = Some(header);
+            p.header = Some(header).filter(|_| project_scope);
             p.select_item(current, cx);
         });
     }

@@ -422,6 +422,36 @@ pub fn needs_pending(c: &Cmd) -> bool {
     (c.action)().partial_eq(&agent::AllowAllPending)
 }
 
+/// Commands that only mean something in a project window: the empty window
+/// (no project) leaves them unhandled, so their menu items grey out and their
+/// keys do nothing. New Agent Task and New Agent Terminal aren't here: in the
+/// empty window they ask for the folder to work in.
+const PROJECT_ONLY: &[&str] = &[
+    "qur::QuickOpen", "qur::RevealInFiles", "qur::UseDefaultTheme", "qur::FindInProject", "qur::ReplaceInProject",
+    "qur::SearchPanel", "qur::FocusPrompt", "qur::StopAgent", "qur::TakeOver", "qur::RenameAgent",
+    "agent::AllowOnce", "agent::AllowAlways", "agent::Deny", "agent::AllowAllPending", "agent::FindInChat",
+    "agent::CopyChatMarkdown", "qur::ReviewChanges", "qur::ShowLastTurn", "qur::RewindLastTurn", "qur::ReviewWork",
+    "qur::ReviewPlan", "qur::SendReviewFindings", "qur::Merge", "qur::KeepWorking", "qur::RunChecks", "qur::RunProject",
+    "qur::DiscardTask", "qur::OpenWorktreeInTerminal", "qur::RevealWorktree", "qur::CyclePeekLayout",
+    "qur::ChooseLayout", "qur::PeekLayoutA", "qur::PeekLayoutB", "qur::PeekLayoutC", "qur::PeekLive", "qur::PeekTodo",
+    "qur::PeekChat", "qur::PeekChanges", "qur::PeekBrowser", "qur::ToggleInspect", "qur::FollowAgent",
+];
+
+/// Commands that need the project to be a git repository (a plain folder
+/// opens as a project without them).
+const REPO_ONLY: &[&str] = &[
+    "qur::GitPanel", "qur::GitStageAll", "qur::GitUnstageAll", "qur::GitCommit", "qur::NextConflict", "qur::PrevConflict",
+    "qur::AcceptOurs", "qur::AcceptTheirs", "qur::AcceptBoth", "qur::FinishMerge", "qur::AbortMerge",
+];
+
+/// Whether `c` can run in a window with (`project`) or without a project,
+/// and in a git repository (`repo`) or a plain folder.
+pub fn available_in(c: &Cmd, project: bool, repo: bool) -> bool {
+    let name = c.action_name();
+    let repo_only = REPO_ONLY.contains(&name);
+    (project || (!PROJECT_ONLY.contains(&name) && !repo_only)) && (repo || !repo_only)
+}
+
 /// What the selected agent offers for review (disabled, not hidden, without it).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReviewState {
@@ -856,6 +886,24 @@ mod tests {
         assert_eq!(COMMANDS[resolve("qur::OpenConfig").unwrap()].keys(), "");
         assert_eq!(COMMANDS[resolve("View: Theme…").unwrap()].action_name(), "qur::ThemePicker");
         assert_eq!(COMMANDS[resolve("Edit: Vim Mode").unwrap()].action_name(), "qur::VimMode");
+    }
+
+    /// The empty window's and plain folders' lists name real commands, and
+    /// opening a project or a folder, terminals and settings work everywhere.
+    #[test]
+    fn project_and_repo_only_commands() {
+        for name in PROJECT_ONLY.iter().chain(REPO_ONLY) {
+            assert!(resolve(name).is_ok(), "{name} isn't a command");
+        }
+        let c = |name: &str| &COMMANDS[resolve(name).unwrap()];
+        for name in ["qur::OpenFolder", "qur::NewWindow", "qur::ProjectSwitcher", "qur::NewTerminal", "qur::NewAgentTerminal", "qur::NewAgentTask", "qur::CheckSetup", "qur::ThemePicker", "editor::Save"] {
+            assert!(available_in(c(name), false, false), "{name} should work without a project");
+        }
+        assert!(!available_in(c("qur::QuickOpen"), false, false));
+        assert!(available_in(c("qur::QuickOpen"), true, false));
+        assert!(!available_in(c("qur::GitPanel"), true, false));
+        assert!(!available_in(c("qur::GitPanel"), false, true));
+        assert!(available_in(c("qur::GitPanel"), true, true));
     }
 
     #[test]
