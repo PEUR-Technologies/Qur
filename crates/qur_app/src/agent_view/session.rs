@@ -6,6 +6,11 @@ use super::*;
 impl AgentTask {
     // -- lifecycle ---------------------------------------------------------------
 
+    /// The ACP adapter's pid while it runs (About's memory readout).
+    pub fn agent_pid(&self) -> Option<i32> {
+        self.client.as_ref().map(|c| c.pid())
+    }
+
     /// Spawn the agent, initialize, then load the saved session (shows its
     /// history) or start a new one. Sends a queued prompt when ready.
     pub fn start(&mut self, cx: &mut Context<Self>) {
