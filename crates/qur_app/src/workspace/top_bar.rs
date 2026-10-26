@@ -164,6 +164,7 @@ impl Workspace {
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         };
         let fullscreen = self.fullscreen;
+        let gaps = self.config.ui.gaps;
         div()
             .flex()
             .flex_none()
@@ -176,7 +177,11 @@ impl Workspace {
                     .when(fullscreen, |d| d.opacity(0.35))
                     .when(!fullscreen, |d| d.on_click(|_, window, _| window.minimize_window())),
             )
-            .child(light("light-zoom", 0x28c840).on_click(|_, window, _| window.toggle_fullscreen()))
+            // With gaps, green fills the screen on this desktop (the gaps stay
+            // over the wallpaper); Option-click, or out of full screen, toggles it.
+            .child(light("light-zoom", 0x28c840).on_click(move |ev, window, _| {
+                if gaps && !fullscreen && !ev.modifiers().alt { window.zoom_window() } else { window.toggle_fullscreen() }
+            }))
     }
 
     /// The title bar, or in zen mode the bar sliding in from above (or away)
