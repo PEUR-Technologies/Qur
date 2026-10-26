@@ -48,8 +48,19 @@ impl Workspace {
         let sidebar = format!("on={} mode={} side={} shown={} visible={} sections={}", self.sidebar, u.sidebar, u.sidebar_side, self.sidebar_shown, self.sidebar_visible(), u.sidebar_sections.join(","));
         let viewer = self.viewer.as_ref().map_or_else(|| "none".into(), |v| v.debug_state());
         let agents = self.agents.iter().map(|a| a.read(cx).debug_state()).collect::<Vec<_>>().join(" ");
+        // The selected task's Changes view, and the changed files its heat counts as the agent's.
+        let work = match &self.selected {
+            Some(Selected::Agent(id) | Selected::TermTask(id)) => {
+                let join = |v: Vec<PathBuf>| v.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(",");
+                let monitor = self.agent(id).map(|a| a.read(cx).monitor.clone()).or_else(|| self.term_task(id).map(|t| t.monitor.clone()));
+                let heat = monitor.map(|m| join(m.read(cx).heat.changed())).unwrap_or_default();
+                let changes = self.task_parts(id, cx).map(|p| join(p.3.read(cx).files.iter().map(|f| f.path.clone()).collect())).unwrap_or_default();
+                format!("changes=[{changes}] heat=[{heat}]")
+            }
+            _ => "none".into(),
+        };
         format!(
-            "overlay={overlay} selected={selected} agents={{{agents}}} code={code} viewer={viewer} term={{{}}} git={{{vc}}} docks={{{docks}}} gaps={{{gaps}}} sidebar={{{sidebar}}}",
+            "overlay={overlay} selected={selected} agents={{{agents}}} work={{{work}}} code={code} viewer={viewer} term={{{}}} git={{{vc}}} docks={{{docks}}} gaps={{{gaps}}} sidebar={{{sidebar}}}",
             self.terms.read(cx).debug_state(cx)
         )
     }

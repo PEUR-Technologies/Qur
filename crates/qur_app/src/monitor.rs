@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use gpui::{Context, EventEmitter, Task};
-use qur_heat::{Heatmap, ToolKind, ToolStatus};
+use qur_heat::{Heatmap, Shared, ToolKind, ToolStatus};
 use qur_theme::Rgba;
 
 pub enum MonitorEvent {
@@ -16,6 +16,9 @@ pub enum MonitorEvent {
     Changed,
     /// Files changed on disk (absolute paths): reload open views.
     Files(Vec<PathBuf>),
+    /// A project-folder agent's base (your `HEAD`) moved, e.g. you committed: its
+    /// Changes view is stale.
+    BaseMoved,
 }
 
 pub struct TaskMonitor {
@@ -23,6 +26,9 @@ pub struct TaskMonitor {
     pub accent: Rgba,
     pub heat: Heatmap,
     base: String,
+    /// Shared folders, where `base` is `HEAD`: the commit it last resolved to.
+    head: Option<String>,
+    head_check: Option<Task<()>>,
     /// The agent is mid-turn: writes count as edits.
     pub turn_active: bool,
     _watcher: Option<qur_watch::Watcher>,
@@ -39,9 +45,10 @@ impl EventEmitter<MonitorEvent> for TaskMonitor {}
 const DEBOUNCE: Duration = Duration::from_millis(50);
 
 impl TaskMonitor {
-    /// `shared` = the agent works in the project folder, alongside you
-    /// (`Heatmap::set_shared`).
-    pub fn new(worktree: PathBuf, base: String, accent: Rgba, shared: bool, cx: &mut Context<Self>) -> Self {
+    /// `shared`: whether the agent works in the project folder, alongside you, and
+    /// how its writes are told from yours (`Heatmap::set_shared`). There `base` is
+    /// `HEAD` (`TaskRecord::diff_base`), rescanned whenever it moves.
+    pub fn new(worktree: PathBuf, base: String, accent: Rgba, shared: Shared, cx: &mut Context<Self>) -> Self {
         let (watcher, reader) = match qur_watch::Watcher::new(&worktree, DEBOUNCE) {
             Ok((w, mut changes)) => {
                 let task = cx.spawn(async move |this, cx| {
@@ -62,6 +69,8 @@ impl TaskMonitor {
             worktree,
             accent,
             base,
+            head: None,
+            head_check: None,
             turn_active: false,
             _watcher: watcher,
             _reader: reader,
@@ -75,20 +84,51 @@ impl TaskMonitor {
 
     /// Diff stats for everything that already differs from the base (restored tasks).
     fn full_scan(&mut self, cx: &mut Context<Self>) {
-        let (wt, base) = (self.worktree.clone(), self.base.clone());
+        let (wt, base, shared) = (self.worktree.clone(), self.base.clone(), self.heat.shared());
         let bg = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
-            let stats = bg.spawn(async move { qur_heat::full_scan(&wt, &base) }).await;
+            let (head, stats) = bg
+                .spawn(async move {
+                    let head = shared.then(|| head_of(&wt)).flatten();
+                    (head, qur_heat::full_scan(&wt, &base))
+                })
+                .await;
             this.update(cx, |m, cx| {
-                for (rel, s) in stats {
-                    m.heat.set_stat(&rel, Some(s));
-                }
+                m.head = head;
+                m.heat.replace_stats(stats);
                 cx.emit(MonitorEvent::Changed);
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Shared folders: git touched `.git/index` or `.git/HEAD` (a commit, a checkout,
+    /// a reset, or just a status refresh). When `HEAD` moved, every diff stat is stale:
+    /// rescan, and tell the Changes view.
+    fn check_head(&mut self, cx: &mut Context<Self>) {
+        if self.head_check.is_some() {
+            return;
+        }
+        let wt = self.worktree.clone();
+        let bg = cx.background_executor().clone();
+        self.head_check = Some(cx.spawn(async move |this, cx| {
+            let head = bg.spawn(async move { head_of(&wt) }).await;
+            let _ = this.update(cx, |m, cx| {
+                m.head_check = None;
+                // Unknown before (the first scan is still running): it rescans anyway.
+                let moved = m.head.is_some() && head.is_some() && head != m.head;
+                if head.is_some() {
+                    m.head = head;
+                }
+                if moved {
+                    println!("BASE {} moved to {}", m.worktree.display(), m.head.as_deref().unwrap_or_default());
+                    m.full_scan(cx);
+                    cx.emit(MonitorEvent::BaseMoved);
+                }
+            });
+        }));
     }
 
     pub fn on_tool(&mut self, id: &str, kind: Option<ToolKind>, status: Option<ToolStatus>, paths: &[PathBuf], cx: &mut Context<Self>) {
@@ -115,10 +155,17 @@ impl TaskMonitor {
     fn on_files(&mut self, batch: Vec<PathBuf>, cx: &mut Context<Self>) {
         let now = Instant::now();
         self.last_event_at = Some(now);
-        // Your own saves and replaces are never the agent's edits.
-        let (own, theirs) = qur_heat::own_writes().lock().unwrap_or_else(|e| e.into_inner()).split(batch.clone(), now);
-        self.heat.on_fs_change(&own, false, now);
-        self.heat.on_fs_change(&theirs, self.turn_active, now);
+        // Your own saves and replaces are never the agent's edits, and in the project
+        // folder neither are writes to files you have open with unsaved changes.
+        {
+            let record = qur_heat::own_writes().lock().unwrap_or_else(|e| e.into_inner());
+            let (own, theirs) = record.split(batch.clone(), now);
+            self.heat.on_fs_change(&own, false, now);
+            self.heat.on_fs_change_with(&theirs, self.turn_active, |p| record.is_yours(p), now);
+        }
+        if self.heat.shared() && batch.iter().any(|p| p.ends_with(".git/index") || p.ends_with(".git/HEAD")) {
+            self.check_head(cx);
+        }
         cx.emit(MonitorEvent::Files(batch));
         self.schedule_recompute(cx);
         self.changed(cx);
@@ -196,6 +243,24 @@ impl TaskMonitor {
     pub fn rel(&self, abs: &Path) -> Option<PathBuf> {
         abs.strip_prefix(&self.worktree).ok().map(Path::to_path_buf)
     }
+}
+
+/// The commit `HEAD` points at (blocking).
+fn head_of(worktree: &Path) -> Option<String> {
+    qur_worktree::git(worktree, &["rev-parse", "--verify", "-q", "HEAD"]).ok().filter(|s| !s.is_empty())
+}
+
+/// The files an ACP tool call names: its locations, and the paths of its diffs.
+pub fn tool_paths<'a>(locations: impl IntoIterator<Item = &'a qur_acp::Location>, content: impl IntoIterator<Item = &'a qur_acp::ToolContent>) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = locations.into_iter().map(|l| l.path.clone()).collect();
+    for c in content {
+        if let qur_acp::ToolContent::Diff { path, .. } = c
+            && !paths.contains(path)
+        {
+            paths.push(path.clone());
+        }
+    }
+    paths
 }
 
 /// ACP kinds and statuses to the heat model's.

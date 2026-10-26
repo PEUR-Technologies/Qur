@@ -427,7 +427,7 @@ impl AgentTask {
     #[allow(clippy::too_many_arguments)]
     pub fn new(root: PathBuf, record: TaskRecord, def: AgentDef, accent: Rgba, layout: Layout, wrap: bool, tab: usize, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let project_root = root.clone();
-        let changes = cx.new(|cx| ChangesView::new(root, record.worktree.clone(), record.base.clone(), record.branch.clone(), cx).with_pr(record.pr_url.clone()));
+        let changes = cx.new(|cx| ChangesView::new(root, record.worktree.clone(), record.diff_base().to_string(), record.branch.clone(), cx).with_pr(record.pr_url.clone()));
         let changes_sub = cx.subscribe_in(&changes, window, |this, _, ev: &ChangesEvent, window, cx| match ev {
             ChangesEvent::Merge => cx.emit(AgentEvent::Merge),
             ChangesEvent::PullRequest => cx.emit(AgentEvent::PullRequest),
@@ -444,7 +444,8 @@ impl AgentTask {
             ChangesEvent::Open(p, line) => cx.emit(AgentEvent::OpenFile(p.clone(), *line)),
             ChangesEvent::Rewind(n) => cx.emit(AgentEvent::Rewind(*n)),
         });
-        let monitor = cx.new(|cx| TaskMonitor::new(record.worktree.clone(), record.base.clone(), accent, record.in_root, cx));
+        let shared = if record.in_root { qur_heat::Shared::Tools } else { qur_heat::Shared::No };
+        let monitor = cx.new(|cx| TaskMonitor::new(record.worktree.clone(), record.diff_base().to_string(), accent, shared, cx));
         let label = def.label.clone();
         let live = cx.new(|cx| LivePane::new(monitor.clone(), label, wrap, tab, window, cx));
         let live_sub = cx.subscribe_in(&live, window, |this, _, ev: &LiveEvent, _, cx| match ev {
@@ -452,12 +453,11 @@ impl AgentTask {
             LiveEvent::Open(p) => cx.emit(AgentEvent::OpenFile(p.clone(), None)),
         });
         let monitor_sub = cx.observe(&monitor, |_, _, cx| cx.notify());
-        let files_sub = cx.subscribe(&monitor, |this, _, ev: &crate::monitor::MonitorEvent, _| {
-            if let crate::monitor::MonitorEvent::Files(_) = ev
-                && matches!(this.status, Status::Working | Status::NeedsYou)
-            {
-                this.turn_wrote = true;
-            }
+        let files_sub = cx.subscribe(&monitor, |this, _, ev: &crate::monitor::MonitorEvent, cx| match ev {
+            crate::monitor::MonitorEvent::Files(_) if matches!(this.status, Status::Working | Status::NeedsYou) => this.turn_wrote = true,
+            // You committed in the project folder: the diff against HEAD is stale.
+            crate::monitor::MonitorEvent::BaseMoved => this.changes.update(cx, |c, cx| c.refresh(cx)),
+            _ => {}
         });
         let browser = cx.new(|cx| BrowserPane::new(record.browser_url.clone(), accent, window, cx));
         let browser_sub = cx.subscribe_in(&browser, window, |this, _, ev: &BrowserPaneEvent, window, cx| match ev {

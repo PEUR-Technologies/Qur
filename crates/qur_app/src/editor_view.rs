@@ -1032,6 +1032,18 @@ impl EditorView {
     }
 }
 
+impl Drop for EditorView {
+    /// A buffer closed with unsaved changes (its window closed): the file is no
+    /// longer yours to the heatmap (see the workspace's `on_editor_event`).
+    fn drop(&mut self) {
+        if self.model.is_dirty()
+            && let Some(p) = self.model.path()
+        {
+            qur_heat::own_writes().lock().unwrap_or_else(|e| e.into_inner()).set_dirty(p, false);
+        }
+    }
+}
+
 impl Focusable for EditorView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()

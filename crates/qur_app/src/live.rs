@@ -45,6 +45,7 @@ impl LivePane {
         let sub = cx.subscribe_in(&monitor, window, |this, _, ev: &MonitorEvent, _, cx| match ev {
             MonitorEvent::Changed => this.sync(cx),
             MonitorEvent::Files(paths) => this.on_files(paths, cx),
+            MonitorEvent::BaseMoved => {}
         });
         let accent = monitor.read(cx).accent;
         let mut p = LivePane { monitor, agent, accent, editor: None, current: None, follow: true, taken_over: false, editing: false, wrap, tab, _sub: sub };

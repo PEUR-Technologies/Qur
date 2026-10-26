@@ -187,6 +187,11 @@ impl Workspace {
                 let v = view.read(cx);
                 let path = v.path().map(Path::to_path_buf);
                 let clean = !v.is_dirty();
+                // Unsaved changes here: in the project folder, writes to this file are
+                // yours, not a busy agent's (the heatmap).
+                if let Some(p) = &path {
+                    qur_heat::own_writes().lock().unwrap_or_else(|e| e.into_inner()).set_dirty(p, !clean);
+                }
                 if clean && path.as_deref() == Some(qur_config::config_path().as_path()) {
                     self.reload_settings(window, cx);
                     self.broadcast_reload(cx);

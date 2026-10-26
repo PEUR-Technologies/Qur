@@ -72,7 +72,7 @@ impl AgentTask {
         let r = self.attach_reviewer(&link, def, window, cx);
         let thread = review::serialize_thread(&self.thread_entries(), review::THREAD_CAP);
         let plan = if subject == Subject::Plan { self.plan_text() } else { None };
-        let (wt, base) = (self.record.worktree.clone(), self.record.base.clone());
+        let (wt, base) = (self.record.worktree.clone(), self.record.diff_base().to_string());
         println!("REVIEW {} start {} subject={} thread={}B", self.record.id, r.read(cx).record.title, subject.as_str(), thread.len());
         self.open_review = true;
         self.review_unread = false;

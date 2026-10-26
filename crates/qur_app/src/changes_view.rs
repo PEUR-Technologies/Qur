@@ -193,11 +193,14 @@ pub struct TurnFilter {
 
 pub struct ChangesView {
     pub worktree: PathBuf,
-    /// Showing one turn's changes instead of the whole task's.
+    /// Showing one turn's changes instead of the whole task's. Any task with turn
+    /// checkpoints can show one (`show_turn`); today only ACP agents record them.
     pub turn: Option<TurnFilter>,
     /// The task's turns for the strip under the header (Agent Terminals,
     /// which have no chat to put turn lines in). Empty: no strip.
     turns: Vec<qur_agents::Turn>,
+    /// The whole task's changes are against this (`TaskRecord::diff_base`): a commit,
+    /// or `HEAD` (resolved at each refresh) for an agent in the project folder.
     base: String,
     pub files: Vec<FileDiff>,
     pub totals: (u32, u32),
@@ -319,8 +322,13 @@ impl ChangesView {
                     };
                     // Pre-check what the merge would do, including uncommitted work:
                     // `git stash create` makes a commit object without touching anything.
-                    let tip = qur_worktree::git(&wt, &["stash", "create"]).ok().filter(|s| !s.is_empty()).unwrap_or(branch);
-                    let conflicts = qur_git::precheck(&root, &tip).unwrap_or_default();
+                    // An agent in the project folder has nothing to merge.
+                    let conflicts = if wt == root {
+                        Vec::new()
+                    } else {
+                        let tip = qur_worktree::git(&wt, &["stash", "create"]).ok().filter(|s| !s.is_empty()).unwrap_or(branch);
+                        qur_git::precheck(&root, &tip).unwrap_or_default()
+                    };
                     (diff, conflicts)
                 })
                 .await;
