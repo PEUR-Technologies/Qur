@@ -404,6 +404,10 @@ impl PromptInput {
             Some(gpui::ClipboardEntry::Image(img)) if !img.bytes().is_empty() => return self.attach_image_bytes(img.bytes().to_vec(), cx),
             _ => {}
         }
+        // "Copy Image" in a browser: its address comes first, the image behind it.
+        if let Some(bytes) = files::image_behind_text(&clip.text().unwrap_or_default()) {
+            return self.attach_image_bytes(bytes, cx);
+        }
         if let Some(t) = clip.text() {
             let t = t.replace("\r\n", "\n").replace('\r', "\n");
             self.replace(&t, cx);

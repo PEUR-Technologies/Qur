@@ -78,6 +78,57 @@ pub fn sendable_image(bytes: Vec<u8>) -> Option<Arc<gpui::Image>> {
     Some(Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Jpeg, out)))
 }
 
+/// The copied image behind copied text, when the text is only a stand-in.
+/// GPUI's clipboard read returns a copied string before a copied image, and
+/// "Copy Image" in a browser puts the image's address (or an empty string)
+/// beside the image. So when `text`, what GPUI read, is blank or just a URL
+/// and the pasteboard also holds a PNG, JPEG or TIFF, that image's bytes.
+/// Any other text stays a text paste.
+pub fn image_behind_text(text: &str) -> Option<Vec<u8>> {
+    if !stands_in_for_image(text) {
+        return None;
+    }
+    pasteboard_image(true)
+}
+
+/// Whether `image_behind_text` would find an image, without reading it.
+pub fn has_image_behind_text(text: &str) -> bool {
+    stands_in_for_image(text) && pasteboard_image(false).is_some()
+}
+
+/// Blank, or a single URL (what browsers copy beside an image).
+fn stands_in_for_image(text: &str) -> bool {
+    let t = text.trim();
+    t.is_empty() || (!t.contains(char::is_whitespace) && ["http://", "https://", "file://", "data:", "blob:"].iter().any(|p| t.starts_with(p)))
+}
+
+/// The general pasteboard's image, if it has one: PNG first, then JPEG,
+/// then TIFF (big; `sendable_image` turns it into PNG). With `read` false,
+/// only whether there is one (`Some` of nothing).
+#[cfg(target_os = "macos")]
+fn pasteboard_image(read: bool) -> Option<Vec<u8>> {
+    image_in(&objc2_app_kit::NSPasteboard::generalPasteboard(), read)
+}
+
+#[cfg(target_os = "macos")]
+fn image_in(pb: &objc2_app_kit::NSPasteboard, read: bool) -> Option<Vec<u8>> {
+    use objc2_app_kit::{NSPasteboardTypePNG, NSPasteboardTypeTIFF};
+    use objc2_foundation::NSString;
+    let types = pb.types()?;
+    let jpeg = NSString::from_str("public.jpeg");
+    let wanted: [&NSString; 3] = unsafe { [NSPasteboardTypePNG, &jpeg, NSPasteboardTypeTIFF] };
+    let mut present = wanted.into_iter().filter(|t| types.containsObject(t));
+    if !read {
+        return present.next().map(|_| Vec::new());
+    }
+    present.find_map(|t| pb.dataForType(t).map(|d| d.to_vec()).filter(|b| !b.is_empty()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn pasteboard_image(_read: bool) -> Option<Vec<u8>> {
+    None
+}
+
 /// Width and height in pixels, read from the header (None for SVG or junk).
 pub fn image_size(bytes: &[u8]) -> Option<(u32, u32)> {
     image::ImageReader::new(Cursor::new(bytes))
@@ -106,6 +157,39 @@ pub fn human_size(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_blank_text_or_a_url_stands_in_for_an_image() {
+        for t in ["", "  \n", "https://example.com/cat.png", " http://x.test/a?b=c\n", "data:image/png;base64,AAAA", "blob:https://x.test/1", "file:///tmp/a.png"] {
+            assert!(stands_in_for_image(t), "{t:?}");
+        }
+        for t in ["cat", "see https://example.com/cat.png", "https://a.test https://b.test", "www.example.com", "/tmp/a.png"] {
+            assert!(!stands_in_for_image(t), "{t:?}");
+        }
+    }
+
+    /// "Copy Image" in a browser, on a pasteboard of its own (never the
+    /// general one, which is yours): the image is found behind the URL.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn finds_the_image_beside_a_copied_url() {
+        use objc2_app_kit::{NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF};
+        use objc2_foundation::{NSData, NSString};
+        let name = NSString::from_str(&format!("qur-test-{}-{:?}", std::process::id(), std::time::Instant::now()));
+        let pb = NSPasteboard::pasteboardWithName(&name);
+        let (png_type, tiff_type, string_type) = unsafe { (NSPasteboardTypePNG, NSPasteboardTypeTIFF, NSPasteboardTypeString) };
+        pb.clearContents();
+        pb.setString_forType(&NSString::from_str("https://example.com/cat.png"), string_type);
+        assert!(image_in(&pb, false).is_none());
+        let bytes = png(3, 2);
+        pb.setData_forType(Some(&NSData::with_bytes(b"tiff")), tiff_type);
+        pb.setData_forType(Some(&NSData::with_bytes(&bytes)), png_type);
+        assert_eq!(image_in(&pb, false), Some(Vec::new()));
+        // PNG before TIFF.
+        assert_eq!(image_in(&pb, true), Some(bytes));
+        pb.clearContents();
+        assert!(image_in(&pb, true).is_none());
+    }
 
     fn png(w: u32, h: u32) -> Vec<u8> {
         let mut out = Vec::new();

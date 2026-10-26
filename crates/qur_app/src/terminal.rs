@@ -106,17 +106,33 @@ type TitleCell = Arc<std::sync::Mutex<Option<String>>>;
 /// The PTY's input side, for answers the terminal owes the program.
 type Reply = Arc<std::sync::Mutex<Option<EventLoopSender>>>;
 
-/// The theme's terminal colors as last drawn, for color queries (OSC 10/11/4).
-static THEME_COLORS: std::sync::Mutex<Option<TerminalColors>> = std::sync::Mutex::new(None);
+/// The theme's terminal colors, for color queries (OSC 10/11/4). One per
+/// panel, set from its window's look, so each window answers with its own theme.
+type ColorsCell = Arc<std::sync::Mutex<Option<TerminalColors>>>;
 
 #[derive(Clone)]
-pub struct Listener(UnboundedSender<()>, TitleCell, Reply);
+pub struct Listener(UnboundedSender<()>, TitleCell, Reply, ColorsCell);
 
 impl Listener {
     fn reply(&self, text: String) {
         if let Some(s) = self.2.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             let _ = s.send(Msg::Input(text.into_bytes().into()));
         }
+    }
+
+    /// The color a query for `index` gets: 0–255 the palette, 256 or 259+ the
+    /// foreground, 257 the background, 258 the cursor. `None` before the
+    /// panel has its window's colors.
+    fn color_answer(&self, index: usize) -> Option<alacritty_terminal::vte::ansi::Rgb> {
+        let colors = self.3.lock().unwrap_or_else(|e| e.into_inner());
+        let t = colors.as_ref()?;
+        let v = match index {
+            i if i < 256 => indexed(i as u8, t),
+            257 => rgb(t.background),
+            258 => rgb(t.cursor),
+            _ => rgb(t.foreground),
+        };
+        Some(alacritty_terminal::vte::ansi::Rgb { r: (v >> 16) as u8, g: (v >> 8) as u8, b: v as u8 })
     }
 }
 
@@ -130,15 +146,7 @@ impl EventListener for Listener {
             // "What's your background?": programs such as Claude Code pick their
             // light or dark palette from this, so answer with the theme's colors.
             TermEvent::ColorRequest(index, format) => {
-                let colors = THEME_COLORS.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                if let Some(t) = colors {
-                    let v = match *index {
-                        i if i < 256 => indexed(i as u8, &t),
-                        257 => rgb(t.background),
-                        258 => rgb(t.cursor),
-                        _ => rgb(t.foreground),
-                    };
-                    let c = alacritty_terminal::vte::ansi::Rgb { r: (v >> 16) as u8, g: (v >> 8) as u8, b: v as u8 };
+                if let Some(c) = self.color_answer(*index) {
                     self.reply(format(c));
                 }
             }
@@ -208,10 +216,10 @@ pub fn shell() -> String {
 
 type Spawned = (Arc<FairMutex<Term<Listener>>>, EventLoopSender, i32, futures::channel::mpsc::UnboundedReceiver<()>);
 
-fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize, title: TitleCell) -> std::io::Result<Spawned> {
+fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize, title: TitleCell, colors: ColorsCell) -> std::io::Result<Spawned> {
     let (tx, rx) = unbounded();
     let reply = Reply::default();
-    let listener = Listener(tx, title, reply.clone());
+    let listener = Listener(tx, title, reply.clone(), colors);
     let (cols, lines) = (100, 12);
     // `env -u` strips vendor API keys so the CLIs use their own logins.
     let mut args = vec!["-u".into(), "ANTHROPIC_API_KEY".into(), "-u".into(), "OPENAI_API_KEY".into(), shell(), "-l".into()];
@@ -540,6 +548,8 @@ pub struct TerminalPanel {
     rest_size: HashMap<usize, (Pixels, Pixels)>,
     /// How far above its pane a held grid starts (mouse to cell).
     grid_shift: HashMap<usize, Pixels>,
+    /// This window's terminal colors, shared with its sessions' listeners.
+    colors: ColorsCell,
 }
 
 impl EventEmitter<PanelEvent> for TerminalPanel {}
@@ -568,7 +578,14 @@ impl TerminalPanel {
             glide: Motion::default(),
             glide_area: Rc::default(),
             resizing: None,
+            colors: ColorsCell::default(),
         }
+    }
+
+    /// The theme's terminal colors for this window (set as its look changes),
+    /// which its terminals answer color queries with.
+    pub fn set_colors(&self, colors: TerminalColors) {
+        *self.colors.lock().unwrap_or_else(|e| e.into_inner()) = Some(colors);
     }
 
     pub fn open(&mut self, cwd: &Path, kind: Kind, label: String, cx: &mut Context<Self>) -> Option<usize> {
@@ -579,7 +596,7 @@ impl TerminalPanel {
             Kind::Shell => None,
         };
         let title = TitleCell::default();
-        let (term, sender, pid, mut rx) = match spawn_pty(cwd, run.as_deref(), id, title.clone()) {
+        let (term, sender, pid, mut rx) = match spawn_pty(cwd, run.as_deref(), id, title.clone(), self.colors.clone()) {
             Ok(x) => x,
             Err(e) => {
                 self.message = Some(format!("terminal failed: {e}"));
@@ -1025,6 +1042,10 @@ impl TerminalPanel {
             _ => {}
         }
         let Some(t) = clip.text() else { return };
+        // "Copy Image" in a browser: its address comes first, the image behind it.
+        if crate::files::has_image_behind_text(&t) {
+            return self.write_active(vec![0x16], cx);
+        }
         let bracketed = self
             .active_session()
             .map(|s| s.term.lock().mode().contains(TermMode::BRACKETED_PASTE))
@@ -1454,7 +1475,6 @@ impl Element for GridElement {
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) -> GridPrepaint {
         let look = Look::of(window, cx);
         let tc = look.theme.terminal.clone();
-        *THEME_COLORS.lock().unwrap_or_else(|e| e.into_inner()) = Some(tc.clone());
         let fs = look.z(look.code_size - 1.);
         let f = font(look.code_font.clone());
         let ts = window.text_system().clone();
@@ -2060,6 +2080,30 @@ fn shell_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_queries_answer_with_each_panels_own_theme() {
+        // Two windows' panels on themes with different backgrounds.
+        let themes = qur_theme::Registry::global().all();
+        let light = themes.iter().find(|t| t.appearance == qur_theme::Appearance::Light).expect("a light theme").terminal.clone();
+        let dark = themes.iter().find(|t| t.appearance == qur_theme::Appearance::Dark).expect("a dark theme").terminal.clone();
+        assert_ne!(rgb(light.background), rgb(dark.background));
+        let listener = |colors: &ColorsCell| Listener(unbounded().0, TitleCell::default(), Reply::default(), colors.clone());
+        let (a, b) = (ColorsCell::default(), ColorsCell::default());
+        let (la, lb) = (listener(&a), listener(&b));
+        // Nothing to answer before the panel has its window's colors.
+        assert!(la.color_answer(257).is_none());
+        *a.lock().unwrap() = Some(light.clone());
+        *b.lock().unwrap() = Some(dark.clone());
+        let hex = |c: alacritty_terminal::vte::ansi::Rgb| ((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32;
+        // OSC 11 (background), OSC 10 (foreground), OSC 4;1 (red), however the last drawn window looks.
+        assert_eq!(la.color_answer(257).map(hex), Some(rgb(light.background)));
+        assert_eq!(lb.color_answer(257).map(hex), Some(rgb(dark.background)));
+        assert_eq!(la.color_answer(256).map(hex), Some(rgb(light.foreground)));
+        assert_eq!(lb.color_answer(256).map(hex), Some(rgb(dark.foreground)));
+        assert_eq!(la.color_answer(1).map(hex), Some(indexed(1, &light)));
+        assert_eq!(lb.color_answer(1).map(hex), Some(indexed(1, &dark)));
+    }
 
     #[test]
     fn selection_survives_redraws_and_scrolling() {
