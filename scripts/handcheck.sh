@@ -243,7 +243,7 @@ check_diff_review() {  # an agent's changes in the code modal: markers, Next/Pre
   ok "Shift+Opt+F5 went back" grep -qF 'CHANGE prev line=3 ' "$LOG"
   ok "Opt+F3 opened the peek on it" grep -qF 'CHANGE peek line=3 [Modified@1 Removed@3 Added@5] peek=2' "$LOG"
   ok "Revert put the removed line back; the peek moved on" grep -qF 'changes=[Modified@1 Added@6] peek=2' "$LOG"
-  ok "in the buffer only" grep -qF 'dirty=true changes=[Modified@1 Added@6] peek=2 vs "the task'"'"'s base" text="ONE\ntwo\nthree\nfour\nfive\nadded\n"' "$LOG"
+  ok "in the buffer only" grep -qF 'dirty=true changes=[Modified@1 Added@6] peek=2 vs "the task'"'"'s base" format="UTF-8 · LF" text="ONE\ntwo\nthree\nfour\nfive\nadded\n"' "$LOG"
   ok "Accept hid the addition" grep -qF 'changes=[Modified@1] peek=0' "$LOG"
   ok "Cmd+Z undid the revert (the accepted change stays hidden)" state_has 'changes=[Modified@1 Removed@3] peek=0'
   ok "the worktree's file is the agent's" cmp -s "$wt/a.txt" <(printf 'ONE\ntwo\nfour\nfive\nadded\n')
@@ -257,7 +257,7 @@ check_diff_head() {  # your own file shows its changes vs HEAD; Revert Change in
   ok "markers vs HEAD" grep -qF 'changes=[Modified@2 Added@4] peek=0 vs "HEAD"' "$LOG"
   ok "Opt+F3 went to the next change and opened its peek" grep -qF 'code=a.txt@2:1 vim=- dirty=false changes=[Modified@2 Added@4] peek=1' "$LOG"
   ok "Esc closed the peek, not the modal" grep -qF 'code=a.txt@2:1 vim=- dirty=false changes=[Modified@2 Added@4] peek=0' "$LOG"
-  ok "Revert at the cursor's change only" state_has 'changes=[Added@4] peek=0 vs "HEAD" text="one\ntwo\nthree\nmore\n"'
+  ok "Revert at the cursor's change only" state_has 'changes=[Added@4] peek=0 vs "HEAD" format="UTF-8 · LF" text="one\ntwo\nthree\nmore\n"'
   ok "nothing staged" git_ diff --cached --quiet
 }
 
