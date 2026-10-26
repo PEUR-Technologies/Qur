@@ -28,6 +28,7 @@ pub mod qur {
             RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge, Caffeinate, ShowKeepAwake, SwitchSession, ZenMode,
             Gaps, ToggleGaps, AutoHideSidebar, SidebarOnRight,
             ShowLastTurn, RewindLastTurn, ReviewWork, ReviewPlan, SendReviewFindings,
+            RevealInFinder, CopyPath, CopyRelativePath,
         ]
     );
 
@@ -211,6 +212,12 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(editor::Save, "File", "Save", "cmd-s", E, R),
     cmd!(qur::SaveAll, "File", "Save All", "cmd-alt-s", W, R),
     cmd!(qur::RevertFile, "File", "Revert File", "", W, R),
+    // The file in the code modal (the Files tree's right-click menu has them too).
+    // VS Code's Opt+Cmd+R and Opt+Cmd+C are Qur's find toggles, so only Copy
+    // Relative Path takes VS Code's key.
+    cmd!(qur::RevealInFinder, "File", "Reveal in Finder", "", W, R),
+    cmd!(qur::CopyPath, "File", "Copy Path", "", W, R),
+    cmd!(qur::CopyRelativePath, "File", "Copy Relative Path", "cmd-alt-shift-c", W, R),
     cmd!(qur::RevealInFiles, "View", "Files Dropdown", "cmd-shift-e", W, R),
     cmd!(qur::GoToLine, "Go", "Go to Line…", "ctrl-g", NT, R),
     cmd!(qur::NavBack, "Go", "Back", "ctrl--", NT, R),
@@ -648,6 +655,10 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::SaveAll),
             item(qur::RevertFile),
             sep(),
+            item(qur::RevealInFinder),
+            item(qur::CopyPath),
+            item(qur::CopyRelativePath),
+            sep(),
             item(qur::CloseTerminal),
             item(qur::CloseWindow),
         ]),
@@ -869,5 +880,17 @@ mod tests {
         }
         assert_eq!(COMMANDS[resolve("qur::ExpandSelection").unwrap()].keys(), "ctrl-shift-cmd-right");
         assert_eq!(COMMANDS[resolve("qur::ShrinkSelection").unwrap()].keys(), "ctrl-shift-cmd-left");
+    }
+
+    /// VS Code's keys for the file path commands, where Qur has them free:
+    /// Opt+Cmd+R and Opt+Cmd+C stay the find toggles.
+    #[test]
+    fn file_path_keys() {
+        let bound = |k: &str| -> Vec<&str> { COMMANDS.iter().filter(|c| c.keys().split('|').any(|x| x == k)).map(|c| c.action_name()).collect() };
+        assert_eq!(bound("cmd-alt-shift-c"), ["qur::CopyRelativePath"]);
+        assert_eq!(bound("cmd-alt-r"), ["editor::ToggleRegex"]);
+        assert_eq!(bound("cmd-alt-c"), ["editor::ToggleCase"]);
+        assert_eq!(COMMANDS[resolve("qur::RevealInFinder").unwrap()].keys(), "");
+        assert_eq!(COMMANDS[resolve("qur::CopyPath").unwrap()].keys(), "");
     }
 }

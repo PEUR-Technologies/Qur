@@ -36,6 +36,9 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Ctrl+G` | Go to Line… | S |
 | `Ctrl+-` / `Ctrl+Shift+-` | Navigate Back / Forward | M1 |
 | `Cmd+Shift+O` | Go to Symbol in File (tree-sitter outline, no LSP; arrows preview, Esc goes back) | ✅ |
+| `Shift+Opt+Cmd+C` | Copy Relative Path of the file in the code modal (relative to its checkout: the project or the task's worktree; VS Code's key) | ✅ |
+| File menu / palette | Reveal in Finder, Copy Path (the file in the code modal). No default keys: VS Code's `Opt+Cmd+R` and `Opt+Cmd+C` are Qur's find toggles | ✅ |
+| Right-click a Files row | Open, Open in Default App (files), Reveal in Finder, Copy Path, Copy Relative Path (relative to the tree's root); a deleted file's row is greyed out. Drag a row out of the window to drop the file in Finder or another app | ✅ |
 
 ## Editing
 

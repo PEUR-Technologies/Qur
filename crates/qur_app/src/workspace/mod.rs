@@ -8,6 +8,7 @@ mod actions;
 mod checks;
 mod code;
 mod debug;
+mod file_menu;
 mod merge;
 mod overlays;
 mod pickers;
@@ -156,6 +157,8 @@ enum Overlay {
     Accent,
     /// Right-click on an agent's button: its commands, at the pointer.
     AgentMenu { id: String, at: gpui::Point<Pixels> },
+    /// Right-click on a Files tree row: its commands, at the pointer.
+    FileMenu { abs: PathBuf, rel: PathBuf, is_dir: bool, ghost: bool, at: gpui::Point<Pixels> },
     /// View > Choose Stage Layout….
     Layouts,
     /// About Qur (M7).
@@ -471,6 +474,7 @@ impl Workspace {
         let t = cx.new(|_| TreeView::new(root));
         let sub = cx.subscribe_in(&t, window, |this, _, ev: &TreeEvent, window, cx| match ev {
             TreeEvent::Open(p) => this.open_path(p, window, cx),
+            TreeEvent::Menu { abs, rel, is_dir, ghost, at } => this.open_file_menu(abs.clone(), rel.clone(), *is_dir, *ghost, *at, window, cx),
         });
         self._subs.push(sub);
         // A task worktree's tree is that task's heatmap.
@@ -722,6 +726,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_project))
             .on_action(cx.listener(Self::save_all))
             .on_action(cx.listener(Self::revert))
+            .on_action(cx.listener(Self::reveal_in_finder))
+            .on_action(cx.listener(Self::copy_file_path))
+            .on_action(cx.listener(Self::copy_relative_path))
             .on_action(cx.listener(Self::recent_file))
             .on_action(cx.listener(Self::nav_back))
             .on_action(cx.listener(Self::nav_forward))
@@ -840,7 +847,7 @@ impl Render for Workspace {
                     this.close_viewer(window, cx);
                     return cx.stop_propagation();
                 }
-                if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::AgentMenu { .. } | Overlay::About)) {
+                if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::AgentMenu { .. } | Overlay::FileMenu { .. } | Overlay::About)) {
                     this.close_overlays(window, cx);
                     cx.stop_propagation();
                 }

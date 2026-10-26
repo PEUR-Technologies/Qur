@@ -471,6 +471,7 @@ impl Workspace {
             Overlay::About => Some(centered(self.about_box(look, cx))),
             Overlay::Accent => Some(centered(self.accent_box(look, cx))),
             Overlay::AgentMenu { id, at } => Some(self.agent_menu(id, *at, look, cx)),
+            Overlay::FileMenu { abs, rel, is_dir, ghost, at } => Some(self.file_menu(abs, rel, *is_dir, *ghost, *at, look, cx)),
             Overlay::Layouts => Some(centered(self.layouts_box(look, cx))),
             Overlay::GoTo(g) | Overlay::Rename(g) => Some(centered(
                 div()

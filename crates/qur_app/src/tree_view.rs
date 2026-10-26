@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Animation, AnimationExt, Context, Entity, EventEmitter, Hsla, ScrollStrategy, Subscription, UniformListScrollHandle,
-    Window, div, prelude::*, px, svg, uniform_list,
+    Animation, AnimationExt, Context, Entity, EventEmitter, ExternalDragPayload, FileDragPaths, Hsla, MouseButton, MouseDownEvent, Pixels, Point, ScrollStrategy,
+    Subscription, UniformListScrollHandle, Window, div, prelude::*, px, svg, uniform_list,
 };
 use qur_heat::HeatState;
 use qur_theme::Rgba;
@@ -32,6 +32,9 @@ const USER_GRACE: Duration = Duration::from_secs(5);
 
 pub enum TreeEvent {
     Open(PathBuf),
+    /// Right-click on a row: its absolute path, its path in the tree, whether
+    /// it is a folder or a deleted file's row, and where the pointer was.
+    Menu { abs: PathBuf, rel: PathBuf, is_dir: bool, ghost: bool, at: Point<Pixels> },
 }
 
 pub struct TreeView {
@@ -217,8 +220,11 @@ impl Render for TreeView {
                             HeatState::Reading => Some(tint(accent, 0.22 * cell.map(|c| c.fade).unwrap_or(0.), &look)),
                             _ => None,
                         };
+                        let mark = crate::script::mark(|| format!("file:{}", rel.display()));
                         let row_el = div()
                             .id(row)
+                            .relative()
+                            .children(mark)
                             .w_full()
                             .h(look.z(22.))
                             .pl(look.z(8. + 12. * n.depth as f32))
@@ -239,7 +245,11 @@ impl Render for TreeView {
                             .when(!is_dir, |d| d.child(div().w(look.z(12.)).flex_none()))
                             .child(div().flex_1().min_w(px(0.)).truncate().child(n.name.clone()))
                             .child(right)
-                            .when(!ghost, |d| d.on_drag(DraggedFile { abs: this.tree.abs_path(id), label: n.name.clone().into() }, |f, _, _, cx| cx.new(|_| f.clone())))
+                            .when(!ghost, |d| {
+                                d.on_drag(DraggedFile { abs: this.tree.abs_path(id), label: n.name.clone().into() }, |f, _, _, cx| cx.new(|_| f.clone()))
+                                    // Out of the window it becomes a macOS file drag (Finder, Mail, other apps).
+                                    .external_drag_payload(move |f: &DraggedFile, _, _| Some(ExternalDragPayload::Files(FileDragPaths::new([(f.abs.clone(), is_dir)]))))
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.last_user = Some(Instant::now());
                                 if this.tree.node(id).is_dir() {
@@ -249,7 +259,17 @@ impl Render for TreeView {
                                     cx.emit(TreeEvent::Open(this.tree.abs_path(id)));
                                 }
                                 cx.notify();
-                            }));
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                                    this.last_user = Some(Instant::now());
+                                    let n = this.tree.node(id);
+                                    let (rel, is_dir, ghost) = (n.rel.clone(), n.is_dir(), n.ghost);
+                                    cx.emit(TreeEvent::Menu { abs: this.tree.abs_path(id), rel, is_dir, ghost, at: ev.position });
+                                    cx.stop_propagation();
+                                }),
+                            );
                         if state == HeatState::Editing && cfg!(not(test)) {
                             let abs = this.tree.abs_path(id);
                             let mut w = GLOW_WRITES.lock().unwrap();

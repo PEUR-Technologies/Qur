@@ -14,6 +14,7 @@ impl Workspace {
             Some(Overlay::Setup(v)) => format!("settings:{}", v.read(cx).section_name()),
             Some(Overlay::Accent) => "accent".into(),
             Some(Overlay::AgentMenu { id, .. }) => format!("agent_menu:{id}"),
+            Some(Overlay::FileMenu { rel, .. }) => format!("file_menu:{}", rel.display()),
             Some(Overlay::Layouts) => "layouts".into(),
             Some(Overlay::About) => "about".into(),
             Some(Overlay::Transparency { .. }) => "transparency".into(),
