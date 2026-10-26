@@ -882,3 +882,102 @@ fn shrink_forgets_after_a_move_or_an_edit() {
     run(&mut e, Command::ShrinkSelection);
     assert_eq!(show(&e), "x|");
 }
+
+// --- Change markers (diff.rs) and hunk revert ---------------------------------
+
+fn hunks_of(old: &str, new: &str) -> Vec<diff::LineHunk> {
+    let (ol, nl) = (diff::line_ranges(old), diff::line_ranges(new));
+    diff::diff_lines(&diff::text_hashes(old, &ol), &diff::text_hashes(new, &nl))
+}
+
+fn hk(old: Range<usize>, new: Range<usize>) -> diff::LineHunk {
+    diff::LineHunk { old, new }
+}
+
+#[test]
+fn line_diff_hunks() {
+    use diff::HunkKind::*;
+    assert_eq!(hunks_of("a\nb\nc\n", "a\nb\nc\n"), vec![]);
+    // Changed, added, removed lines, each its own hunk.
+    let hs = hunks_of("a\nb\nc\nd\ne\nf\n", "a\nB\nc\nd\nnew\ne\n");
+    assert_eq!(hs, vec![hk(1..2, 1..2), hk(4..4, 4..5), hk(5..6, 6..6)]);
+    assert_eq!(hs.iter().map(|h| h.kind()).collect::<Vec<_>>(), vec![Modified, Added, Removed]);
+    // A new file is one added hunk; an emptied one, one removed hunk.
+    assert_eq!(hunks_of("", "x\ny\n"), vec![hk(0..0, 0..2)]);
+    assert_eq!(hunks_of("x\ny\n", ""), vec![hk(0..2, 0..0)]);
+    // Lines compare with their newline: a dropped final newline shows.
+    assert_eq!(hunks_of("a\nb\n", "a\nb"), vec![hk(1..2, 1..2)]);
+    // Insert at the top, delete at the end.
+    assert_eq!(hunks_of("b\nc\n", "a\nb\n"), vec![hk(0..0, 0..1), hk(1..2, 2..2)]);
+    // Rope hashes match text hashes, across chunk boundaries too.
+    let big: String = (0..3000).map(|i| format!("line {i} {}\n", "x".repeat(i % 50))).collect();
+    let rope = Rope::from_str(&big);
+    assert_eq!(diff::rope_hashes(&rope), diff::text_hashes(&big, &diff::line_ranges(&big)));
+    assert_eq!(diff::real_lines(&Rope::from_str("a\nb")), 2);
+    assert_eq!(diff::real_lines(&Rope::from_str("a\nb\n")), 2);
+    assert_eq!(diff::real_lines(&Rope::from_str("")), 0);
+}
+
+#[test]
+fn line_diff_falls_back_to_one_hunk() {
+    // More edits than MAX_D: the changed middle becomes one hunk.
+    let n = diff::MAX_D + 10;
+    let old: String = (0..n).map(|i| format!("o{i}\n")).collect();
+    let new: String = (0..n).map(|i| format!("n{i}\n")).collect();
+    let (old, new) = (format!("top\n{old}bottom\n"), format!("top\n{new}bottom\n"));
+    assert_eq!(hunks_of(&old, &new), vec![hk(1..1 + n, 1..1 + n)]);
+}
+
+/// Reverting every hunk (last first, so earlier line numbers hold) gives
+/// back the base text exactly, and each revert is one undo step.
+#[test]
+fn revert_hunks_restores_base() {
+    let cases = [
+        ("a\nb\nc\nd\ne\nf\n", "a\nB\nc\nd\nnew\ne\n"),
+        ("", "x\ny\n"),
+        ("x\ny\n", ""),
+        ("a\nb\n", "a\nb"),
+        ("a\nb", "a\nb\nc\n"),
+        ("fn main() {\n    one();\n    two();\n}\n", "// header\nfn main() {\n    two();\n    three();\n}\n"),
+    ];
+    for (base, cur) in cases {
+        let mut e = Editor::from_text(cur);
+        let lines = diff::line_ranges(base);
+        let hs = hunks_of(base, cur);
+        assert!(!hs.is_empty(), "{base:?} -> {cur:?}");
+        for h in hs.iter().rev() {
+            let text = if h.old.is_empty() { "" } else { &base[lines[h.old.start].start..lines[h.old.end - 1].end] };
+            assert!(e.replace_lines(h.new.clone(), text).text_changed);
+        }
+        assert_eq!(e.rope().to_string(), base, "{cur:?}");
+        assert!(hunks_of(base, &e.rope().to_string()).is_empty());
+        // Undo every revert: back to the agent's text.
+        for _ in &hs {
+            run(&mut e, Command::Undo);
+        }
+        assert_eq!(e.rope().to_string(), cur);
+    }
+    // One hunk of several: only that one goes back; the caret lands on it.
+    let mut e = Editor::from_text("a\nB\nc\nd\nnew\ne\n");
+    e.replace_lines(4..5, "");
+    assert_eq!(e.rope().to_string(), "a\nB\nc\nd\ne\n");
+    assert_eq!(e.primary().head, Point { line: 4, col: 0 });
+}
+
+/// Timing: `cargo test --release -p qur_editor -- --ignored --nocapture diff_timing`.
+#[test]
+#[ignore]
+fn diff_timing() {
+    let old: String = (0..10_000).map(|i| format!("    let value_{i} = compute({i}, \"some text\");\n")).collect();
+    let new: String = old
+        .lines()
+        .enumerate()
+        .filter(|(i, _)| i % 333 != 0)
+        .map(|(i, l)| if i % 50 == 0 { format!("{l} // changed\n") } else { format!("{l}\n") })
+        .collect();
+    let (ol, rope) = (diff::line_ranges(&old), Rope::from_str(&new));
+    let base = diff::text_hashes(&old, &ol);
+    let t = Instant::now();
+    let hs = diff::diff_lines(&base, &diff::rope_hashes(&rope));
+    println!("10k lines, {} hunks: {:.2} ms", hs.len(), t.elapsed().as_secs_f64() * 1000.0);
+}

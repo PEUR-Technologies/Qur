@@ -202,7 +202,37 @@ check_first_run() {  # QUR_DEBUG_SETUP=1: the first-run welcome; Done (or Skip f
   ok "Done closed it" state_has 'overlay=none'
 }
 
-ALL=(vim find_terminal rename rename_click dock cmd_click git_commit git_stage panels gaps gaps_terminal sidebar settings first_run)
+check_diff_review() {  # an agent's changes in the code modal: markers, Next/Previous Change, peek, Revert, Accept, undo.
+  setup diff_review
+  printf 'one\ntwo\nthree\nfour\nfive\n' > "$REPO/a.txt"; git_ commit -qam five
+  # The second Agent Terminal gets a worktree; its shell plays the agent.
+  drive "wait:1500,qur::NewAgentTerminal,wait:1000,qur::NewAgentTerminal,wait:2000,type:sed -i '' -e s/one/ONE/ -e /three/d a.txt; echo added >> a.txt\n,wait:1000,qur::QuickOpen,wait:400,type:a.txt,wait:300,key:enter,wait:1000,state,key:alt-f5,key:alt-f5,key:shift-alt-f5,key:alt-f3,wait:100,qur::RevertChange,wait:600,state,qur::AcceptChange,wait:100,state,key:cmd-z,wait:600,state,qur::Quit"
+  local wt; wt=$(git_ worktree list --porcelain | sed -n 's/^worktree //p' | grep -v "^$REPO$" | head -1)
+  ok "markers vs the task's base" grep -qF 'changes=[Modified@1 Removed@3 Added@5] peek=0 vs "the task'"'"'s base"' "$LOG"
+  ok "Opt+F5 went to the removal" grep -qF 'CHANGE next line=3 ' "$LOG"
+  ok "then to the addition" grep -qF 'CHANGE next line=5 ' "$LOG"
+  ok "Shift+Opt+F5 went back" grep -qF 'CHANGE prev line=3 ' "$LOG"
+  ok "Opt+F3 opened the peek on it" grep -qF 'CHANGE peek line=3 [Modified@1 Removed@3 Added@5] peek=2' "$LOG"
+  ok "Revert put the removed line back; the peek moved on" grep -qF 'changes=[Modified@1 Added@6] peek=2' "$LOG"
+  ok "in the buffer only" grep -qF 'dirty=true changes=[Modified@1 Added@6] peek=2 vs "the task'"'"'s base" text="ONE\ntwo\nthree\nfour\nfive\nadded\n"' "$LOG"
+  ok "Accept hid the addition" grep -qF 'changes=[Modified@1] peek=0' "$LOG"
+  ok "Cmd+Z undid the revert (the accepted change stays hidden)" state_has 'changes=[Modified@1 Removed@3] peek=0'
+  ok "the worktree's file is the agent's" cmp -s "$wt/a.txt" <(printf 'ONE\ntwo\nfour\nfive\nadded\n')
+  ok "its index untouched" git -C "$wt" diff --cached --quiet
+}
+
+check_diff_head() {  # your own file shows its changes vs HEAD; Revert Change in the main checkout.
+  setup diff_head
+  printf 'one\nTWO\nthree\nmore\n' > "$REPO/a.txt"
+  drive "wait:1500,state,key:alt-f3,wait:100,state,key:escape,wait:100,state,qur::RevertChange,wait:600,state,qur::Quit" "$REPO/a.txt"
+  ok "markers vs HEAD" grep -qF 'changes=[Modified@2 Added@4] peek=0 vs "HEAD"' "$LOG"
+  ok "Opt+F3 went to the next change and opened its peek" grep -qF 'code=a.txt@2:1 vim=- dirty=false changes=[Modified@2 Added@4] peek=1' "$LOG"
+  ok "Esc closed the peek, not the modal" grep -qF 'code=a.txt@2:1 vim=- dirty=false changes=[Modified@2 Added@4] peek=0' "$LOG"
+  ok "Revert at the cursor's change only" state_has 'changes=[Added@4] peek=0 vs "HEAD" text="one\ntwo\nthree\nmore\n"'
+  ok "nothing staged" git_ diff --cached --quiet
+}
+
+ALL=(vim find_terminal rename rename_click dock cmd_click git_commit git_stage panels gaps gaps_terminal sidebar settings first_run diff_review diff_head)
 [ "${1:-}" = "-l" ] && { printf '%s\n' "${ALL[@]}"; exit 0; }
 for c in "${@:-${ALL[@]}}"; do
   echo "$c"

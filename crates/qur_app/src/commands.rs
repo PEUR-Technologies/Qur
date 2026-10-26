@@ -30,6 +30,7 @@ pub mod qur {
             ShowLastTurn, RewindLastTurn, ReviewWork, ReviewPlan, SendReviewFindings,
             PlanMode, CommentOnPlan, ApprovePlan, SendPlanComments,
             PushPullRequest, OpenPullRequest,
+            NextChange, PrevChange, ShowChange, RevertChange, AcceptChange, ChangesLastTurn,
         ]
     );
 
@@ -219,6 +220,13 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::NavForward, "Go", "Forward", "ctrl-shift--", NT, R),
     cmd!(qur::GoToSymbol, "Go", "Go to Symbol in File…", "cmd-shift-o", W, R),
     cmd!(editor::JumpToBracket, "Go", "Jump to Matching Bracket", "cmd-shift-\\", E, R),
+    // Inline diff review in the code modal (VS Code's Alt+F5 / Alt+F3)
+    cmd!(qur::NextChange, "Go", "Next Change", "alt-f5", E, R),
+    cmd!(qur::PrevChange, "Go", "Previous Change", "shift-alt-f5", E, R),
+    cmd!(qur::ShowChange, "Changes", "Show Change", "alt-f3", E, R),
+    cmd!(qur::RevertChange, "Changes", "Revert Change", "", W, R),
+    cmd!(qur::AcceptChange, "Changes", "Accept Change", "", W, R),
+    cmd!(qur::ChangesLastTurn, "Changes", "Last Turn Only", "", W, R),
     // Editing
     cmd!(edit::Undo, "Edit", "Undo", "cmd-z", W, R),
     cmd!(edit::Redo, "Edit", "Redo", "cmd-shift-z", W, R),
@@ -616,6 +624,8 @@ pub struct MenuState {
     pub recent: Vec<PathBuf>,
     /// A merge stopped on conflicts: the Merge Conflicts items are enabled.
     pub merging: bool,
+    /// Change markers show a task's last turn only (Changes > Last Turn Only).
+    pub diff_last_turn: bool,
     /// The selected agent has a turn to show or rewind (ACP agents only).
     pub turns: bool,
     /// An agent has a permission request waiting (Allow All Pending).
@@ -713,6 +723,16 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(editor::Outdent),
             item(editor::TrimWhitespace),
             sep(),
+            M::submenu(Menu::new("Changes").items([
+                item(qur::NextChange),
+                item(qur::PrevChange),
+                item(qur::ShowChange),
+                item(qur::RevertChange),
+                item(qur::AcceptChange),
+                sep(),
+                item(qur::ChangesLastTurn).checked(s.diff_last_turn),
+            ])),
+            sep(),
             item(qur::VimMode).checked(s.vim),
         ]),
         Menu::new("Selection").items([
@@ -790,6 +810,9 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::NavForward),
             item(qur::RecentFile),
             item(editor::JumpToBracket),
+            sep(),
+            item(qur::NextChange),
+            item(qur::PrevChange),
         ]),
         Menu::new("Agent").items([
             item(qur::NewAgentTask),

@@ -8,6 +8,7 @@ mod actions;
 mod checks;
 mod code;
 mod debug;
+mod diff_review;
 mod merge;
 mod overlays;
 mod pickers;
@@ -225,6 +226,9 @@ pub struct Workspace {
     /// The code modal (decision 18).
     code: Option<Entity<EditorView>>,
     code_prev_focus: Option<FocusHandle>,
+    /// Change markers in a task's files show only its last turn (Changes >
+    /// Last Turn Only), not everything since the task started.
+    diff_last_turn: bool,
     /// The file viewer: an image, or a file that isn't text.
     viewer: Option<viewer::Viewer>,
     sidebar: bool,
@@ -372,6 +376,7 @@ impl Workspace {
             buffers: Buffers { list: Vec::new() },
             code: None,
             code_prev_focus: None,
+            diff_last_turn: false,
             viewer: None,
             sidebar,
             sidebar_w: SIDEBAR_DEFAULT_W,
@@ -469,6 +474,7 @@ impl Workspace {
             soft_wrap: self.code.as_ref().map(|e| e.read(cx).soft_wrap()).unwrap_or(self.config.editor.soft_wrap),
             recent: qur_config::State::load().recent_projects,
             merging: self.merge.is_some(),
+            diff_last_turn: self.diff_last_turn,
             turns: self.selected_last_turn(cx).is_some(),
             pending: self.agents.iter().any(|a| a.read(cx).has_permission()),
             review: self.review_state(cx),
@@ -827,6 +833,12 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::accept_both))
             .on_action(cx.listener(Self::next_conflict))
             .on_action(cx.listener(Self::prev_conflict))
+            .on_action(cx.listener(Self::next_change))
+            .on_action(cx.listener(Self::prev_change))
+            .on_action(cx.listener(Self::show_change))
+            .on_action(cx.listener(Self::revert_change))
+            .on_action(cx.listener(Self::accept_change))
+            .on_action(cx.listener(Self::changes_last_turn))
             .on_action(cx.listener(Self::finish_merge_action))
             .on_action(cx.listener(Self::abort_merge_action))
             .on_action(cx.listener(Self::review_changes))

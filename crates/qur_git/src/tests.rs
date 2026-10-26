@@ -713,6 +713,29 @@ fn file_diff_staged_unstaged_untracked() {
     assert!(status(&r.dir).unwrap().untracked.contains(&PathBuf::from("new ü.txt")));
 }
 
+#[test]
+fn file_at_commit_and_tree() {
+    let r = Repo::new("fa");
+    // No commits yet: nothing to compare with.
+    r.write("a.txt", "one\n");
+    assert_eq!(file_at(&r.dir, "HEAD", Path::new("a.txt")).unwrap(), None);
+    r.write("sub dir/ü b.txt", "x\r\ny");
+    r.write("bin.dat", b"a\0b".as_slice());
+    let base = r.commit("base");
+    r.write("a.txt", "two\n");
+    let a = r.dir.join("a.txt");
+    assert_eq!(file_at(&r.dir, &base, &a).unwrap().as_deref(), Some("one\n"));
+    assert_eq!(file_at(&r.dir, "HEAD", Path::new("sub dir/ü b.txt")).unwrap().as_deref(), Some("x\r\ny"));
+    assert_eq!(file_at(&r.dir, "HEAD", Path::new("new.txt")).unwrap(), None);
+    assert!(file_at(&r.dir, "HEAD", Path::new("bin.dat")).is_err());
+    // A directory isn't a file; a turn snapshot is a tree id, which works too.
+    assert_eq!(file_at(&r.dir, "HEAD", Path::new("sub dir")).unwrap(), None);
+    let tree = snapshot_tree(&r.dir).unwrap();
+    assert_eq!(file_at(&r.dir, &tree, &a).unwrap().as_deref(), Some("two\n"));
+    assert!(file_at(&r.dir, "--output=x", &a).is_err());
+    assert!(file_at(&r.dir, "HEAD", Path::new("../outside")).is_err());
+}
+
 /// Timing on the 5,000-file fixture (`python3 spikes/fixtures/gen.py`):
 /// `cargo test --release -p qur_git -- --ignored --nocapture big_repo`.
 #[test]
