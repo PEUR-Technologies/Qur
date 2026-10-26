@@ -10,6 +10,8 @@ mod code;
 mod crash_notice;
 mod debug;
 mod diff_review;
+mod file_ops;
+mod file_menu;
 mod merge;
 mod overlays;
 mod pickers;
@@ -50,7 +52,7 @@ use crate::monitor::{MonitorEvent, TaskMonitor};
 use crate::assets::{self, icon};
 use crate::browser_view::{Attachment, BrowserPane, BrowserPaneEvent};
 use crate::commands::{self, MenuState, agent as aa, edit, editor as ea, qur, terminal as ta};
-use crate::editor_view::{Buffers, EditorEvent, EditorView};
+use crate::editor_view::{Buffers, EditorEvent, EditorView, Spot};
 use crate::input::{InputEvent, TextInput};
 use crate::look::Look;
 use crate::picker::{PickItem, Picker, PickerEvent};
@@ -165,6 +167,8 @@ enum PickKind {
     /// Go to Symbol in the code modal: each symbol's name (bytes), and the
     /// selections to put back on Esc (highlighting previews a symbol).
     Symbols { targets: Vec<std::ops::Range<usize>>, restore: (Vec<qur_editor::Selection>, usize) },
+    /// Reopen with / Convert to Encoding… (`encoding::CHOICES`).
+    Encoding(file_ops::EncodingAction),
 }
 
 enum Overlay {
@@ -178,6 +182,8 @@ enum Overlay {
     Accent,
     /// Right-click on an agent's button: its commands, at the pointer.
     AgentMenu { id: String, at: gpui::Point<Pixels> },
+    /// Right-click on a Files tree row: its commands, at the pointer.
+    FileMenu { abs: PathBuf, rel: PathBuf, is_dir: bool, ghost: bool, at: gpui::Point<Pixels> },
     /// View > Choose Stage Layout….
     Layouts,
     /// About Qur (M7).
@@ -227,6 +233,8 @@ pub struct Workspace {
     /// One file tree per root (main checkout and each worktree).
     trees: HashMap<PathBuf, Entity<TreeView>>,
     buffers: Buffers,
+    /// Hands freed buffers' memory back to the system, shortly after.
+    buffers_relief: Option<Task<()>>,
     /// The code modal (decision 18).
     code: Option<Entity<EditorView>>,
     code_prev_focus: Option<FocusHandle>,
@@ -344,6 +352,7 @@ impl Workspace {
                         t.update(cx, |t, cx| t.refresh(cx));
                     }
                     this.file_lists.clear();
+                    this.check_outside_files(cx);
                 }
             }),
         ];
@@ -380,7 +389,8 @@ impl Workspace {
             alerted: HashMap::new(),
             runs: HashMap::new(),
             trees: HashMap::new(),
-            buffers: Buffers { list: Vec::new() },
+            buffers: Buffers::default(),
+            buffers_relief: None,
             code: None,
             code_prev_focus: None,
             diff_last_turn: false,
@@ -480,6 +490,7 @@ impl Workspace {
             sidebar_auto: self.config.ui.sidebar == "auto",
             sidebar_right: self.sidebar_right(),
             soft_wrap: self.code.as_ref().map(|e| e.read(cx).soft_wrap()).unwrap_or(self.config.editor.soft_wrap),
+            show_whitespace: self.config.editor.show_whitespace,
             recent: qur_config::State::load().recent_projects,
             merging: self.merge.is_some(),
             diff_last_turn: self.diff_last_turn,
@@ -508,6 +519,7 @@ impl Workspace {
         let t = cx.new(|_| TreeView::new(root));
         let sub = cx.subscribe_in(&t, window, |this, _, ev: &TreeEvent, window, cx| match ev {
             TreeEvent::Open(p) => this.open_path(p, window, cx),
+            TreeEvent::Menu { abs, rel, is_dir, ghost, at } => this.open_file_menu(abs.clone(), rel.clone(), *is_dir, *ghost, *at, window, cx),
         });
         self._subs.push(sub);
         // A task worktree's tree is that task's heatmap.
@@ -757,6 +769,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_project))
             .on_action(cx.listener(Self::save_all))
             .on_action(cx.listener(Self::revert))
+            .on_action(cx.listener(Self::reveal_in_finder))
+            .on_action(cx.listener(Self::copy_file_path))
+            .on_action(cx.listener(Self::copy_relative_path))
             .on_action(cx.listener(Self::recent_file))
             .on_action(cx.listener(Self::nav_back))
             .on_action(cx.listener(Self::nav_forward))
@@ -873,6 +888,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_inspect))
             .on_action(cx.listener(Self::follow_agent))
             .on_action(cx.listener(Self::take_over))
+            .map(|d| Self::file_actions(d, cx))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::Transparency { .. } | Overlay::Gaps)) {
                     this.save_popover_transparency(cx);
@@ -884,10 +900,12 @@ impl Render for Workspace {
             .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                 // The file viewer sits over everything: Esc is its own.
                 if ev.keystroke.key == "escape" && this.viewer.is_some() {
-                    this.close_viewer(window, cx);
+                    if !this.viewer_escape(window, cx) {
+                        this.close_viewer(window, cx);
+                    }
                     return cx.stop_propagation();
                 }
-                if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::AgentMenu { .. } | Overlay::About)) {
+                if ev.keystroke.key == "escape" && matches!(this.overlay, Some(Overlay::AgentMenu { .. } | Overlay::FileMenu { .. } | Overlay::About)) {
                     this.close_overlays(window, cx);
                     cx.stop_propagation();
                 }

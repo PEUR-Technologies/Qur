@@ -150,6 +150,8 @@ impl EditorView {
 
     pub fn new(loaded: Loaded, soft_wrap: bool, tab_width: usize, cx: &mut Context<Self>) -> Self {
         let Loaded { model, language, syntax } = loaded;
+        // Bytes that didn't decode (or a binary's stray CRs) can't be saved back.
+        let read_only = model.is_lossy();
         let bench = Bench {
             autoscroll: std::env::var("QUR_BENCH").as_deref() == Ok("scroll"),
             autotype: std::env::var("QUR_BENCH").as_deref() == Ok("type"),
@@ -175,7 +177,7 @@ impl EditorView {
             find: None,
             dragging: false,
             last_user_input: None,
-            read_only: false,
+            read_only,
             vim: None,
             agent_mark: None,
             disk_changed: false,
@@ -251,10 +253,9 @@ impl EditorView {
             cx.notify();
             return None;
         }
-        let path = self.path()?.to_path_buf();
-        let new = std::fs::read_to_string(&path).ok()?;
+        let new = self.model.read_disk_text().ok()?;
         let old = self.model.rope().to_string();
-        if new.replace("\r\n", "\n") == old {
+        if new == old {
             return None;
         }
         let range = changed_lines(&old, &new);
@@ -347,7 +348,7 @@ impl EditorView {
     pub fn reload_from_disk(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.path().map(Path::to_path_buf) else { return };
         let indent = self.language.map(|l| l.indent_unit()).unwrap_or("    ");
-        match Editor::open(&path, indent) {
+        match Editor::open_with(&path, indent, self.model.forced_encoding()) {
             Ok(m) => {
                 let cursor = self.cursor();
                 self.model = m;
@@ -525,6 +526,23 @@ impl EditorView {
     pub fn goto_line(&mut self, line: usize, cx: &mut Context<Self>) {
         self.run(Command::GoToLine(line), cx);
         self.center_cursor();
+        cx.notify();
+    }
+
+    /// Where the view was left: reopening a freed buffer lands here (`restore`).
+    pub fn spot(&self) -> Spot {
+        let row = if self.line_h > px(0.) { (self.scroll_y / self.line_h).floor() as usize } else { 0 };
+        Spot { at: self.cursor(), top: self.model.wrap().row_to_point(self.model.rope(), row, 0).line }
+    }
+
+    /// Put the cursor and the scroll back where `spot` left them. (A new view
+    /// isn't laid out yet; its first prepaint keeps the top line in place.)
+    pub fn restore(&mut self, spot: Spot, cx: &mut Context<Self>) {
+        let p = self.model.clamp(spot.at);
+        self.model.set_selections(vec![Selection::caret(p)], 0);
+        let top = self.model.clamp(Point { line: spot.top, col: 0 });
+        let (row, _) = self.model.wrap().point_to_row(self.model.rope(), top);
+        self.scroll_y = self.line_h * row as f32;
         cx.notify();
     }
 
@@ -1328,6 +1346,8 @@ impl Element for EditorElement {
         let primary_line = v.model.primary().head.line;
         let primary_head = v.model.primary().head;
         let tab_w = v.tab_width.max(1);
+        // View > Show Whitespace: spaces as ·, tabs as →, line ends as ¬.
+        let (ws, ws_color) = (look.show_whitespace, look.c(theme.editor.whitespace));
 
         let mut out = Vec::with_capacity(rows.len());
         let mut span_ix = 0;
@@ -1394,12 +1414,14 @@ impl Element for EditorElement {
                     .unwrap_or_default();
                 let (piece, w): (std::borrow::Cow<str>, usize) = if c == '\t' {
                     let n = tab_w - (vcol % tab_w);
-                    (" ".repeat(n).into(), n)
+                    (if ws { format!("→{}", " ".repeat(n - 1)).into() } else { " ".repeat(n).into() }, n)
+                } else if let Some(sym) = control_picture(c, ws) {
+                    (sym.into(), 1)
                 } else {
                     let mut b = [0u8; 4];
                     (c.encode_utf8(&mut b).to_string().into(), char_width(c))
                 };
-                let color = style.color.map(|c| look.c(c)).unwrap_or(default_color);
+                let color = if ws && (c == ' ' || c == '\t') { ws_color } else { style.color.map(|c| look.c(c)).unwrap_or(default_color) };
                 let weight = if style.bold { gpui::FontWeight::BOLD } else { gpui::FontWeight::NORMAL };
                 let fstyle = if style.italic { gpui::FontStyle::Italic } else { gpui::FontStyle::Normal };
                 match runs.last_mut() {
@@ -1424,6 +1446,10 @@ impl Element for EditorElement {
             }
             vcols.push(vcol);
             max_vcol = max_vcol.max(vcol);
+            if ws && line_end && has_nl {
+                text.push('¬');
+                runs.push(TextRun { len: '¬'.len_utf8(), font: code_font.clone(), color: ws_color, background_color: None, underline: None, strikethrough: None });
+            }
             let shaped = ts.shape_line(SharedString::from(text), fs, &runs, None);
             let gutter = r.first.then(|| {
                 let num = SharedString::from(format!("{:>w$}", r.line + 1, w = digits));
@@ -1587,6 +1613,21 @@ fn changed_lines(old: &str, new: &str) -> Range<usize> {
     let bottom = a.iter().rev().zip(b.iter().rev()).take_while(|(x, y)| x == y).count();
     let end = b.len().saturating_sub(bottom).max(top + 1).min(b.len().max(1));
     top.min(end.saturating_sub(1))..end
+}
+
+/// What a char is drawn as when it isn't itself: a space as · (Show
+/// Whitespace), control characters (a binary opened as text) as their
+/// Control Pictures symbol, one cell wide.
+fn control_picture(c: char, ws: bool) -> Option<&'static str> {
+    const C0: [&str; 32] = [
+        "␀", "␁", "␂", "␃", "␄", "␅", "␆", "␇", "␈", "␉", "␊", "␋", "␌", "␍", "␎", "␏", "␐", "␑", "␒", "␓", "␔", "␕", "␖", "␗", "␘", "␙", "␚", "␛", "␜", "␝", "␞", "␟",
+    ];
+    match c {
+        ' ' if ws => Some("·"),
+        '\0'..='\x1F' => Some(C0[c as usize]),
+        '\x7F' => Some("␡"),
+        _ => None,
+    }
 }
 
 /// Display width in cells (CJK and emoji are 2 wide).
@@ -1854,34 +1895,184 @@ impl Render for EditorView {
     }
 }
 
-/// Opened files kept in memory (no tabs: the editor area shows one; Quick
-/// Open and Ctrl+Tab switch). Most recent first.
-pub struct Buffers {
-    pub list: Vec<Entity<EditorView>>,
+/// Where a file was left: the cursor and the line at the top of the view.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Spot {
+    pub at: Point,
+    pub top: usize,
+}
+
+/// The code modal's open files (no tabs: it shows one; Go to File and
+/// Recent File switch), most recent first. A file's buffer stays loaded only
+/// while it's showing or has unsaved edits; otherwise only its path and
+/// `Spot` are kept, and opening it loads it again. A buffer is mostly its
+/// syntax tree: 10k lines of TypeScript take ~12 MB of tree and under 1 MB
+/// of text, and reload and reparse in about 40 ms.
+pub struct OpenFiles<B> {
+    entries: Vec<OpenEntry<B>>,
+}
+
+struct OpenEntry<B> {
+    path: PathBuf,
+    spot: Spot,
+    buf: Option<B>,
+}
+
+pub type Buffers = OpenFiles<Entity<EditorView>>;
+
+impl<B> Default for OpenFiles<B> {
+    fn default() -> Self {
+        OpenFiles { entries: Vec::new() }
+    }
+}
+
+impl<B: Clone> OpenFiles<B> {
+    /// The loaded buffer for `path`, if any.
+    pub fn find(&self, path: &Path) -> Option<B> {
+        self.entries.iter().find(|e| e.path == path).and_then(|e| e.buf.clone())
+    }
+
+    /// Where `path` was left, if it's in the list.
+    pub fn spot(&self, path: &Path) -> Option<Spot> {
+        self.entries.iter().find(|e| e.path == path).map(|e| e.spot)
+    }
+
+    /// `path` is showing in `buf`: first in the list, loaded.
+    pub fn touch(&mut self, path: &Path, buf: B) {
+        let spot = self.spot(path).unwrap_or_default();
+        self.entries.retain(|e| e.path != path);
+        self.entries.insert(0, OpenEntry { path: path.to_path_buf(), spot, buf: Some(buf) });
+    }
+
+    /// Add a file without loading it, after the ones already listed (the
+    /// list restored at startup, most recent first). Listed already: no change.
+    pub fn remember(&mut self, path: PathBuf, spot: Spot) {
+        if !self.entries.iter().any(|e| e.path == path) {
+            self.entries.push(OpenEntry { path, spot, buf: None });
+        }
+    }
+
+    /// Drop `path` from the list (it couldn't be opened).
+    pub fn forget(&mut self, path: &Path) {
+        self.entries.retain(|e| e.path != path);
+    }
+
+    /// Every open file, most recent first, loaded or not.
+    pub fn paths(&self) -> Vec<PathBuf> {
+        self.entries.iter().map(|e| e.path.clone()).collect()
+    }
+
+    /// Every open file with where it was left (`spot_of` asks loaded buffers).
+    pub fn spots(&self, spot_of: impl Fn(&B) -> Spot) -> Vec<(PathBuf, Spot)> {
+        self.entries.iter().map(|e| (e.path.clone(), e.buf.as_ref().map_or(e.spot, &spot_of))).collect()
+    }
+
+    pub fn loaded(&self) -> impl Iterator<Item = &B> {
+        self.entries.iter().filter_map(|e| e.buf.as_ref())
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Unload the buffers `free` gives a `Spot` for (reopening lands there),
+    /// then forget unloaded files past `qur_config::MAX_OPEN_FILES`. Returns
+    /// how many were unloaded.
+    pub fn free(&mut self, mut free: impl FnMut(&B) -> Option<Spot>) -> usize {
+        let mut freed = 0;
+        for e in &mut self.entries {
+            if let Some(spot) = e.buf.as_ref().and_then(&mut free) {
+                e.spot = spot;
+                e.buf = None;
+                freed += 1;
+            }
+        }
+        let mut n = 0;
+        self.entries.retain(|e| {
+            n += 1;
+            n <= qur_config::MAX_OPEN_FILES || e.buf.is_some()
+        });
+        freed
+    }
+}
+
+/// Give the system back the pages that freed buffers leave empty. macOS's
+/// malloc keeps them (still counted in the footprint) until memory runs
+/// short, and a syntax tree is ~100k small allocations: without this, a
+/// closed 10k-line file stays ~12 MB in the footprint after it's freed.
+pub fn return_free_pages() {
+    unsafe extern "C" {
+        fn malloc_zone_pressure_relief(zone: *mut libc::c_void, goal: usize) -> usize;
+    }
+    // No zone: all of them; goal 0: as much as possible.
+    unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
 }
 
 impl Buffers {
-    pub fn find(&self, path: &Path, cx: &App) -> Option<Entity<EditorView>> {
-        self.list.iter().find(|b| b.read(cx).path() == Some(path)).cloned()
-    }
-
-    pub fn touch(&mut self, b: &Entity<EditorView>) {
-        self.list.retain(|x| x != b);
-        self.list.insert(0, b.clone());
-    }
-
-    pub fn paths(&self, cx: &App) -> Vec<PathBuf> {
-        self.list.iter().filter_map(|b| b.read(cx).path().map(Path::to_path_buf)).collect()
-    }
-
     pub fn dirty(&self, cx: &App) -> Vec<Entity<EditorView>> {
-        self.list.iter().filter(|b| b.read(cx).is_dirty()).cloned().collect()
+        self.loaded().filter(|b| b.read(cx).is_dirty()).cloned().collect()
+    }
+
+    /// The loaded buffers, cloned (to update them while borrowing their owner).
+    pub fn loaded_vec(&self) -> Vec<Entity<EditorView>> {
+        self.loaded().cloned().collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::changed_lines;
+    use super::{OpenFiles, Point, Spot, changed_lines};
+    use std::path::{Path, PathBuf};
+
+    fn spot(line: usize) -> Spot {
+        Spot { at: Point { line, col: 0 }, top: line.saturating_sub(5) }
+    }
+
+    #[test]
+    fn open_files_free_clean_hidden_buffers() {
+        // Buffers are ids here; odd ids have unsaved edits.
+        let mut f: OpenFiles<u32> = OpenFiles::default();
+        f.remember("/p/c".into(), spot(30));
+        f.touch(Path::new("/p/a"), 1);
+        f.touch(Path::new("/p/b"), 2);
+        f.touch(Path::new("/p/d"), 4);
+        assert_eq!(f.paths(), ["/p/d", "/p/b", "/p/a", "/p/c"].map(PathBuf::from));
+        assert_eq!(f.loaded().count(), 3);
+        // 4 is showing and 1 is dirty: only 2 is freed, keeping where it was left.
+        assert_eq!(f.free(|&b| (b != 4 && b % 2 == 0).then(|| spot(b as usize * 10))), 1);
+        assert_eq!(f.loaded().copied().collect::<Vec<_>>(), [4, 1]);
+        assert_eq!(f.find(Path::new("/p/b")), None);
+        assert_eq!(f.spot(Path::new("/p/b")), Some(spot(20)));
+        assert_eq!(f.spot(Path::new("/p/c")), Some(spot(30)));
+        // Reopening keeps the spot and moves the file first.
+        f.touch(Path::new("/p/b"), 6);
+        assert_eq!(f.find(Path::new("/p/b")), Some(6));
+        assert_eq!(f.spot(Path::new("/p/b")), Some(spot(20)));
+        assert_eq!(f.paths(), ["/p/b", "/p/d", "/p/a", "/p/c"].map(PathBuf::from));
+        // Loaded buffers report their own spot, the others the saved one.
+        let spots = f.spots(|&b| spot(b as usize));
+        assert_eq!(spots[0], (PathBuf::from("/p/b"), spot(6)));
+        assert_eq!(spots[3], (PathBuf::from("/p/c"), spot(30)));
+        f.forget(Path::new("/p/c"));
+        assert_eq!(f.len(), 3);
+    }
+
+    #[test]
+    fn open_files_cap_never_drops_loaded_buffers() {
+        let n = qur_config::MAX_OPEN_FILES;
+        let mut f: OpenFiles<u32> = OpenFiles::default();
+        // A dirty buffer (1) opened first ends up last.
+        f.touch(Path::new("/p/dirty"), 1);
+        for i in 0..n + 5 {
+            f.touch(&PathBuf::from(format!("/p/{i}")), 0);
+        }
+        f.remember("/p/0".into(), spot(9));
+        assert_eq!(f.len(), n + 6);
+        f.free(|&b| (b == 0).then(Spot::default));
+        assert_eq!(f.len(), n + 1);
+        assert_eq!(f.paths().last(), Some(&PathBuf::from("/p/dirty")));
+        assert_eq!(f.loaded().copied().collect::<Vec<_>>(), [1]);
+    }
 
     #[test]
     fn changed_line_ranges() {

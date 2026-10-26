@@ -31,6 +31,8 @@ pub mod qur {
             PlanMode, CommentOnPlan, ApprovePlan, SendPlanComments,
             PushPullRequest, OpenPullRequest,
             NextChange, PrevChange, ShowChange, RevertChange, AcceptChange, ChangesLastTurn,
+            OpenFile, OpenAsText, ReopenWithEncoding, ConvertToEncoding, ConvertLineEndings, ShowWhitespace,
+            RevealInFinder, CopyPath, CopyRelativePath,
         ]
     );
 
@@ -195,7 +197,8 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::VimMode, "Edit", "Vim Mode", "", W, R),
     cmd!(qur::NewWindow, "File", "New Window", "cmd-n", W, R),
     cmd!(qur::NewAgentTask, "Agent", "New Agent Task…", "cmd-shift-n", W, R),
-    cmd!(qur::OpenFolder, "File", "Open Folder…", "cmd-o", W, R),
+    cmd!(qur::OpenFile, "File", "Open File…", "cmd-o", W, R),
+    cmd!(qur::OpenFolder, "File", "Open Folder…", "cmd-k cmd-o", NT, R),
     cmd!(qur::ProjectSwitcher, "File", "Switch Project…", "cmd-alt-o", W, R),
     cmd!(qur::CloseWindow, "File", "Close Window", "cmd-shift-w", W, R),
     cmd!(qur::Minimize, "Window", "Minimize", "cmd-m", W, R),
@@ -214,6 +217,17 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(editor::Save, "File", "Save", "cmd-s", E, R),
     cmd!(qur::SaveAll, "File", "Save All", "cmd-alt-s", W, R),
     cmd!(qur::RevertFile, "File", "Revert File", "", W, R),
+    // Notepad++'s Encoding menu.
+    cmd!(qur::OpenAsText, "File", "Open as Text", "", W, R),
+    cmd!(qur::ReopenWithEncoding, "File", "Reopen with Encoding…", "", W, R),
+    cmd!(qur::ConvertToEncoding, "File", "Convert to Encoding…", "", W, R),
+    cmd!(qur::ConvertLineEndings, "File", "Convert Line Endings (LF ⇄ CRLF)", "", W, R),
+    // The file in the code modal (the Files tree's right-click menu has them too).
+    // VS Code's Opt+Cmd+R and Opt+Cmd+C are Qur's find toggles, so only Copy
+    // Relative Path takes VS Code's key.
+    cmd!(qur::RevealInFinder, "File", "Reveal in Finder", "", W, R),
+    cmd!(qur::CopyPath, "File", "Copy Path", "", W, R),
+    cmd!(qur::CopyRelativePath, "File", "Copy Relative Path", "cmd-alt-shift-c", W, R),
     cmd!(qur::RevealInFiles, "View", "Files Dropdown", "cmd-shift-e", W, R),
     cmd!(qur::GoToLine, "Go", "Go to Line…", "ctrl-g", NT, R),
     cmd!(qur::NavBack, "Go", "Back", "ctrl--", NT, R),
@@ -287,6 +301,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(editor::TrimWhitespace, "Edit", "Trim Trailing Whitespace", "cmd-k cmd-x", E, R),
     cmd!(editor::Escape, "Editor", "Collapse Selection / Close Find", "escape", E, R),
     cmd!(editor::ToggleSoftWrap, "View", "Soft Wrap", "alt-z", W, R),
+    cmd!(qur::ShowWhitespace, "View", "Show Whitespace", "", W, R),
     cmd!(editor::Newline, "Editor", "Newline", "enter|shift-enter", E, R),
     // Find
     cmd!(editor::Find, "Edit", "Find", "cmd-f", W, R),
@@ -621,6 +636,8 @@ pub struct MenuState {
     pub sidebar_auto: bool,
     pub sidebar_right: bool,
     pub soft_wrap: bool,
+    /// `[editor] show_whitespace`.
+    pub show_whitespace: bool,
     pub recent: Vec<PathBuf>,
     /// A merge stopped on conflicts: the Merge Conflicts items are enabled.
     pub merging: bool,
@@ -688,6 +705,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::NewAgentTerminal),
             item(qur::NewWindow),
             sep(),
+            item(qur::OpenFile),
             item(qur::OpenFolder),
             M::submenu(Menu::new("Open Recent").items(recent)),
             item(qur::ProjectSwitcher),
@@ -696,6 +714,18 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(editor::Save),
             item(qur::SaveAll),
             item(qur::RevertFile),
+            sep(),
+            item(qur::OpenAsText),
+            M::submenu(Menu::new("Encoding").items([
+                item(qur::ReopenWithEncoding),
+                item(qur::ConvertToEncoding),
+                sep(),
+                item(qur::ConvertLineEndings),
+            ])),
+            sep(),
+            item(qur::RevealInFinder),
+            item(qur::CopyPath),
+            item(qur::CopyRelativePath),
             sep(),
             item(qur::CloseTerminal),
             item(qur::CloseWindow),
@@ -785,6 +815,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(qur::FollowAgent).checked(s.follow),
             sep(),
             item(editor::ToggleSoftWrap).checked(s.soft_wrap),
+            item(qur::ShowWhitespace).checked(s.show_whitespace),
             item(qur::ZoomIn),
             item(qur::ZoomOut),
             item(qur::ZoomReset),
@@ -938,5 +969,32 @@ mod tests {
         }
         assert_eq!(COMMANDS[resolve("qur::ExpandSelection").unwrap()].keys(), "ctrl-shift-cmd-right");
         assert_eq!(COMMANDS[resolve("qur::ShrinkSelection").unwrap()].keys(), "ctrl-shift-cmd-left");
+    }
+
+    /// Cmd+O opens a file (any path); Open Folder moves to Cmd+K Cmd+O, and
+    /// no other command has either key.
+    #[test]
+    fn open_file_and_folder_keys() {
+        assert_eq!(COMMANDS[resolve("qur::OpenFile").unwrap()].keys(), "cmd-o");
+        assert_eq!(COMMANDS[resolve("qur::OpenFolder").unwrap()].keys(), "cmd-k cmd-o");
+        for keys in ["cmd-o", "cmd-k cmd-o"] {
+            let bound: Vec<&str> = COMMANDS.iter().filter(|c| c.keys().split('|').any(|k| k == keys)).map(|c| c.action_name()).collect();
+            assert_eq!(bound.len(), 1, "{keys}: {bound:?}");
+        }
+        for a in ["qur::OpenAsText", "qur::ReopenWithEncoding", "qur::ConvertToEncoding", "qur::ConvertLineEndings", "qur::ShowWhitespace"] {
+            assert!(COMMANDS[resolve(a).unwrap()].ready());
+        }
+    }
+
+    /// VS Code's keys for the file path commands, where Qur has them free:
+    /// Opt+Cmd+R and Opt+Cmd+C stay the find toggles.
+    #[test]
+    fn file_path_keys() {
+        let bound = |k: &str| -> Vec<&str> { COMMANDS.iter().filter(|c| c.keys().split('|').any(|x| x == k)).map(|c| c.action_name()).collect() };
+        assert_eq!(bound("cmd-alt-shift-c"), ["qur::CopyRelativePath"]);
+        assert_eq!(bound("cmd-alt-r"), ["editor::ToggleRegex"]);
+        assert_eq!(bound("cmd-alt-c"), ["editor::ToggleCase"]);
+        assert_eq!(COMMANDS[resolve("qur::RevealInFinder").unwrap()].keys(), "");
+        assert_eq!(COMMANDS[resolve("qur::CopyPath").unwrap()].keys(), "");
     }
 }

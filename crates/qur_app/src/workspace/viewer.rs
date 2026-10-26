@@ -12,8 +12,10 @@ pub(super) struct Viewer {
     title: String,
     /// The task whose worktree the file is in.
     owner: Option<String>,
-    path: Option<PathBuf>,
+    pub(super) path: Option<PathBuf>,
     shown: Shown,
+    /// Not an image: the hex view, or a large file's paged text (file_ops.rs).
+    pub(super) body: Option<super::file_ops::FileBody>,
     /// "1280 × 800 · 245.1 KB".
     detail: String,
     prev_focus: Option<FocusHandle>,
@@ -35,14 +37,15 @@ enum Shown {
 }
 
 impl Viewer {
-    /// Scripted runs' `state` line: "title (image|loading|file) detail".
-    pub(super) fn debug_state(&self) -> String {
+    /// Scripted runs' `state` line: "title (image|loading|file) detail [body]".
+    pub(super) fn debug_state(&self, cx: &App) -> String {
         let kind = match self.shown {
             Shown::Pixels(_) | Shown::Gpui(_) => "image",
             Shown::Loading => "loading",
             Shown::File => "file",
         };
-        format!("{} ({kind}) {}", self.title, self.detail)
+        let body = self.body.as_ref().map(|b| format!(" [{}]", b.debug_state(cx))).unwrap_or_default();
+        format!("{} ({kind}) {}{body}", self.title, self.detail)
     }
 
     /// Give back the image's memory: its texture, and GPUI's decoded copy.
@@ -68,7 +71,7 @@ impl Workspace {
             Preview::File(path) => self.open_path(&path, window, cx),
             Preview::Image { label, image } => {
                 let detail = detail(files::image_size(image.bytes()), image.bytes().len() as u64);
-                let v = Viewer { title: label.to_string(), owner: None, path: None, shown: Shown::Loading, detail, prev_focus: None, _load: None };
+                let v = Viewer { title: label.to_string(), owner: None, path: None, shown: Shown::Loading, body: None, detail, prev_focus: None, _load: None };
                 self.show_viewer(v, window, cx);
                 self.load_viewer(move || Some(image), window, cx);
             }
@@ -84,11 +87,13 @@ impl Workspace {
         };
         let format = files::viewable(path);
         let (title, owner) = self.where_is(path, cx);
+        let body = if format.is_none() { self.file_body(path, len, window, cx) } else { None };
         let (shown, detail) = match format {
             Some(_) => (Shown::Loading, files::human_size(len)),
-            None => (Shown::File, format!("{} · not a text file", files::human_size(len))),
+            None => (Shown::File, Self::body_detail(body.as_ref(), len)),
         };
-        self.show_viewer(Viewer { title, owner, path: Some(path.to_path_buf()), shown, detail, prev_focus: None, _load: None }, window, cx);
+        self.show_viewer(Viewer { title, owner, path: Some(path.to_path_buf()), shown, body, detail, prev_focus: None, _load: None }, window, cx);
+        self.focus_viewer_body(window, cx);
         if let Some(format) = format {
             let path = path.to_path_buf();
             self.load_viewer(move || Some(Arc::new(gpui::Image::from_bytes(format, std::fs::read(&path).ok()?))), window, cx);
@@ -187,6 +192,7 @@ impl Workspace {
             Shown::Pixels(r) => div().size_full().p(look.z(16.)).child(img(r.clone()).size_full().object_fit(gpui::ObjectFit::ScaleDown)).into_any_element(),
             Shown::Gpui(image) => div().size_full().p(look.z(16.)).child(img(image.clone()).size_full().object_fit(gpui::ObjectFit::ScaleDown)).into_any_element(),
             Shown::Loading => div().size_full().flex().items_center().justify_center().text_color(look.c(ui.text_muted)).child("Loading…").into_any_element(),
+            Shown::File if v.body.is_some() => v.body.as_ref().map(|b| b.element()).unwrap_or_else(|| div().into_any_element()),
             Shown::File => div()
                 .size_full()
                 .flex()
@@ -237,6 +243,7 @@ impl Workspace {
                                 .children(v.owner.clone().map(|w| div().flex_none().text_color(look.c(ui.text_muted)).child(format!("in {w}"))))
                                 .child(div().flex_none().text_color(look.c(ui.text_muted)).child(v.detail.clone()))
                                 .child(div().flex_1())
+                                .children(self.viewer_buttons(look, cx))
                                 .children(buttons)
                                 .child(div().flex_none().text_color(look.c(ui.text_muted)).child("esc to close")),
                         )

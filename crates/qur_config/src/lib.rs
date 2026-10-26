@@ -132,6 +132,10 @@ pub struct EditorConfig {
     pub line_height: f32,
     pub soft_wrap: bool,
     pub tab_width: usize,
+    /// Draw spaces as ·, tabs as → and line ends as ¬ in the code modal.
+    pub show_whitespace: bool,
+    /// Files bigger than this (MB) open read-only, paged from disk.
+    pub large_file_mb: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -226,7 +230,7 @@ impl Default for WindowConfig {
 
 impl Default for EditorConfig {
     fn default() -> Self {
-        EditorConfig { font_family: String::new(), font_size: 13.0, line_height: 1.5, soft_wrap: true, tab_width: 4 }
+        EditorConfig { font_family: String::new(), font_size: 13.0, line_height: 1.5, soft_wrap: true, tab_width: 4, show_whitespace: false, large_file_mb: 50 }
     }
 }
 
@@ -286,6 +290,7 @@ impl Config {
         self.editor.line_height = self.editor.line_height.clamp(1.0, 3.0);
         self.editor.tab_width = self.editor.tab_width.clamp(1, 16);
         self.terminal.scrollback = self.terminal.scrollback.min(MAX_SCROLLBACK);
+        self.editor.large_file_mb = self.editor.large_file_mb.max(1);
         self.window.opacity = self.window.opacity.clamp(0.0, 1.0);
         if !matches!(self.ui.sidebar.as_str(), "show" | "auto" | "hidden") {
             self.ui.sidebar = "show".into();
@@ -586,7 +591,7 @@ impl State {
 // projects/<project-id>.state.toml (machine-managed)
 // ---------------------------------------------------------------------------
 
-/// Files restored with the project: more than this only slows opening.
+/// Files remembered with the project (Recent File, Go to File's first rows).
 pub const MAX_OPEN_FILES: usize = 20;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -606,6 +611,8 @@ pub struct OpenFile {
     /// Cursor, 0-based.
     pub line: usize,
     pub col: usize,
+    /// The line at the top of the view, 0-based.
+    pub top: usize,
 }
 
 pub fn project_state_path(id: &str) -> PathBuf {
@@ -635,6 +642,9 @@ impl ProjectState {
             t["path"] = toml_edit::value(f.path.to_string_lossy().as_ref());
             t["line"] = toml_edit::value(f.line as i64);
             t["col"] = toml_edit::value(f.col as i64);
+            if f.top > 0 {
+                t["top"] = toml_edit::value(f.top as i64);
+            }
             files.push(t);
         }
         doc["file"] = toml_edit::Item::ArrayOfTables(files);
@@ -920,8 +930,8 @@ mod tests {
     fn project_state_round_trip() {
         let s = ProjectState {
             files: vec![
-                OpenFile { path: "/p/src/main.rs".into(), line: 41, col: 3 },
-                OpenFile { path: "/p/README.md".into(), line: 0, col: 0 },
+                OpenFile { path: "/p/src/main.rs".into(), line: 41, col: 3, top: 20 },
+                OpenFile { path: "/p/README.md".into(), line: 0, col: 0, top: 0 },
             ],
             code_open: true,
         };

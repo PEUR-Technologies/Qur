@@ -251,7 +251,7 @@ impl Workspace {
             g.update(cx, |g, cx| g.refresh(cx));
         }
         // Open copies: clean ones reload, dirty ones get the banner.
-        for b in self.buffers.list.clone() {
+        for b in self.buffers.loaded_vec() {
             let hit = b.read(cx).path().is_some_and(|bp| paths.iter().any(|p| p == bp));
             if hit {
                 b.update(cx, |b, cx| {
