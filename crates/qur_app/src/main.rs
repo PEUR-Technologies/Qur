@@ -18,6 +18,7 @@ mod editor_view;
 mod files;
 mod git_panel;
 mod grid;
+mod hotkey;
 mod hex_view;
 mod input;
 mod large_view;
@@ -78,6 +79,42 @@ pub fn set_menus(state: MenuState, cx: &mut App) {
 }
 
 /// Called once per window after its first frame (scripts/budget.sh).
+/// Settings files edited outside Qur (`$EDITOR $QUR_CONFIG` in a terminal)
+/// apply when saved: their modified times, checked every second (cheaper
+/// than watching Qur's folder, which holds the agents' worktrees).
+fn watch_settings(cx: &mut App) {
+    let files = || [Some(qur_config::config_path()), Some(qur_config::keymap_path()), terminal::theme_path()];
+    let stamps = move || files().map(|p| p.and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok()));
+    let bg = cx.background_executor().clone();
+    cx.spawn(async move |cx| {
+        let mut last = stamps();
+        loop {
+            bg.timer(std::time::Duration::from_secs(1)).await;
+            let now = stamps();
+            if now == last {
+                continue;
+            }
+            let keymap = now[1] != last[1];
+            cx.update(|cx| {
+                let mut keymap_done = !keymap;
+                for h in cx.windows() {
+                    if let Some(ws) = h.downcast::<Workspace>() {
+                        let _ = ws.update(cx, |ws, window, cx| {
+                            ws.reload_settings(window, cx);
+                            if !std::mem::replace(&mut keymap_done, true) {
+                                ws.reload_keymap(cx);
+                            }
+                        });
+                    }
+                }
+            });
+            // The theme file may have changed with the config.
+            last = stamps();
+        }
+    })
+    .detach();
+}
+
 pub fn first_frame(handle: AnyWindowHandle, cx: &mut App) {
     // Dev scripting for screenshots/tests: QUR_DEBUG_ACTIONS="qur::ThemePicker,wait:300,qur::ToggleTerminal"
     // dispatches commands by name after the first frame; `type:`, `key:`,
@@ -356,6 +393,8 @@ fn main() {
                 None => open_home(None, None, cx),
             },
         }
+
+        watch_settings(cx);
 
         cx.on_window_closed(|cx, id| {
             Look::remove(id, cx);

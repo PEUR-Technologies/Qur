@@ -327,7 +327,8 @@ impl Workspace {
     pub fn new(root: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         crate::mark("ws_new");
         let (config, err) = Config::load();
-        crate::terminal::set_scrollback(config.terminal.scrollback);
+        let errs = [crate::terminal::set_config(&config.terminal), crate::hotkey::set(&config.keys.global).err()];
+        errs.into_iter().flatten().for_each(|e| eprintln!("{e}"));
         if !cx.has_global::<Docks>() {
             Docks::load(&config, cx);
         }
@@ -722,6 +723,9 @@ impl Render for Workspace {
             crate::crash::debug_crash(cx);
             if std::env::var("QUR_BENCH").as_deref() == Ok("glow") {
                 self.bench_glow(window, cx);
+            }
+            if std::env::var("QUR_BENCH").as_deref() == Ok("term") {
+                self.bench_term(window, cx);
             }
             if std::env::var("QUR_BENCH").as_deref() == Ok("theme") {
                 let me = cx.entity();

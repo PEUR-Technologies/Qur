@@ -86,7 +86,7 @@ pub mod agent {
 }
 
 pub mod terminal {
-    gpui::actions!(terminal, [Clear, SendLineStart, SendLineEnd, SendKillLine, SendBackTab, Find, SplitRight, SplitDown, Tile, FocusLeft, FocusRight, FocusUp, FocusDown]);
+    gpui::actions!(terminal, [Clear, SendLineStart, SendLineEnd, SendKillLine, SendBackTab, Find, SplitRight, SplitDown, Tile, FocusLeft, FocusRight, FocusUp, FocusDown, MovePaneLeft, MovePaneRight, MovePaneUp, MovePaneDown]);
 }
 
 /// The Browser view's keys (while it, or the page in it, has focus).
@@ -334,6 +334,10 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(terminal::FocusRight, "Terminal", "Focus Pane Right", "cmd-alt-right", T, R),
     cmd!(terminal::FocusUp, "Terminal", "Focus Pane Above", "cmd-alt-up", T, R),
     cmd!(terminal::FocusDown, "Terminal", "Focus Pane Below", "cmd-alt-down", T, R),
+    cmd!(terminal::MovePaneLeft, "Terminal", "Move Pane Left", "cmd-alt-shift-left", T, R),
+    cmd!(terminal::MovePaneRight, "Terminal", "Move Pane Right", "cmd-alt-shift-right", T, R),
+    cmd!(terminal::MovePaneUp, "Terminal", "Move Pane Up", "cmd-alt-shift-up", T, R),
+    cmd!(terminal::MovePaneDown, "Terminal", "Move Pane Down", "cmd-alt-shift-down", T, R),
     cmd!(qur::PrevTerminal, "Terminal", "Previous Terminal", "cmd-shift-[|cmd-{", W, R),
     cmd!(qur::NextTerminal, "Terminal", "Next Terminal", "cmd-shift-]|cmd-}", W, R),
     cmd!(terminal::SendLineStart, "Terminal", "Line Start", "cmd-left", T, R),
@@ -945,6 +949,10 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(terminal::FocusRight),
             item(terminal::FocusUp),
             item(terminal::FocusDown),
+            item(terminal::MovePaneLeft),
+            item(terminal::MovePaneRight),
+            item(terminal::MovePaneUp),
+            item(terminal::MovePaneDown),
             sep(),
             item(terminal::Clear),
             item(qur::CloseTerminal),

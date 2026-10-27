@@ -164,6 +164,11 @@ impl Workspace {
             Some(Selected::Agent(_)) => return self.discard_task(&qur::DiscardTask, window, cx),
             _ => None,
         };
+        // The last shell pane anywhere: Cmd+W closes the window, like a terminal app.
+        let last = matches!(self.selected, Some(Selected::Shell(_))) && self.terms.read(cx).sessions.iter().filter(|s| s.kind == Kind::Shell).count() == 1;
+        if last {
+            return self.close_window(&qur::CloseWindow, window, cx);
+        }
         if let Some(tid) = tid {
             self.terms.update(cx, |p, cx| p.close_newest(tid, cx));
         }

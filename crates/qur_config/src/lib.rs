@@ -9,6 +9,8 @@
 //!
 //! Nothing is ever written into the user's repo.
 
+pub mod import;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -85,6 +87,42 @@ pub struct TerminalConfig {
     /// Lines of scrollback kept per terminal (new terminals; open ones keep
     /// theirs). A full line costs about 2.4 KB at 100 columns.
     pub scrollback: usize,
+    /// Font; "" is the editor's font. `font_size` 0 is one point under the editor's.
+    pub font_family: String,
+    pub font_size: f32,
+    /// Cell height as a multiple of the font size.
+    pub line_height: f32,
+    /// Space around the grid, in points.
+    pub padding_x: f32,
+    pub padding_y: f32,
+    /// "block", "bar" or "underline"; "" lets programs choose (block by default).
+    pub cursor_style: String,
+    pub cursor_blink: bool,
+    /// Colors are `#rrggbb`; "" keeps the theme's.
+    pub cursor_color: String,
+    /// A Ghostty theme file (`palette = 0=#…`, `background = …`): a path, or a
+    /// name in themes/ next to config.toml. The color keys below win over it.
+    pub theme: String,
+    pub foreground: String,
+    pub background: String,
+    pub selection_foreground: String,
+    pub selection_background: String,
+    /// ANSI color overrides as in Ghostty: `["1=#ff5555", "9=#ff6e6e"]` (0–15).
+    pub palette: Vec<String>,
+    /// Bold text in colors 0–7 uses the bright 8–15.
+    pub bold_is_bright: bool,
+    /// Option+key sends Esc+key (Meta) instead of typing ∂, ƒ…
+    pub option_as_alt: bool,
+    pub copy_on_select: bool,
+    pub scroll_multiplier: f32,
+    /// Moving the pointer onto a split pane focuses it.
+    pub focus_follows_mouse: bool,
+    /// The program a new shell runs ("" = your login shell, $SHELL), e.g. "nu".
+    /// Agent terminals keep $SHELL: their commands are written for it.
+    pub shell: String,
+    /// "left", or "right": shell output hugs the right edge (full-screen
+    /// programs such as vim stay as they are).
+    pub text_align: String,
 }
 
 pub const DEFAULT_SCROLLBACK: usize = 5000;
@@ -92,7 +130,30 @@ pub const MAX_SCROLLBACK: usize = 100_000;
 
 impl Default for TerminalConfig {
     fn default() -> Self {
-        TerminalConfig { scrollback: DEFAULT_SCROLLBACK }
+        TerminalConfig {
+            scrollback: DEFAULT_SCROLLBACK,
+            font_family: String::new(),
+            font_size: 0.0,
+            line_height: 1.3,
+            padding_x: 0.0,
+            padding_y: 0.0,
+            cursor_style: String::new(),
+            cursor_blink: false,
+            cursor_color: String::new(),
+            theme: String::new(),
+            foreground: String::new(),
+            background: String::new(),
+            selection_foreground: String::new(),
+            selection_background: String::new(),
+            palette: Vec::new(),
+            bold_is_bright: false,
+            option_as_alt: false,
+            copy_on_select: true,
+            scroll_multiplier: 1.0,
+            focus_follows_mouse: true,
+            shell: String::new(),
+            text_align: "left".into(),
+        }
     }
 }
 
@@ -198,10 +259,18 @@ pub struct PanelsConfig {
     pub search: bool,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct KeysConfig {
     pub vim: bool,
+    /// A system-wide key that shows or hides Qur (GPUI syntax, e.g. "cmd-\\"); "" is off.
+    pub global: String,
+}
+
+impl Default for KeysConfig {
+    fn default() -> Self {
+        KeysConfig { vim: false, global: "cmd-\\".into() }
+    }
 }
 
 impl Default for Config {
@@ -289,7 +358,20 @@ impl Config {
         self.editor.font_size = self.editor.font_size.clamp(6.0, 72.0);
         self.editor.line_height = self.editor.line_height.clamp(1.0, 3.0);
         self.editor.tab_width = self.editor.tab_width.clamp(1, 16);
-        self.terminal.scrollback = self.terminal.scrollback.min(MAX_SCROLLBACK);
+        let t = &mut self.terminal;
+        t.scrollback = t.scrollback.min(MAX_SCROLLBACK);
+        let clamp = |v: f32, lo: f32, hi: f32, def: f32| if v.is_finite() { v.clamp(lo, hi) } else { def };
+        t.font_size = if t.font_size == 0.0 { 0.0 } else { clamp(t.font_size, 6.0, 72.0, 0.0) };
+        t.line_height = clamp(t.line_height, 0.8, 3.0, 1.3);
+        t.padding_x = clamp(t.padding_x, 0.0, 100.0, 0.0);
+        t.padding_y = clamp(t.padding_y, 0.0, 100.0, 0.0);
+        t.scroll_multiplier = clamp(t.scroll_multiplier, 0.1, 20.0, 1.0);
+        if t.text_align != "right" {
+            t.text_align = "left".into();
+        }
+        if !matches!(t.cursor_style.as_str(), "" | "block" | "bar" | "underline") {
+            t.cursor_style.clear();
+        }
         self.editor.large_file_mb = self.editor.large_file_mb.max(1);
         self.window.opacity = self.window.opacity.clamp(0.0, 1.0);
         if !matches!(self.ui.sidebar.as_str(), "show" | "auto" | "hidden") {
@@ -329,6 +411,11 @@ pub enum Value {
 impl From<&str> for Value {
     fn from(s: &str) -> Self {
         Value::Str(s.into())
+    }
+}
+impl From<String> for Value {
+    fn from(s: String) -> Self {
+        Value::Str(s)
     }
 }
 impl From<f32> for Value {

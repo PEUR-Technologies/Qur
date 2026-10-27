@@ -18,6 +18,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+Opt+O` | Switch Project… (also: click the project name in the top bar) | File | M1 |
 | `Cmd+Shift+W` | Close Window | File | S |
 | `Cmd+M` | Minimize | Window | S |
+| `Cmd+\` (from any app) | Show or hide Qur: `[keys] global` in config.toml or Settings > Editor; keys macOS uses are refused | — | ✅ |
 | `Ctrl+Cmd+F` | Toggle Full Screen | View | S |
 | `Ctrl+Cmd+Z` | Zen Mode (hide the top bar until the mouse nears the top) | View | ✅ |
 | `Cmd+Shift+P` / `F1` | Command Palette | View | S |
@@ -110,9 +111,10 @@ A file in an agent's worktree (the modal says "in <task>") shows the agent's cha
 |---|---|---|
 | `Cmd+T` | New terminal | S |
 | `Cmd+Shift+T` | New Agent Terminal: a Claude agent task in its own worktree, shown as a terminal (decisions 12, 17) | S |
-| `Cmd+W` | Close focused terminal (or split pane); in an agent, Close/Delete Agent… (asks first) | S |
+| `Cmd+W` | Close focused terminal (or split pane); on the last shell, close the window; in an agent, Close/Delete Agent… (asks first) | ✅ |
 | `Cmd+D` / `Cmd+Shift+D` (terminal focused) | Split right / split down: a new shell in the project folder beside the focused one (decision 39) | S |
-| `Cmd+Opt+Arrows` (terminal focused) | Focus the split pane in that direction | S |
+| `Cmd+Opt+Arrows` (terminal focused) | Focus the split pane in that direction. Moving the pointer onto a pane focuses it too (`[terminal] focus_follows_mouse`); a still pointer never undoes a pane picked with the keys | S |
+| `Cmd+Opt+Shift+Arrows` (terminal focused) | Move Pane: swap the focused pane with the one in that direction | ✅ |
 | `Cmd+Enter` | New Tiled Terminal: a shell tiled into the terminal on screen, splitting the focused pane along its longer side (like i3/Hyprland); with no terminal shown, a new one. Insert Line Below in the editor | S |
 | `` Ctrl+` `` | Toggle terminal / focus it | S |
 | `Cmd+K` (terminal focused) | Clear terminal | S |

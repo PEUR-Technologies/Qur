@@ -135,6 +135,32 @@ impl Workspace {
         .detach();
     }
 
+    /// QUR_BENCH=term: a shell runs scripts/termbench.sh (timed `cat` of big
+    /// files, so the terminal's own draining is what's measured); its results
+    /// print as METRIC lines.
+    pub(super) fn bench_term(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let out = repo.join("spikes/out/termbench-qur.txt");
+        std::fs::remove_file(&out).ok();
+        self.new_terminal_in(self.root.clone(), window, cx);
+        let Some(Selected::Shell(tid)) = self.selected else { return };
+        let cmd = format!("bash {} {}; exit\r", repo.join("scripts/termbench.sh").display(), out.display());
+        self.terms.update(cx, |p, _| p.send_keys(tid, &cmd));
+        let bg = cx.background_executor().clone();
+        cx.spawn(async move |_, cx| {
+            loop {
+                bg.timer(Duration::from_millis(250)).await;
+                let text = std::fs::read_to_string(&out).unwrap_or_default();
+                if text.lines().any(|l| l == "done") {
+                    text.lines().filter(|l| *l != "done").for_each(|l| println!("METRIC term_{l}"));
+                    break;
+                }
+            }
+            cx.update(|cx| cx.quit());
+        })
+        .detach();
+    }
+
     /// QUR_BENCH=theme: switch through every theme, one per frame.
     pub(super) fn bench_theme_step(&mut self, i: usize, mut samples: Vec<f64>, window: &mut Window, cx: &mut Context<Self>) {
         let themes = Registry::global().all();
