@@ -298,27 +298,25 @@ plain_and_recent() {
   printf 'recent_projects = ["%s", "%s", "%s"]\nsetup_done = true\n' "$HC/$1/gone" "$REPO" "$PLAIN" > "$QUR_HOME/state.toml"
 }
 
-check_empty_window() {  # no project to reopen: the empty window, terminals in ~, project commands off; a Settings theme saves.
+check_empty_window() {  # no project to reopen: the empty window opens with a shell in ~, project commands off; a Settings theme saves.
   setup empty_window
-  drive "wait:1500,state,marks,qur::QuickOpen,qur::GitPanel,qur::FindInProject,wait:300,state,qur::NewTerminal,wait:1000,state,key:cmd-\\,,wait:300,click:@settings:nav:Appearance,wait:300,click:@settings:theme:1,wait:300,qur::Quit" -
+  drive "wait:1500,state,qur::QuickOpen,qur::GitPanel,qur::FindInProject,wait:300,state,qur::NewTerminal,wait:1000,state,key:cmd-\\,,wait:300,click:@settings:nav:Appearance,wait:300,click:@settings:theme:1,wait:300,qur::Quit" -
   ok "the empty window opened (no project)" has 'WINDOW empty'
-  ok "its stage offers Open Folder… and the rest" has 'BOUNDS home:open-folder'
-  ok "no sidebar while it has no terminals" grep -qE '^STATE.*project=none overlay=none selected=none .*visible=false' "$LOG"
-  ok "Go to File, Git and Find in Project do nothing there" test "$(grep -c '^STATE.*project=none overlay=none selected=none' "$LOG")" -eq 2
-  ok "New Terminal works, with the sidebar back" state_has 'visible=true'
+  ok "with a shell, and the sidebar showing it" grep -qE '^STATE.*project=none overlay=none selected=shell:1 .*sessions=1 .*visible=true' "$LOG"
+  ok "Go to File, Git and Find in Project do nothing there" test "$(grep -c '^STATE.*project=none overlay=none selected=shell:1 .*git={none}' "$LOG")" -eq 2
+  ok "New Terminal adds a second shell" state_has 'sessions=2'
   ok "and the empty window isn't a recent project" test -z "$(grep -F recent_projects "$QUR_HOME/state.toml" | grep -F /)"
   ok "a Settings theme click there saved it" cfg_has '^theme = "'
 }
 
-check_empty_recent() {  # the last project is gone: the empty window lists the others; a click opens one.
+check_empty_recent() {  # opening a project that is gone: the empty window lists the others; a click opens one.
   setup empty_recent
   plain_and_recent empty_recent
-  drive "wait:1500,marks,click:@home:recent:repo,wait:1500,state,qur::Quit" -
-  ok "says the last project is gone" has "FLASH $HC/empty_recent/gone isn't there any more"
+  drive "wait:1500,marks,click:@home:recent:repo,wait:1500,state,qur::Quit" "$HC/empty_recent/gone"
+  ok "says the project is gone" has "FLASH $HC/empty_recent/gone doesn't exist"
   ok "lists the projects still there" has 'BOUNDS home:recent:plain'
-  ok "clicking one opened its window" has "WINDOW $REPO"
-  ok "and closed the empty window" has 'WINDOW closed empty'
-  ok "the script went on in the project" state_has 'project=repo:repo'
+  ok "clicking one made the empty window that project's" state_has 'project=repo:repo'
+  ok "without opening a second window" test "$(grep -c '^WINDOW ' "$LOG")" -eq 1
 }
 
 check_close_last() {  # closing the last project window leaves the empty window; closing that quits.
@@ -348,7 +346,7 @@ check_plain_folder() {  # a folder without git: a project without Source Control
   ok "New Agent Terminal in the empty window asked for a folder" has "OPEN_PANEL $PLAIN"
   ok "and opened it as a project without git" has 'project=folder:plain'
   ok "its first Agent Terminal works in the folder" has 'selected=task:root-1:'
-  ok "no Git panel there" grep -qE '^STATE.*project=folder:plain .*selected=task:root-1:.* git=\{none\}' "$LOG"
+  ok "no Git panel there" grep -qE '^STATE.*project=folder:plain .*selected=task:root-1:.* git={none}' "$LOG"
   ok "a second one offered to initialize Git" has "PROMPT plain isn't a git repository -> 0"
   ok "which made a first commit of the folder" test -n "$(git -C "$PLAIN" log -1 --format=%s 2>/dev/null)"
   ok "then the agent started in its own worktree" has 'selected=task:term-2:'
