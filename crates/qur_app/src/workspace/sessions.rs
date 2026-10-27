@@ -71,7 +71,7 @@ impl Workspace {
     }
 
     /// Always the project folder; Open Worktree in Terminal is the way into an agent's worktree.
-    pub(super) fn new_terminal(&mut self, _: &qur::NewTerminal, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn new_terminal(&mut self, _: &qur::NewTerminal, window: &mut Window, cx: &mut Context<Self>) {
         self.new_terminal_in(self.root.clone(), window, cx)
     }
 

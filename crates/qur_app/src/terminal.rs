@@ -2036,6 +2036,20 @@ fn foreground_name(pid: i32) -> Option<String> {
     (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
 }
 
+/// The folder process `pid` is in (a shell's, after its last `cd`).
+pub fn cwd_of(pid: i32) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as i32;
+    let got = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDVNODEPATHINFO, 0, (&raw mut info).cast(), size) };
+    if got != size {
+        return None;
+    }
+    let path = unsafe { std::ffi::CStr::from_ptr(info.pvi_cdir.vip_path.as_ptr().cast()) };
+    let path = std::ffi::OsStr::from_bytes(path.to_bytes());
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
 /// A terminal title as a task name: without spinner/status glyphs, and None
 /// for generic titles (the program's name, a shell, a path, user@host).
 fn clean_title(raw: &str) -> Option<String> {
