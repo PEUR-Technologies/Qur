@@ -2,7 +2,7 @@
 
 Read this first when you pick the project up, whether you're a person or a Claude session. It covers where things stand, the rules, how to work on the code, and what's next. Keep it current: update **Status** and **Next** at the end of every session.
 
-Last updated: 2026-10-27, release v0.1.8. All milestones M0–M7 are done, plus the 2026-10-25 improvements (decisions 49–58), the 2026-10-26 window and pane work (decisions 59–61) v0.1.6 (decisions 62–70), v0.1.7 and v0.1.8 (decision 71). The newest build is installed at `/Applications/Qur.app`.
+Last updated: 2026-10-27, release v0.1.9. All milestones M0–M7 are done, plus the 2026-10-25 improvements (decisions 49–58), the 2026-10-26 window and pane work (decisions 59–61) v0.1.6 (decisions 62–70), v0.1.7, v0.1.8 (decision 71) and v0.1.9 (decision 72). The newest build is installed at `/Applications/Qur.app`.
 
 ## What Qur is
 
@@ -24,7 +24,7 @@ Agents are first-class. The sidebar lists agents as buttons. Each agent works in
 
 ## Status: what's built
 
-All milestones are on `main`. There are 359 tests (`cargo test --release --workspace`), all passing; clippy is clean with `-D warnings`; `scripts/handcheck.sh` passes 125 scripted hand checks.
+All milestones are on `main`. There are 367 tests (`cargo test --release --workspace`), all passing; clippy is clean with `-D warnings`; `scripts/handcheck.sh` passes 125 scripted hand checks.
 
 | Milestone | What | Decisions |
 |---|---|---|
@@ -48,6 +48,7 @@ All milestones are on `main`. There are 359 tests (`cargo test --release --works
 | 2026-10-26 v0.1.6 | Files and images in the chat and a file viewer; images decoded to their drawn size; idle ACP agents release their processes; turns and Rewind for Agent Terminals; plan mode with commentable plans; tokens and cost in the header; Push and Open Pull Request; inline diff review in the code modal; Notepad++-style file handling (encodings, hex, large files); closed files freed; chats on disk and after a restart; commit messages from turns; local crash reports; Clean Up Worktrees; a window without a project; Reveal in Finder / Copy Path; memory readout and `memcheck.sh`; per-window terminal colors, Copy Image from a browser, Vim `G`, project-folder agent diffs and heat; zen's bar no longer jiggles terminals | 62–69 |
 | 2026-10-26 v0.1.7 | Settings > Agents: Add agent (name, command, Structured or Terminal), agents added by hand listed too, unticking removes; Gemini CLI, opencode, GitHub Copilot and Cursor built in (none tried in Qur yet); agent dropdown in New Agent Task; with gaps the green light fills the screen (Option-click for full screen); the auto-hide sidebar slides in and out like zen's bar, the stage easing with it; Cmd+W closes a dwindled row's newest pane first | — |
 | 2026-10-27 v0.1.8 | Opening Qur without a folder is a terminal; cd into a git repo (or pick a folder) and that window becomes the project, terminals kept; Shift+Enter inserts a newline in terminals; Agent Terminal changes show in the Changes panel and Files tree | 71 |
+| 2026-10-27 v0.1.9 | Cmd+\ shows or hides Qur from any app (`[keys] global`, macOS's own keys refused); `[terminal]` font, padding, cursor, colors, Ghostty themes, option-as-alt, `shell`, right-aligned text; import from Ghostty, kitty or Alacritty; settings files apply when saved from any editor (`$QUR_CONFIG`); hover focus as a setting, Cmd+Opt+Shift+arrows swap panes, panes dragged by a grip; copy on select, drag-scroll; Cmd+W on the last shell closes the window | 72 |
 
 Latest numbers (`docs/budget.md`, M7 table, measured on battery): app 25 MB, first frame 113 ms, idle 73 MB, 3 agents 129 MB, glow 81 ms, keystroke p99 2.0 ms, search 51 ms. `lsof` shows no network sockets in Qur's own process.
 
@@ -119,7 +120,7 @@ Where things are stored on the owner's Mac:
 ```sh
 source ~/.cargo/env
 cargo build --release -p qur_app && target/release/qur ~/some/project   # no argument = last project
-cargo test --release --workspace            # 359 tests
+cargo test --release --workspace            # 367 tests
 scripts/handcheck.sh [check ...]            # 125 scripted hand checks (-l lists them); unlocked session
 target/release/qur doctor                   # setup checks, exit 1 on any problem
 scripts/bundle.sh [--zip]                   # target/release/Qur.app (ad-hoc signed); then cp -R to /Applications
