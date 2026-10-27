@@ -50,7 +50,7 @@ All milestones are on `main`. There are 367 tests (`cargo test --release --works
 | 2026-10-27 v0.1.8 | Opening Qur without a folder is a terminal; cd into a git repo (or pick a folder) and that window becomes the project, terminals kept; Shift+Enter inserts a newline in terminals; Agent Terminal changes show in the Changes panel and Files tree | 71 |
 | 2026-10-27 v0.1.9 | Cmd+\ shows or hides Qur from any app (`[keys] global`, macOS's own keys refused); `[terminal]` font, padding, cursor, colors, Ghostty themes, option-as-alt, `shell`, right-aligned text; import from Ghostty, kitty or Alacritty; settings files apply when saved from any editor (`$QUR_CONFIG`); hover focus as a setting, Cmd+Opt+Shift+arrows swap panes, panes dragged by a grip; copy on select, drag-scroll; Cmd+W on the last shell closes the window | 72 |
 
-Latest numbers (`docs/budget.md`, M7 table, measured on battery): app 25 MB, first frame 113 ms, idle 73 MB, 3 agents 129 MB, glow 81 ms, keystroke p99 2.0 ms, search 51 ms. `lsof` shows no network sockets in Qur's own process.
+Latest numbers (`docs/budget.md`, M7 table, measured on battery; app size from the v0.1.9 bundle): app 30 MB (25 MB at M7), first frame 113 ms, idle 73 MB, 3 agents 129 MB, glow 81 ms, keystroke p99 2.0 ms, search 51 ms. `lsof` shows no network sockets in Qur's own process.
 
 ### Not yet checked by hand
 
