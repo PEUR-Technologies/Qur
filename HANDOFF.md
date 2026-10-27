@@ -2,7 +2,7 @@
 
 Read this first when you pick the project up, whether you're a person or a Claude session. It covers where things stand, the rules, how to work on the code, and what's next. Keep it current: update **Status** and **Next** at the end of every session.
 
-Last updated: 2026-10-26, release v0.1.7. All milestones M0–M7 are done, plus the 2026-10-25 improvements (decisions 49–58), the 2026-10-26 window and pane work (decisions 59–61) v0.1.6 (decisions 62–70) and v0.1.7. The newest build is installed at `/Applications/Qur.app`.
+Last updated: 2026-10-27, release v0.1.8. All milestones M0–M7 are done, plus the 2026-10-25 improvements (decisions 49–58), the 2026-10-26 window and pane work (decisions 59–61) v0.1.6 (decisions 62–70), v0.1.7 and v0.1.8 (decision 71). The newest build is installed at `/Applications/Qur.app`.
 
 ## What Qur is
 
@@ -47,6 +47,7 @@ All milestones are on `main`. There are 359 tests (`cargo test --release --works
 | 2026-10-26 window and panes (v0.1.5) | No window shadow with gaps; zen and gaps together, zen's bar easing the content down; the bar zooms (never below 32 pt) with Qur's own traffic lights; Chrome-style sidebar (always / auto-hide / hidden, left or right, sections reordered by dragging); dock rearranging like macOS tiling (drop preview, nearest-edge targets, whole-pane drags, one + menu, × always clickable) with panes gliding into place, split terminals too; the Browser steps aside and zen holds still during drags | 59–61 |
 | 2026-10-26 v0.1.6 | Files and images in the chat and a file viewer; images decoded to their drawn size; idle ACP agents release their processes; turns and Rewind for Agent Terminals; plan mode with commentable plans; tokens and cost in the header; Push and Open Pull Request; inline diff review in the code modal; Notepad++-style file handling (encodings, hex, large files); closed files freed; chats on disk and after a restart; commit messages from turns; local crash reports; Clean Up Worktrees; a window without a project; Reveal in Finder / Copy Path; memory readout and `memcheck.sh`; per-window terminal colors, Copy Image from a browser, Vim `G`, project-folder agent diffs and heat; zen's bar no longer jiggles terminals | 62–69 |
 | 2026-10-26 v0.1.7 | Settings > Agents: Add agent (name, command, Structured or Terminal), agents added by hand listed too, unticking removes; Gemini CLI, opencode, GitHub Copilot and Cursor built in (none tried in Qur yet); agent dropdown in New Agent Task; with gaps the green light fills the screen (Option-click for full screen); the auto-hide sidebar slides in and out like zen's bar, the stage easing with it; Cmd+W closes a dwindled row's newest pane first | — |
+| 2026-10-27 v0.1.8 | Opening Qur without a folder is a terminal; cd into a git repo (or pick a folder) and that window becomes the project, terminals kept; Shift+Enter inserts a newline in terminals; Agent Terminal changes show in the Changes panel and Files tree | 71 |
 
 Latest numbers (`docs/budget.md`, M7 table, measured on battery): app 25 MB, first frame 113 ms, idle 73 MB, 3 agents 129 MB, glow 81 ms, keystroke p99 2.0 ms, search 51 ms. `lsof` shows no network sockets in Qur's own process.
 
