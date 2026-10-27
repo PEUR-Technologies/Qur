@@ -188,8 +188,9 @@ impl Workspace {
         if project_scope {
             self.write_setting(true, "theme", Some(name.into()), cx);
         } else {
-            self.write_setting(false, "theme", Some(name.into()), cx);
+            // Clear first: the empty window's project scope is config.toml too.
             self.write_setting(true, "theme", None, cx);
+            self.write_setting(false, "theme", Some(name.into()), cx);
         }
         self.reload_settings(window, cx);
         if !project_scope {
