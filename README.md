@@ -35,7 +35,15 @@ Rust + GPUI · no Electron · runs locally · uses your Claude Code or Codex log
 
 ## Install
 
-Needs macOS 13+, git 2.38+, [Claude Code](https://claude.com/claude-code), Rust and Xcode.
+Needs macOS 13+, git 2.38+ and [Claude Code](https://claude.com/claude-code).
+
+```sh
+brew tap peur-technologies/qur
+brew trust peur-technologies/qur
+brew install --cask qur
+```
+
+Or build it yourself (needs Rust and Xcode too):
 
 ```sh
 git clone https://github.com/PEUR-Technologies/Qur.git && cd Qur
