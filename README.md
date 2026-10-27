@@ -43,6 +43,12 @@ brew trust peur-technologies/qur
 brew install --cask qur
 ```
 
+Or [download the zip](https://github.com/PEUR-Technologies/Qur/releases/latest/download/Qur.zip) and move Qur.app to Applications. It isn't notarized yet, so macOS blocks it on first launch; to open it, run:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Qur.app
+```
+
 Or build it yourself (needs Rust and Xcode too):
 
 ```sh
