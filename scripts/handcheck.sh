@@ -298,15 +298,16 @@ plain_and_recent() {
   printf 'recent_projects = ["%s", "%s", "%s"]\nsetup_done = true\n' "$HC/$1/gone" "$REPO" "$PLAIN" > "$QUR_HOME/state.toml"
 }
 
-check_empty_window() {  # no project to reopen: the empty window, terminals in ~, project commands off.
+check_empty_window() {  # no project to reopen: the empty window, terminals in ~, project commands off; a Settings theme saves.
   setup empty_window
-  drive "wait:1500,state,marks,qur::QuickOpen,qur::GitPanel,qur::FindInProject,wait:300,state,qur::NewTerminal,wait:1000,state,qur::Quit" -
+  drive "wait:1500,state,marks,qur::QuickOpen,qur::GitPanel,qur::FindInProject,wait:300,state,qur::NewTerminal,wait:1000,state,key:cmd-\\,,wait:300,click:@settings:nav:Appearance,wait:300,click:@settings:theme:1,wait:300,qur::Quit" -
   ok "the empty window opened (no project)" has 'WINDOW empty'
   ok "its stage offers Open Folder… and the rest" has 'BOUNDS home:open-folder'
   ok "no sidebar while it has no terminals" grep -qE '^STATE.*project=none overlay=none selected=none .*visible=false' "$LOG"
   ok "Go to File, Git and Find in Project do nothing there" test "$(grep -c '^STATE.*project=none overlay=none selected=none' "$LOG")" -eq 2
   ok "New Terminal works, with the sidebar back" state_has 'visible=true'
   ok "and the empty window isn't a recent project" test -z "$(grep -F recent_projects "$QUR_HOME/state.toml" | grep -F /)"
+  ok "a Settings theme click there saved it" cfg_has '^theme = "'
 }
 
 check_empty_recent() {  # the last project is gone: the empty window lists the others; a click opens one.
