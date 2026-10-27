@@ -36,6 +36,7 @@ use qur_theme::{Rgba, TerminalColors};
 
 use crate::commands::{edit, qur, terminal as ta};
 use crate::input::{InputEvent, TextInput};
+use crate::dock::Edge;
 use crate::look::Look;
 use crate::tiling::{self, Motion, Rect};
 
@@ -427,13 +428,46 @@ impl Tile {
 
     /// Put `new` beside `target` (right of it, or below when `vertical`).
     fn split_at(&mut self, target: usize, new: usize, vertical: bool) -> bool {
+        self.place(target, new, if vertical { Edge::Bottom } else { Edge::Right })
+    }
+
+    /// Put `new` beside `target` on `edge` (not Center).
+    fn place(&mut self, target: usize, new: usize, edge: Edge) -> bool {
         match self {
             Tile::Term(id) if *id == target => {
-                *self = Tile::Split { vertical, ratio: 0.5, a: Box::new(Tile::Term(target)), b: Box::new(Tile::Term(new)) };
+                let vertical = matches!(edge, Edge::Top | Edge::Bottom);
+                let (a, b) = if matches!(edge, Edge::Left | Edge::Top) { (new, target) } else { (target, new) };
+                *self = Tile::Split { vertical, ratio: 0.5, a: Box::new(Tile::Term(a)), b: Box::new(Tile::Term(b)) };
                 true
             }
             Tile::Term(_) => false,
-            Tile::Split { a, b, .. } => a.split_at(target, new, vertical) || b.split_at(target, new, vertical),
+            Tile::Split { a, b, .. } => a.place(target, new, edge) || b.place(target, new, edge),
+        }
+    }
+
+    /// A pane dragged onto another (as the agent stage's tabs are): on its
+    /// middle they swap places, else it moves beside it on that edge.
+    fn move_to(&mut self, id: usize, target: usize, edge: Edge) {
+        if id == target || !self.ids().contains(&target) {
+            return;
+        }
+        if edge == Edge::Center {
+            return self.swap(id, target);
+        }
+        if let Some(mut rest) = self.clone().without(id)
+            && rest.place(target, id, edge)
+        {
+            *self = rest;
+        }
+    }
+
+    fn swap(&mut self, x: usize, y: usize) {
+        match self {
+            Tile::Term(t) => *t = if *t == x { y } else if *t == y { x } else { *t },
+            Tile::Split { a, b, .. } => {
+                a.swap(x, y);
+                b.swap(x, y);
+            }
         }
     }
 
@@ -511,6 +545,32 @@ impl Tile {
     }
 }
 
+/// What's being dragged: a split pane (session `id`) of the panel `panel`.
+#[derive(Clone)]
+struct DragPane {
+    panel: gpui::EntityId,
+    id: usize,
+    label: SharedString,
+}
+
+impl Render for DragPane {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let look = Look::of(window, cx);
+        let ui = &look.theme.ui;
+        div()
+            .px(look.z(10.))
+            .py(look.z(3.))
+            .rounded(look.z(4.))
+            .bg(look.c(ui.overlay_bg))
+            .border_1()
+            .border_color(look.c(ui.focus_ring))
+            .text_size(look.text(-1.))
+            .text_color(look.c(ui.text))
+            .font_family(look.ui_font.clone())
+            .child(self.label.clone())
+    }
+}
+
 /// A sidebar row's splits. `owner` is the session the row stands for; the
 /// other panes are shells that belong to it and have no row of their own.
 struct Group {
@@ -546,6 +606,8 @@ pub struct TerminalPanel {
     glide_area: Rc<std::cell::Cell<Bounds<Pixels>>>,
     /// A divider being dragged: its split's path and bounds.
     resizing: Option<(Vec<bool>, Bounds<Pixels>)>,
+    /// A pane being dragged by its grip: the pane under it and where it lands.
+    drop_at: Option<(usize, Edge)>,
     /// Shown as the whole stage (a shell row), not inside an Agent
     /// Terminal's dock pane: with window gaps on, its panes are the tiles.
     /// Set by the workspace as it lays the stage out.
@@ -590,6 +652,7 @@ impl TerminalPanel {
             glide: Motion::default(),
             glide_area: Rc::default(),
             resizing: None,
+            drop_at: None,
             colors: ColorsCell::default(),
         }
     }
@@ -864,6 +927,16 @@ impl TerminalPanel {
             None => self.groups.iter().find_map(|g| g.tile.parent_vertical(target)).is_some_and(|v| !v),
         };
         self.split_active(cwd, vertical, false, cx)
+    }
+
+    /// Drop the pane `id` onto `target`'s (see `Tile::move_to`); it's an
+    /// arrangement by hand, so closing a pane no longer regrids.
+    fn move_pane(&mut self, id: usize, target: usize, edge: Edge, cx: &mut Context<Self>) {
+        if let Some(g) = self.groups.iter_mut().find(|g| g.tile.ids().contains(&id)) {
+            g.tile.move_to(id, target, edge);
+            g.grid = false;
+        }
+        self.focus_pane(id, cx);
     }
 
     /// The group the focused session is in.
@@ -1692,6 +1765,9 @@ impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
         let ui = look.theme.ui.clone();
+        if !cx.has_active_drag() {
+            self.drop_at = None;
+        }
         let split = self.active_group().is_some();
         let tiles = match self.active_group().map(|g| g.tile.clone()) {
             Some(t) => Some(self.gliding(&t, true, &look, cx)),
@@ -1822,14 +1898,75 @@ impl TerminalPanel {
                 } else {
                     gpui::transparent_black()
                 };
+                let id = *id;
+                let accent = look.c(look.theme.accents[0].base);
+                let group = SharedString::from(format!("term-pane-{id}"));
+                // Dragged by the grip on its top edge (shown on hover) onto
+                // another pane: a preview shows where it lands, as on the agent stage.
+                let grip = split.then(|| {
+                    let label: SharedString = self.session_by_id(id).map(|s| s.label.clone()).unwrap_or_default().into();
+                    div()
+                        .id(SharedString::from(format!("term-grip-{id}")))
+                        .absolute()
+                        .top_0()
+                        .left(relative(0.5))
+                        .ml(look.z(-24.))
+                        .w(look.z(48.))
+                        .h(look.z(10.))
+                        .flex()
+                        .justify_center()
+                        .pt(look.z(2.))
+                        .cursor_grab()
+                        .opacity(0.)
+                        .group_hover(group.clone(), |d| d.opacity(1.))
+                        .child(div().w(look.z(28.)).h(look.z(4.)).rounded(look.z(2.)).bg(look.c(ui.text_muted)).hover(|d| d.bg(accent)))
+                        .children(crate::script::mark(|| format!("term-grip:{id}")))
+                        // Not a text selection in the grid underneath.
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_drag(DragPane { panel: cx.entity_id(), id, label }, |d: &DragPane, _, _, cx| cx.new(|_| d.clone()))
+                });
+                let preview = self.drop_at.filter(|(t, _)| *t == id).map(|(_, e)| {
+                    let mut fill = accent;
+                    fill.a = 0.16;
+                    let half = relative(0.5);
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .when(e == Edge::Right, |d| d.left(half))
+                        .when(e == Edge::Bottom, |d| d.top(half))
+                        .when(matches!(e, Edge::Left | Edge::Right), |d| d.w(half))
+                        .when(matches!(e, Edge::Top | Edge::Bottom), |d| d.h(half))
+                        .child(div().size_full().p(look.z(6.)).child(div().size_full().rounded(look.z(10.)).bg(fill).border_2().border_color(accent)))
+                });
                 d.size_full()
+                    .relative()
+                    .group(group)
                     .px(look.z(8.))
                     .py(look.z(4.))
                     // Tiling-WM look: each pane its own rounded box, the
                     // focused one outlined in the accent.
                     .when(split && !tiled, |d| d.rounded(look.z(6.)))
                     .when(split || tiled && look.tiles.is_some_and(|t| t.border), |d| d.border_1().border_color(edge))
-                    .child(GridElement { panel: cx.entity(), id: *id })
+                    .child(GridElement { panel: cx.entity(), id })
+                    .children(grip)
+                    .children(preview)
+                    .on_drag_move::<DragPane>(cx.listener(move |this, ev: &gpui::DragMoveEvent<DragPane>, _, cx| {
+                        let t = ev.drag(cx);
+                        if t.panel != cx.entity_id() || !ev.bounds.contains(&ev.event.position) {
+                            return;
+                        }
+                        let at = (t.id != id).then(|| (id, crate::dock::edge_at(ev.bounds, ev.event.position, px(0.))));
+                        if std::mem::replace(&mut this.drop_at, at) != at {
+                            cx.notify();
+                        }
+                    }))
+                    .on_drop(cx.listener(move |this, t: &DragPane, _, cx| {
+                        if let Some((target, edge)) = this.drop_at.take().filter(|(target, _)| *target == id && t.panel == cx.entity_id()) {
+                            this.move_pane(t.id, target, edge, cx);
+                        }
+                    }))
                     .into_any_element()
             }
             Tile::Split { vertical, ratio, a, b } => {
@@ -2288,6 +2425,25 @@ mod tests {
         assert_eq!(t, Tile::Split { vertical: false, ratio: 0.5, a: Box::new(Tile::Term(1)), b: Box::new(Tile::Term(3)) });
         assert_eq!(t.without(1), Some(Tile::Term(3)));
         assert_eq!(Tile::Term(3).without(3), None);
+    }
+
+    #[test]
+    fn dragged_panes() {
+        let term = |i| Box::new(Tile::Term(i));
+        // 1 | (2 / 3)
+        let mut t = Tile::Term(1);
+        t.split_at(1, 2, false);
+        t.split_at(2, 3, true);
+        let before = t.clone();
+        t.move_to(1, 1, Edge::Left);
+        t.move_to(1, 9, Edge::Left);
+        assert_eq!(t, before, "onto itself or a pane not here");
+        t.move_to(1, 3, Edge::Center);
+        assert_eq!(t.ids(), vec![3, 2, 1], "the middle swaps");
+        t.move_to(3, 1, Edge::Top);
+        assert_eq!(t, Tile::Split { vertical: true, ratio: 0.5, a: term(2), b: Box::new(Tile::Split { vertical: true, ratio: 0.5, a: term(3), b: term(1) }) });
+        t.move_to(2, 1, Edge::Right);
+        assert_eq!(t, Tile::Split { vertical: true, ratio: 0.5, a: term(3), b: Box::new(Tile::Split { vertical: false, ratio: 0.5, a: term(1), b: term(2) }) });
     }
 
     #[test]

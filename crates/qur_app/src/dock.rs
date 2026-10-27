@@ -536,7 +536,7 @@ fn shape(n: &Node, prev: &HashSet<Panel>) -> Shape<Panel> {
 
 /// Where a tab dropped at `p` on a pane lands: on the tab strip or the
 /// middle it joins the pane, else beside it on the nearest edge.
-fn edge_at(b: Bounds<Pixels>, p: gpui::Point<Pixels>, strip: Pixels) -> Edge {
+pub(crate) fn edge_at(b: Bounds<Pixels>, p: gpui::Point<Pixels>, strip: Pixels) -> Edge {
     if p.y - b.top() <= strip {
         return Edge::Center;
     }
