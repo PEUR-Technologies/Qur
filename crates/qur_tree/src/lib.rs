@@ -277,9 +277,10 @@ pub fn list_files(root: &Path, limit: usize) -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
-    fn fixture() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("qur-tree-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+    /// Its own folder per test: tests run in parallel, and a shared one was
+    /// deleted under another test (quick_open_list failed in CI).
+    fn fixture(name: &str) -> PathBuf {
+        let d = tmp(name);
         for p in ["src/a.rs", "src/deep/b.rs", "target/debug/x", "README.md", ".github/ci.yml", "Zeta/z.txt", ".git/HEAD"] {
             let f = d.join(p);
             std::fs::create_dir_all(f.parent().unwrap()).unwrap();
@@ -295,7 +296,7 @@ mod tests {
 
     #[test]
     fn lazy_sorted_ignored() {
-        let d = fixture();
+        let d = fixture("lazy_sorted_ignored");
         let mut t = FileTree::new(&d);
         assert_eq!(names(&t), [".github", "src", "Zeta", ".gitignore", "README.md"]);
         let src = t.find(Path::new("src")).unwrap();
@@ -307,7 +308,7 @@ mod tests {
 
     #[test]
     fn reveal_expands_ancestors() {
-        let d = fixture();
+        let d = fixture("reveal_expands_ancestors");
         let mut t = FileTree::new(&d);
         let row = t.reveal(Path::new("src/deep/b.rs")).unwrap();
         assert_eq!(t.node(t.visible()[row]).name, "b.rs");
@@ -318,7 +319,7 @@ mod tests {
 
     #[test]
     fn quick_open_list() {
-        let d = fixture();
+        let d = fixture("quick_open_list");
         let files = list_files(&d, 1000);
         let s: Vec<_> = files.iter().map(|p| p.to_string_lossy().into_owned()).collect();
         assert!(s.contains(&"src/deep/b.rs".to_string()));
