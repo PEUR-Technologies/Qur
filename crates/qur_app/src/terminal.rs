@@ -1270,7 +1270,7 @@ impl TerminalPanel {
         cx.notify();
     }
 
-    fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_move(&mut self, ev: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((path, b)) = self.resizing.clone() {
             if ev.pressed_button != Some(MouseButton::Left) {
                 self.resizing = None;
@@ -1283,6 +1283,14 @@ impl TerminalPanel {
                 cx.notify();
             }
             return;
+        }
+        // Focus follows the pointer between split panes, while the terminal has focus.
+        if ev.pressed_button.is_none()
+            && self.focus.is_focused(window)
+            && let Some(id) = self.pane_at(ev.position)
+            && Some(id) != self.active_session().map(|s| s.id)
+        {
+            self.focus_pane(id, cx);
         }
         if !(self.selecting && ev.pressed_button == Some(MouseButton::Left)) {
             self.selecting = false;
