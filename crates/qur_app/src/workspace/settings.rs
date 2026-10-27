@@ -16,7 +16,9 @@ impl Workspace {
         let k = self.preview_accent.unwrap_or(self.config.ui.accent) % 6;
         let (hue, brightness) = self.preview_tune.unwrap_or((self.config.ui.accent_hue, self.config.ui.accent_brightness));
         self.accent_base = theme.accents[k].base;
-        let theme = std::sync::Arc::new(theme.with_accent(k, hue, brightness));
+        let mut theme = theme.with_accent(k, hue, brightness);
+        crate::terminal::override_colors(&mut theme.terminal);
+        let theme = std::sync::Arc::new(theme);
         let min = qur_theme::MIN_OPACITY;
         let code_font = if self.config.editor.font_family.is_empty() { default_code_font(cx) } else { self.config.editor.font_family.clone() };
         let look = Look {
@@ -63,10 +65,11 @@ impl Workspace {
     pub fn reload_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (config, err) = Config::load();
         self.config = config;
-        crate::terminal::set_scrollback(self.config.terminal.scrollback);
+        let term_err = crate::terminal::set_config(&self.config.terminal);
+        self.terms.update(cx, |p, cx| p.apply_config(cx));
         Docks::load(&self.config, cx);
         self.project = ProjectSettings::load(&self.project_id);
-        if let Some(e) = err {
+        if let Some(e) = err.or(term_err).or_else(|| crate::hotkey::set(&self.config.keys.global).err()) {
             self.flash(e, cx);
         }
         let wrap = self.config.editor.soft_wrap;
@@ -139,7 +142,28 @@ impl Workspace {
 
     /// Re-read keymap.toml (saved in Qur): rebinds keys app-wide, updates the
     /// menu shortcuts, and reports skipped entries (also in the log).
-    pub(super) fn reload_keymap(&mut self, cx: &mut Context<Self>) {
+    /// Another terminal's settings into `[terminal]` (Settings > Editor).
+    fn import_terminal(&mut self, source: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let name = qur_config::import::SOURCES.iter().find(|s| s.0 == source).map_or(source, |s| s.1);
+        let Some(path) = qur_config::import::find(source) else { return self.flash(format!("No {name} config found"), cx) };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => return self.flash(format!("{}: {e}", path.display()), cx),
+        };
+        let keys = qur_config::import::terminal_keys(source, &text, path.parent().unwrap_or(&path));
+        if keys.is_empty() {
+            return self.flash(format!("Nothing in {} that Qur's terminal uses", path.display()), cx);
+        }
+        let n = keys.len();
+        for (k, v) in keys {
+            self.write_setting(false, &format!("terminal.{k}"), Some(v), cx);
+        }
+        self.reload_settings(window, cx);
+        self.broadcast_reload(cx);
+        self.flash(format!("Imported {n} settings from {name} into config.toml [terminal]"), cx);
+    }
+
+    pub fn reload_keymap(&mut self, cx: &mut Context<Self>) {
         let errors = commands::reload_keymap(cx);
         for e in &errors {
             crate::log(e);
@@ -221,6 +245,7 @@ impl Workspace {
             hue,
             brightness,
             vim: self.config.keys.vim,
+            global_key: self.config.keys.global.clone(),
             zen: self.config.ui.zen,
             traffic_lights: self.config.ui.traffic_lights.clone(),
             gaps: self.config.ui.gaps,
@@ -317,6 +342,19 @@ impl Workspace {
             }
             SetupEvent::Sidebar(mode) => this.set_sidebar_mode(mode, cx),
             SetupEvent::SidebarSide(right) => this.set_sidebar_side(*right, cx),
+            SetupEvent::GlobalKey(key) => match crate::hotkey::set(key) {
+                Ok(()) => {
+                    this.write_setting(false, "keys.global", Some(key.as_str().into()), cx);
+                    this.reload_settings(window, cx);
+                    this.broadcast_reload(cx);
+                    this.flash(if key.is_empty() { "Show or hide Qur: off".to_string() } else { format!("{key} now shows or hides Qur") }, cx);
+                }
+                Err(e) => {
+                    let _ = crate::hotkey::set(&this.config.keys.global);
+                    this.flash(e, cx);
+                }
+            },
+            SetupEvent::ImportTerminal(source) => this.import_terminal(source, window, cx),
             SetupEvent::TrafficLights(key) => {
                 this.write_setting(false, "ui.traffic_lights", Some(key.as_str().into()), cx);
                 this.reload_settings(window, cx);
@@ -451,6 +489,27 @@ const CONFIG_TEMPLATE: &str = r#"# Qur settings. Saved changes apply right away.
 
 [terminal]
 # scrollback = 5000         # lines kept per terminal (new terminals); about 2.4 KB a line
+# font_family = ""          # "" = the editor's font
+# font_size = 0             # 0 = one point under the editor's
+# line_height = 1.3
+# padding_x = 0
+# padding_y = 0
+# cursor_style = ""         # block, bar, underline; "" = block, programs may change it
+# cursor_blink = false
+# theme = ""                # a Ghostty theme file: a path, or a name in themes/ beside this file
+# foreground = ""           # colors as #rrggbb; "" = the theme's
+# background = ""
+# cursor_color = ""
+# selection_foreground = ""
+# selection_background = ""
+# palette = []              # Ghostty style: ['1=#ff5555', '9=#ff6e6e'] (0 to 15)
+# bold_is_bright = false
+# option_as_alt = false     # Option+key sends Esc+key (Meta) instead of typing ∂, ƒ…
+# copy_on_select = true      # selecting copies
+# scroll_multiplier = 1.0
+# focus_follows_mouse = true  # moving the pointer onto a split pane focuses it
+# shell = ""                # "" = your login shell; e.g. "nu" for Nushell's tables
+# text_align = "left"       # or "right": shell output grows from the right edge
 
 [ui]
 # font_size = 13
@@ -471,6 +530,7 @@ const CONFIG_TEMPLATE: &str = r#"# Qur settings. Saved changes apply right away.
 
 [keys]
 # vim = false
+# global = "cmd-\\"          # from any app: show or hide Qur ("" = off; keys macOS uses are refused)
 "#;
 
 const KEYMAP_TEMPLATE: &str = r#"# Qur key bindings. Saved changes apply right away; entries Qur can't use

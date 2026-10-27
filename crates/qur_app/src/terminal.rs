@@ -36,6 +36,7 @@ use qur_theme::{Rgba, TerminalColors};
 
 use crate::commands::{edit, qur, terminal as ta};
 use crate::input::{InputEvent, TextInput};
+use crate::dock::Edge;
 use crate::look::Look;
 use crate::tiling::{self, Motion, Rect};
 
@@ -216,11 +217,143 @@ pub fn shell() -> String {
 
 type Spawned = (Arc<FairMutex<Term<Listener>>>, EventLoopSender, i32, futures::channel::mpsc::UnboundedReceiver<()>);
 
-/// Lines of scrollback for terminals opened from now on (`[terminal] scrollback`).
-static SCROLLBACK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(qur_config::DEFAULT_SCROLLBACK);
+/// `[terminal]` and the colors it and its theme file give. Scrollback and the
+/// cursor style apply to terminals opened from then on; the rest at once.
+#[derive(Default)]
+struct Opts {
+    cfg: qur_config::TerminalConfig,
+    colors: Overrides,
+}
 
-pub fn set_scrollback(n: usize) {
-    SCROLLBACK.store(n, std::sync::atomic::Ordering::Relaxed);
+static OPTS: std::sync::LazyLock<std::sync::RwLock<Opts>> = std::sync::LazyLock::new(Default::default);
+
+fn opts() -> std::sync::RwLockReadGuard<'static, Opts> {
+    OPTS.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Colors from `[terminal]` over the theme's; `None` keeps the theme's.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Overrides {
+    fg: Option<Rgba>,
+    bg: Option<Rgba>,
+    cursor: Option<Rgba>,
+    sel_fg: Option<Rgba>,
+    sel_bg: Option<Rgba>,
+    palette: [Option<Rgba>; 16],
+}
+
+impl Overrides {
+    /// One Ghostty-style setting (`background`, `palette` = `3=#aabbcc`…).
+    /// Unknown keys are left for Ghostty: theme files carry more than colors.
+    fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
+        let color = |v: &str| {
+            let v = v.trim();
+            // Ghostty's own theme files often leave out the `#`.
+            Rgba::parse(v).or_else(|| Rgba::parse(&format!("#{v}"))).ok_or_else(|| format!("{key}: not a color: {v:?}"))
+        };
+        match key {
+            "foreground" => self.fg = Some(color(value)?),
+            "background" => self.bg = Some(color(value)?),
+            "cursor-color" | "cursor_color" => self.cursor = Some(color(value)?),
+            "selection-foreground" | "selection_foreground" => self.sel_fg = Some(color(value)?),
+            "selection-background" | "selection_background" => self.sel_bg = Some(color(value)?),
+            "palette" => {
+                let (n, c) = value.split_once('=').ok_or_else(|| format!("palette: expected N=#rrggbb, got {value:?}"))?;
+                let n: usize = n.trim().parse().map_err(|_| format!("palette: bad index in {value:?}"))?;
+                // 16–255 are the fixed cube and grays here.
+                if n < 16 {
+                    self.palette[n] = Some(color(c)?);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// A Ghostty theme file: `key = value` lines, `#` comments.
+    fn parse_theme(&mut self, text: &str) -> Vec<String> {
+        let mut errors = Vec::new();
+        for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+            if let Some((k, v)) = line.split_once('=')
+                && let Err(e) = self.set(k.trim(), v.trim().trim_matches('"'))
+            {
+                errors.push(e);
+            }
+        }
+        errors
+    }
+}
+
+/// Take `[terminal]` (at launch and on every settings reload). Returns what
+/// was wrong with its colors or theme file, if anything.
+pub fn set_config(cfg: &qur_config::TerminalConfig) -> Option<String> {
+    let mut colors = Overrides::default();
+    let mut errors = Vec::new();
+    if !cfg.theme.is_empty() {
+        let p = Path::new(&cfg.theme);
+        let path = if p.is_absolute() { p.to_path_buf() } else { qur_config::qur_home().join("themes").join(p) };
+        match std::fs::read_to_string(&path) {
+            Ok(t) => errors.extend(colors.parse_theme(&t).into_iter().map(|e| format!("{}: {e}", path.display()))),
+            Err(e) => errors.push(format!("terminal theme {}: {e}", path.display())),
+        }
+    }
+    let keys = [
+        ("foreground", &cfg.foreground),
+        ("background", &cfg.background),
+        ("cursor_color", &cfg.cursor_color),
+        ("selection_foreground", &cfg.selection_foreground),
+        ("selection_background", &cfg.selection_background),
+    ];
+    for (k, v) in keys.into_iter().filter(|(_, v)| !v.is_empty()) {
+        if let Err(e) = colors.set(k, v) {
+            errors.push(format!("[terminal] {e}"));
+        }
+    }
+    for p in &cfg.palette {
+        if let Err(e) = colors.set("palette", p) {
+            errors.push(format!("[terminal] {e}"));
+        }
+    }
+    *OPTS.write().unwrap_or_else(|e| e.into_inner()) = Opts { cfg: cfg.clone(), colors };
+    (!errors.is_empty()).then(|| errors.join("; "))
+}
+
+/// The `[terminal] theme` file in use, if any (watched for edits).
+pub fn theme_path() -> Option<PathBuf> {
+    let t = opts().cfg.theme.clone();
+    (!t.is_empty()).then(|| {
+        let p = Path::new(&t);
+        if p.is_absolute() { p.to_path_buf() } else { qur_config::qur_home().join("themes").join(p) }
+    })
+}
+
+/// The theme's terminal colors with `[terminal]`'s on top.
+pub fn override_colors(t: &mut TerminalColors) {
+    let o = &opts().colors;
+    for (slot, c) in [(&mut t.foreground, o.fg), (&mut t.background, o.bg), (&mut t.cursor, o.cursor), (&mut t.selection, o.sel_bg)] {
+        if let Some(c) = c {
+            *slot = c;
+        }
+    }
+    for (a, c) in t.ansi.iter_mut().zip(o.palette) {
+        if let Some(c) = c {
+            *a = c;
+        }
+    }
+}
+
+fn term_config() -> TermConfig {
+    let c = &opts().cfg;
+    let shape = match c.cursor_style.as_str() {
+        "bar" => CursorShape::Beam,
+        "underline" => CursorShape::Underline,
+        _ => CursorShape::Block,
+    };
+    TermConfig {
+        scrolling_history: c.scrollback,
+        default_cursor_style: alacritty_terminal::vte::ansi::CursorStyle { shape, blinking: c.cursor_blink },
+        ..TermConfig::default()
+    }
 }
 
 fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize, title: TitleCell, colors: ColorsCell) -> std::io::Result<Spawned> {
@@ -229,7 +362,12 @@ fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize, title: TitleCell, colors:
     let listener = Listener(tx, title, reply.clone(), colors);
     let (cols, lines) = (100, 12);
     // `env -u` strips vendor API keys so the CLIs use their own logins.
-    let mut args = vec!["-u".into(), "ANTHROPIC_API_KEY".into(), "-u".into(), "OPENAI_API_KEY".into(), shell(), "-l".into()];
+    // `[terminal] shell` for plain shells; an agent's command is written for $SHELL.
+    let program = match &opts().cfg.shell {
+        s if run.is_none() && !s.trim().is_empty() => s.trim().to_string(),
+        _ => shell(),
+    };
+    let mut args = vec!["-u".into(), "ANTHROPIC_API_KEY".into(), "-u".into(), "OPENAI_API_KEY".into(), program, "-l".into()];
     if let Some(cmd) = run {
         // The shell stays open after the agent exits.
         args.push("-c".into());
@@ -243,12 +381,14 @@ fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize, title: TitleCell, colors:
             ("TERM".into(), "xterm-256color".into()),
             ("COLORTERM".into(), "truecolor".into()),
             ("TERM_PROGRAM".into(), "qur".into()),
+            // `$EDITOR $QUR_CONFIG`: Qur's settings, applied when saved.
+            ("QUR_CONFIG".into(), qur_config::config_path().to_string_lossy().into_owned()),
             // The user's full shell PATH (qur_agents::login_path), so `claude`
             // and friends are found even when Qur was opened from Finder.
             ("PATH".into(), qur_agents::login_path().into()),
         ]),
     };
-    let term = Arc::new(FairMutex::new(Term::new(TermConfig { scrolling_history: SCROLLBACK.load(std::sync::atomic::Ordering::Relaxed), ..TermConfig::default() }, &Dims { cols, lines }, listener.clone())));
+    let term = Arc::new(FairMutex::new(Term::new(term_config(), &Dims { cols, lines }, listener.clone())));
     let pty = tty::new(&opts, WindowSize { num_lines: lines as u16, num_cols: cols as u16, cell_width: 8, cell_height: 16 }, id as u64)?;
     let pid = pty.child().id() as i32;
     let ev = EventLoop::new(term.clone(), listener, pty, false, false)?;
@@ -427,13 +567,46 @@ impl Tile {
 
     /// Put `new` beside `target` (right of it, or below when `vertical`).
     fn split_at(&mut self, target: usize, new: usize, vertical: bool) -> bool {
+        self.place(target, new, if vertical { Edge::Bottom } else { Edge::Right })
+    }
+
+    /// Put `new` beside `target` on `edge` (not Center).
+    fn place(&mut self, target: usize, new: usize, edge: Edge) -> bool {
         match self {
             Tile::Term(id) if *id == target => {
-                *self = Tile::Split { vertical, ratio: 0.5, a: Box::new(Tile::Term(target)), b: Box::new(Tile::Term(new)) };
+                let vertical = matches!(edge, Edge::Top | Edge::Bottom);
+                let (a, b) = if matches!(edge, Edge::Left | Edge::Top) { (new, target) } else { (target, new) };
+                *self = Tile::Split { vertical, ratio: 0.5, a: Box::new(Tile::Term(a)), b: Box::new(Tile::Term(b)) };
                 true
             }
             Tile::Term(_) => false,
-            Tile::Split { a, b, .. } => a.split_at(target, new, vertical) || b.split_at(target, new, vertical),
+            Tile::Split { a, b, .. } => a.place(target, new, edge) || b.place(target, new, edge),
+        }
+    }
+
+    /// A pane dragged onto another (as the agent stage's tabs are): on its
+    /// middle they swap places, else it moves beside it on that edge.
+    fn move_to(&mut self, id: usize, target: usize, edge: Edge) {
+        if id == target || !self.ids().contains(&target) {
+            return;
+        }
+        if edge == Edge::Center {
+            return self.swap(id, target);
+        }
+        if let Some(mut rest) = self.clone().without(id)
+            && rest.place(target, id, edge)
+        {
+            *self = rest;
+        }
+    }
+
+    fn swap(&mut self, x: usize, y: usize) {
+        match self {
+            Tile::Term(t) => *t = if *t == x { y } else if *t == y { x } else { *t },
+            Tile::Split { a, b, .. } => {
+                a.swap(x, y);
+                b.swap(x, y);
+            }
         }
     }
 
@@ -511,6 +684,32 @@ impl Tile {
     }
 }
 
+/// What's being dragged: a split pane (session `id`) of the panel `panel`.
+#[derive(Clone)]
+struct DragPane {
+    panel: gpui::EntityId,
+    id: usize,
+    label: SharedString,
+}
+
+impl Render for DragPane {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let look = Look::of(window, cx);
+        let ui = &look.theme.ui;
+        div()
+            .px(look.z(10.))
+            .py(look.z(3.))
+            .rounded(look.z(4.))
+            .bg(look.c(ui.overlay_bg))
+            .border_1()
+            .border_color(look.c(ui.focus_ring))
+            .text_size(look.text(-1.))
+            .text_color(look.c(ui.text))
+            .font_family(look.ui_font.clone())
+            .child(self.label.clone())
+    }
+}
+
 /// A sidebar row's splits. `owner` is the session the row stands for; the
 /// other panes are shells that belong to it and have no row of their own.
 struct Group {
@@ -530,6 +729,18 @@ pub struct TerminalPanel {
     next_id: usize,
     pub message: Option<String>,
     cell: (Pixels, Pixels),
+    /// `cursor_blink`: the cursor's off half, and the timer that flips it
+    /// while a focused pane draws a blinking cursor (`blink_seen`).
+    blink_off: bool,
+    blink_seen: bool,
+    blink: Option<Task<()>>,
+    /// Where the pointer last was: hover focus follows real moves only, so a
+    /// still pointer never undoes a pane picked with the keyboard.
+    pointer: Option<gpui::Point<Pixels>>,
+    /// A selection dragged past the grid's top or bottom: where the pointer
+    /// is, and the timer scrolling toward it.
+    drag_at: Option<gpui::Point<Pixels>>,
+    drag_scroll: Option<Task<()>>,
     /// Each shown pane's grid, as last painted (mouse hits, focus moves).
     pane_bounds: HashMap<usize, Bounds<Pixels>>,
     selecting: bool,
@@ -546,6 +757,8 @@ pub struct TerminalPanel {
     glide_area: Rc<std::cell::Cell<Bounds<Pixels>>>,
     /// A divider being dragged: its split's path and bounds.
     resizing: Option<(Vec<bool>, Bounds<Pixels>)>,
+    /// A pane being dragged by its grip: the pane under it and where it lands.
+    drop_at: Option<(usize, Edge)>,
     /// Shown as the whole stage (a shell row), not inside an Agent
     /// Terminal's dock pane: with window gaps on, its panes are the tiles.
     /// Set by the workspace as it lays the stage out.
@@ -560,6 +773,9 @@ pub struct TerminalPanel {
     rest_size: HashMap<usize, (Pixels, Pixels)>,
     /// How far above its pane a held grid starts (mouse to cell).
     grid_shift: HashMap<usize, Pixels>,
+    /// `text_align = "right"`: how many columns each screen row of a pane is
+    /// drawn to the right (for mapping the mouse back to cells).
+    row_shift: HashMap<usize, Vec<usize>>,
     /// This window's terminal colors, shared with its sessions' listeners.
     colors: ColorsCell,
 }
@@ -580,22 +796,67 @@ impl TerminalPanel {
             zen_hold: std::cell::Cell::new(false),
             rest_size: HashMap::new(),
             grid_shift: HashMap::new(),
+            row_shift: HashMap::new(),
             selecting: false,
             scroll_px: px(0.),
             find: None,
             idle_check: None,
+            blink_off: false,
+            blink_seen: false,
+            blink: None,
+            pointer: None,
+            drag_at: None,
+            drag_scroll: None,
             groups: Vec::new(),
             moved: HashMap::new(),
             split_bounds: Rc::default(),
             glide: Motion::default(),
             glide_area: Rc::default(),
             resizing: None,
+            drop_at: None,
             colors: ColorsCell::default(),
         }
     }
 
     /// The theme's terminal colors for this window (set as its look changes),
     /// which its terminals answer color queries with.
+    /// A focused pane drew a blinking cursor: flip it every 600 ms until no
+    /// pane does (unfocused, or the program turned blinking off).
+    fn keep_blinking(&mut self, cx: &mut Context<Self>) {
+        self.blink_seen = true;
+        if self.blink.is_some() {
+            return;
+        }
+        let bg = cx.background_executor().clone();
+        self.blink = Some(cx.spawn(async move |this, cx| {
+            loop {
+                bg.timer(Duration::from_millis(600)).await;
+                let go = this
+                    .update(cx, |p, cx| {
+                        let go = std::mem::take(&mut p.blink_seen);
+                        p.blink_off = go && !p.blink_off;
+                        if !go {
+                            p.blink = None;
+                        }
+                        cx.notify();
+                        go
+                    })
+                    .unwrap_or(false);
+                if !go {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// `[terminal]` changed: open terminals take its scrollback and cursor style.
+    pub fn apply_config(&mut self, cx: &mut Context<Self>) {
+        for s in &self.sessions {
+            s.term.lock().set_options(term_config());
+        }
+        cx.notify();
+    }
+
     pub fn set_colors(&self, colors: TerminalColors) {
         *self.colors.lock().unwrap_or_else(|e| e.into_inner()) = Some(colors);
     }
@@ -762,6 +1023,7 @@ impl TerminalPanel {
         self.pane_bounds.remove(&s.id);
         self.rest_size.remove(&s.id);
         self.grid_shift.remove(&s.id);
+        self.row_shift.remove(&s.id);
         cx.emit(PanelEvent::Closed);
         cx.notify();
     }
@@ -866,6 +1128,16 @@ impl TerminalPanel {
         self.split_active(cwd, vertical, false, cx)
     }
 
+    /// Drop the pane `id` onto `target`'s (see `Tile::move_to`); it's an
+    /// arrangement by hand, so closing a pane no longer regrids.
+    fn move_pane(&mut self, id: usize, target: usize, edge: Edge, cx: &mut Context<Self>) {
+        if let Some(g) = self.groups.iter_mut().find(|g| g.tile.ids().contains(&id)) {
+            g.tile.move_to(id, target, edge);
+            g.grid = false;
+        }
+        self.focus_pane(id, cx);
+    }
+
     /// The group the focused session is in.
     fn active_group(&self) -> Option<&Group> {
         let id = self.active_session()?.id;
@@ -897,8 +1169,24 @@ impl TerminalPanel {
 
     /// Cmd+Opt+arrows: focus the nearest pane in that direction.
     fn focus_toward(&mut self, dx: f32, dy: f32, cx: &mut Context<Self>) {
-        let Some(cur) = self.active_session().map(|s| s.id) else { return };
-        let Some(b) = self.pane_bounds.get(&cur).copied() else { return };
+        if let Some(id) = self.neighbor(dx, dy) {
+            self.focus_pane(id, cx);
+        }
+    }
+
+    /// Cmd+Opt+Shift+arrows: swap the focused pane with the one that way; it stays focused.
+    fn move_toward(&mut self, dx: f32, dy: f32, cx: &mut Context<Self>) {
+        let (Some(cur), Some(other)) = (self.active_session().map(|s| s.id), self.neighbor(dx, dy)) else { return };
+        if let Some(g) = self.groups.iter_mut().find(|g| g.tile.ids().contains(&cur)) {
+            g.tile.swap(cur, other);
+            cx.notify();
+        }
+    }
+
+    /// The nearest shown pane in that direction from the focused one.
+    fn neighbor(&self, dx: f32, dy: f32) -> Option<usize> {
+        let cur = self.active_session().map(|s| s.id)?;
+        let b = self.pane_bounds.get(&cur).copied()?;
         let c = b.center();
         let best = self
             .shown()
@@ -921,9 +1209,7 @@ impl TerminalPanel {
                 beyond.then(|| (id, f32::from(along).abs() + 2. * f32::from(across).abs()))
             })
             .min_by(|a, b| a.1.total_cmp(&b.1));
-        if let Some((id, _)) = best {
-            self.focus_pane(id, cx);
-        }
+        best.map(|(id, _)| id)
     }
 
     fn focus_left(&mut self, _: &ta::FocusLeft, _: &mut Window, cx: &mut Context<Self>) {
@@ -937,6 +1223,18 @@ impl TerminalPanel {
     }
     fn focus_down(&mut self, _: &ta::FocusDown, _: &mut Window, cx: &mut Context<Self>) {
         self.focus_toward(0., 1., cx)
+    }
+    fn move_left(&mut self, _: &ta::MovePaneLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_toward(-1., 0., cx)
+    }
+    fn move_right(&mut self, _: &ta::MovePaneRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_toward(1., 0., cx)
+    }
+    fn move_up(&mut self, _: &ta::MovePaneUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_toward(0., -1., cx)
+    }
+    fn move_down(&mut self, _: &ta::MovePaneDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_toward(0., 1., cx)
     }
 
 
@@ -1024,7 +1322,8 @@ impl TerminalPanel {
             .active_session()
             .map(|s| s.term.lock().mode().contains(TermMode::APP_CURSOR))
             .unwrap_or(false);
-        if let Some(b) = key_bytes(&ev.keystroke, app_cursor) {
+        self.blink_off = false;
+        if let Some(b) = key_bytes(&ev.keystroke, app_cursor, opts().cfg.option_as_alt) {
             self.write_active(b, cx);
             cx.stop_propagation();
         }
@@ -1052,7 +1351,10 @@ impl TerminalPanel {
     fn back_tab(&mut self, _: &ta::SendBackTab, _: &mut Window, cx: &mut Context<Self>) {
         self.write_active(b"\x1b[Z".to_vec(), cx)
     }
-    fn copy(&mut self, _: &edit::Copy, _: &mut Window, cx: &mut Context<Self>) {
+    fn copy_action(&mut self, a: &edit::Copy, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy(a, cx)
+    }
+    fn copy(&mut self, _: &edit::Copy, cx: &mut Context<Self>) {
         let Some(s) = self.active_session() else { return };
         let text = s.selected_text.clone().or_else(|| s.term.lock().selection_to_string()).filter(|t| !t.is_empty());
         if let Some(t) = text {
@@ -1110,6 +1412,10 @@ impl TerminalPanel {
         cx.notify();
     }
     fn close_terminal(&mut self, _: &qur::CloseTerminal, _: &mut Window, cx: &mut Context<Self>) {
+        // The last shell: the workspace closes the window instead.
+        if self.active_session().is_some_and(|s| s.kind == Kind::Shell) && self.sessions.iter().filter(|s| s.kind == Kind::Shell).count() == 1 {
+            return cx.propagate();
+        }
         if let Some(id) = self.active_session().map(|s| s.id) {
             self.close_newest(id, cx);
         }
@@ -1119,11 +1425,12 @@ impl TerminalPanel {
         let id = self.active_session().map(|s| s.id);
         let b = id.and_then(|id| self.pane_bounds.get(&id)).copied().unwrap_or_default();
         let shift = id.and_then(|id| self.grid_shift.get(&id)).copied().unwrap_or_default();
-        let x = (p.x - b.left()).max(px(0.));
-        let col = (x / self.cell.0).floor() as usize;
-        let side = if (x / self.cell.0).fract() < 0.5 { Side::Left } else { Side::Right };
         let row = ((p.y - b.top()).max(px(0.)) + shift) / self.cell.1;
         let row = row.floor() as i32;
+        let moved = id.and_then(|id| self.row_shift.get(&id)).and_then(|v| v.get(row.max(0) as usize)).copied().unwrap_or(0);
+        let x = (p.x - b.left() - self.cell.0 * moved as f32).max(px(0.));
+        let col = (x / self.cell.0).floor() as usize;
+        let side = if (x / self.cell.0).fract() < 0.5 { Side::Left } else { Side::Right };
         (TPoint::new(Line(row - display_offset as i32), Column(col)), side)
     }
 
@@ -1270,7 +1577,7 @@ impl TerminalPanel {
         cx.notify();
     }
 
-    fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_move(&mut self, ev: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((path, b)) = self.resizing.clone() {
             if ev.pressed_button != Some(MouseButton::Left) {
                 self.resizing = None;
@@ -1284,26 +1591,83 @@ impl TerminalPanel {
             }
             return;
         }
+        // Focus follows the pointer between split panes, while the terminal has focus.
+        let moved = self.pointer.replace(ev.position).is_some_and(|p| p != ev.position);
+        if ev.pressed_button.is_none()
+            && moved
+            && opts().cfg.focus_follows_mouse
+            && self.focus.is_focused(window)
+            && let Some(id) = self.pane_at(ev.position)
+            && Some(id) != self.active_session().map(|s| s.id)
+        {
+            self.focus_pane(id, cx);
+        }
         if !(self.selecting && ev.pressed_button == Some(MouseButton::Left)) {
             self.selecting = false;
-            return;
         }
+        // Dragging a selection: the window-wide listener in `GridElement::paint`.
+    }
+
+    /// Extend the selection to the pointer; past the grid's top or bottom it
+    /// takes the edge row and the view scrolls that way (`drag_scroll_step`).
+    fn drag_to(&mut self, pos: gpui::Point<Pixels>, cx: &mut Context<Self>) {
         let ix = self.active;
-        if let Some(s) = self.sessions.get_mut(ix) {
-            // Output may have erased the selection mid-drag.
-            s.restore_selection();
-            let s = &self.sessions[ix];
-            let mut t = s.term.lock();
-            let off = t.grid().display_offset();
-            let (p, side) = self.grid_point(ev.position, off);
-            let p = TPoint::new(p.line, p.column.min(t.last_column()));
-            if let Some(sel) = t.selection.as_mut() {
-                sel.update(p, side);
-            }
-            drop(t);
-            self.sessions[ix].remember_selection();
+        let Some(b) = self.sessions.get(ix).and_then(|s| self.pane_bounds.get(&s.id)).copied() else { return };
+        self.drag_at = Some(pos);
+        // Output may have erased the selection mid-drag.
+        self.sessions[ix].restore_selection();
+        let inside = point(pos.x.clamp(b.left(), b.right()), pos.y.clamp(b.top(), b.bottom() - px(1.)));
+        let mut t = self.sessions[ix].term.lock();
+        let off = t.grid().display_offset();
+        let (p, side) = self.grid_point(inside, off);
+        let p = TPoint::new(p.line, p.column.min(t.last_column()));
+        if let Some(sel) = t.selection.as_mut() {
+            sel.update(p, side);
+        }
+        drop(t);
+        self.sessions[ix].remember_selection();
+        if (pos.y < b.top() || pos.y > b.bottom()) && self.drag_scroll.is_none() {
+            let bg = cx.background_executor().clone();
+            self.drag_scroll = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    bg.timer(Duration::from_millis(50)).await;
+                    if !this.update(cx, |p, cx| p.drag_scroll_step(cx)).unwrap_or(false) {
+                        break;
+                    }
+                }
+            }));
         }
         cx.notify();
+    }
+
+    /// One tick of drag-scrolling: faster the farther the pointer is past the edge.
+    fn drag_scroll_step(&mut self, cx: &mut Context<Self>) -> bool {
+        let b = self.sessions.get(self.active).and_then(|s| self.pane_bounds.get(&s.id)).copied();
+        let (Some(pos), Some(b), true) = (self.drag_at, b, self.selecting) else {
+            self.drag_scroll = None;
+            return false;
+        };
+        let lh = self.cell.1;
+        let lines = if pos.y < b.top() {
+            1 + ((b.top() - pos.y) / lh) as i32
+        } else if pos.y > b.bottom() {
+            -(1 + ((pos.y - b.bottom()) / lh) as i32)
+        } else {
+            self.drag_scroll = None;
+            return false;
+        };
+        self.sessions[self.active].term.lock().scroll_display(Scroll::Delta(lines.clamp(-8, 8)));
+        self.drag_to(pos, cx);
+        true
+    }
+
+    /// The mouse button came up: the selection is made (copied if `copy_on_select`).
+    fn end_select(&mut self, cx: &mut Context<Self>) {
+        self.drag_scroll = None;
+        self.drag_at = None;
+        if std::mem::take(&mut self.selecting) && opts().cfg.copy_on_select {
+            self.copy(&edit::Copy, cx);
+        }
     }
 
     /// Trackpads send a few pixels per event, so whole lines are taken from a
@@ -1318,7 +1682,7 @@ impl TerminalPanel {
             TouchPhase::Ended | TouchPhase::Cancelled => return,
         }
         let before = (self.scroll_px / lh) as i32;
-        self.scroll_px += ev.delta.pixel_delta(lh).y;
+        self.scroll_px += ev.delta.pixel_delta(lh).y * opts().cfg.scroll_multiplier;
         let lines = (self.scroll_px / lh) as i32 - before;
         // Keep the remainder small so a change of direction answers at once.
         self.scroll_px %= lh;
@@ -1355,7 +1719,8 @@ impl TerminalPanel {
 }
 
 /// Non-text keys -> bytes. Printable text comes through the input handler.
-fn key_bytes(ks: &gpui::Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
+/// `meta`: `[terminal] option_as_alt`, Option+key sends Esc+key.
+fn key_bytes(ks: &gpui::Keystroke, app_cursor: bool, meta: bool) -> Option<Vec<u8>> {
     let m = &ks.modifiers;
     if m.platform {
         return None;
@@ -1376,6 +1741,10 @@ fn key_bytes(ks: &gpui::Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
             "right" => Some(b"\x1bf".to_vec()),
             "backspace" => Some(b"\x1b\x7f".to_vec()),
             "enter" => Some(b"\x1b\r".to_vec()),
+            k if meta && k.len() == 1 => {
+                let k = if m.shift { k.to_ascii_uppercase() } else { k.to_string() };
+                Some([b"\x1b", k.as_bytes()].concat())
+            }
             _ => None,
         };
     }
@@ -1469,6 +1838,8 @@ struct GridRow {
     bgs: Vec<(usize, usize, u32)>,
     /// Block and box-drawing characters, drawn as shapes (column, shape, color).
     shapes: Vec<(usize, Shape, u32)>,
+    /// Columns drawn to the right (`text_align = "right"`).
+    shift: usize,
 }
 
 struct GridPrepaint {
@@ -1477,7 +1848,15 @@ struct GridPrepaint {
     top: Pixels,
     rows: Vec<GridRow>,
     cursor: Option<(usize, usize, CursorShape)>,
+    blink: bool,
     has_content: bool,
+}
+
+/// A pane's grid area: inside `[terminal] padding_x` / `padding_y`.
+fn padded(b: Bounds<Pixels>, look: &Look) -> Bounds<Pixels> {
+    let c = &opts().cfg;
+    let (x, y) = (look.z(c.padding_x), look.z(c.padding_y));
+    Bounds::new(point(b.left() + x, b.top() + y), size((b.size.width - x * 2.).max(px(0.)), (b.size.height - y * 2.).max(px(0.))))
 }
 
 impl IntoElement for GridElement {
@@ -1507,11 +1886,19 @@ impl Element for GridElement {
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) -> GridPrepaint {
         let look = Look::of(window, cx);
         let tc = look.theme.terminal.clone();
-        let fs = look.z(look.code_size - 1.);
-        let f = font(look.code_font.clone());
+        let bounds = padded(bounds, &look);
+        let (base, family, line_height, bold_bright, sel_fg, right) = {
+            let o = opts();
+            let c = &o.cfg;
+            let base = if c.font_size > 0. { c.font_size } else { look.code_size - 1. };
+            let family = if c.font_family.is_empty() { look.code_font.clone() } else { c.font_family.clone().into() };
+            (base, family, c.line_height, c.bold_is_bright, o.colors.sel_fg.map(rgb), c.text_align == "right")
+        };
+        let fs = look.z(base);
+        let f = font(family);
         let ts = window.text_system().clone();
         let cw = ts.advance(ts.resolve_font(&f), fs, 'm').map(|s| s.width).unwrap_or(px(7.));
-        let lh = look.z(((look.code_size - 1.) * 1.3).round());
+        let lh = look.z((base * line_height).round());
         let id = self.id;
         // Zen's bar out: the size from before it came, bottom edges together.
         let grid = self.panel.update(cx, |p, _| match p.rest_size.get(&id).copied() {
@@ -1527,7 +1914,7 @@ impl Element for GridElement {
         });
         let cols = ((grid.size.width / cw).floor() as usize).max(2);
         let lines = ((grid.size.height / lh).floor() as usize).max(1);
-        let mut out = GridPrepaint { top: grid.top(), rows: Vec::new(), cursor: None, has_content: false };
+        let mut out = GridPrepaint { top: grid.top(), rows: Vec::new(), cursor: None, blink: false, has_content: false };
         self.panel.update(cx, |p, _| {
             p.cell = (cw, lh);
             p.pane_bounds.insert(id, bounds);
@@ -1562,6 +1949,9 @@ impl Element for GridElement {
         let mut runs: Vec<Vec<TextRun>> = vec![Vec::new(); n_lines];
         let mut bgs: Vec<Vec<(usize, usize, u32)>> = vec![Vec::new(); n_lines];
         let mut shapes: Vec<Vec<(usize, Shape, u32)>> = vec![Vec::new(); n_lines];
+        // Columns in use per row: what right alignment pushes to the edge.
+        let mut used = vec![0usize; n_lines];
+        let right = right && !term.mode().contains(TermMode::ALT_SCREEN);
         let mk = |len: usize, color: u32, bold: bool| TextRun {
             len,
             font: if bold { gpui::Font { weight: gpui::FontWeight::BOLD, ..f.clone() } } else { f.clone() },
@@ -1582,7 +1972,13 @@ impl Element for GridElement {
             }
             let col = ic.point.column.0;
             let dim = cell.flags.contains(Flags::DIM);
-            let mut fg = resolve(cell.fg, &term, false, dim, &tc).unwrap_or(rgb(tc.foreground));
+            let bold = cell.flags.contains(Flags::BOLD);
+            let fgc = match cell.fg {
+                Color::Named(n) if bold && bold_bright && (n as usize) < 8 => Color::Indexed(n as u8 + 8),
+                Color::Indexed(i) if bold && bold_bright && i < 8 => Color::Indexed(i + 8),
+                c => c,
+            };
+            let mut fg = resolve(fgc, &term, false, dim, &tc).unwrap_or(rgb(tc.foreground));
             let mut bg = resolve(cell.bg, &term, true, false, &tc);
             if cell.flags.contains(Flags::INVERSE) {
                 let old_bg = bg.unwrap_or(rgb(tc.background));
@@ -1591,6 +1987,7 @@ impl Element for GridElement {
             }
             if sel.is_some_and(|r| r.contains(ic.point)) {
                 bg = Some(rgb(tc.selection));
+                fg = sel_fg.unwrap_or(fg);
             }
             if let Some(b) = bg {
                 match bgs[row].last_mut() {
@@ -1601,16 +1998,16 @@ impl Element for GridElement {
             let mut ch = if cell.flags.contains(Flags::HIDDEN) { ' ' } else { cell.c };
             // Drawn edge to edge instead of with the font, whose glyphs don't
             // fill the taller line (so logos and boxes had gaps).
+            let drawn = ch != ' ';
             if let Some(shape) = shape_of(ch) {
                 shapes[row].push((col, shape, fg));
                 ch = ' ';
-                out.has_content = true;
             }
-            if ch != ' ' {
-                out.has_content = true;
+            out.has_content |= drawn;
+            if drawn || bg.is_some() {
+                used[row] = used[row].max(col + if cell.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 });
             }
             // Pad skipped columns (after wide chars) to keep the grid aligned.
-            let bold = cell.flags.contains(Flags::BOLD);
             let len = ch.len_utf8();
             text[row].push(ch);
             match runs[row].last_mut() {
@@ -1623,18 +2020,31 @@ impl Element for GridElement {
             let r = cur.point.line.0;
             if r >= 0 && (r as usize) < n_lines {
                 out.cursor = Some((r as usize, cur.point.column.0, cur.shape));
+                used[r as usize] = used[r as usize].max(cur.point.column.0 + 1);
             }
         }
+        let cols_now = term.columns();
+        let shifts: Vec<usize> = used.iter().map(|&u| if right { cols_now.saturating_sub(u) } else { 0 }).collect();
+        out.blink = term.cursor_style().blinking;
         drop(term);
         for (i, (t, r)) in text.into_iter().zip(runs).enumerate() {
             let shaped = ts.shape_line(SharedString::from(t), fs, &r, None);
-            out.rows.push(GridRow { y: grid.top() + lh * i as f32, text: shaped, bgs: std::mem::take(&mut bgs[i]), shapes: std::mem::take(&mut shapes[i]) });
+            out.rows.push(GridRow { y: grid.top() + lh * i as f32, text: shaped, bgs: std::mem::take(&mut bgs[i]), shapes: std::mem::take(&mut shapes[i]), shift: shifts[i] });
         }
+        self.panel.update(cx, |p, _| {
+            p.row_shift.insert(id, shifts);
+        });
         out
     }
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), pre: &mut GridPrepaint, window: &mut Window, cx: &mut App) {
-        let cursor_color = Look::of(window, cx).theme.terminal.cursor;
+        let look = Look::of(window, cx);
+        let cursor_color = look.theme.terminal.cursor;
+        // A `[terminal] background` fills the pane; the theme's is the pane's own.
+        if let Some(bg) = opts().colors.bg {
+            window.paint_quad(fill(bounds, look.bg(bg)));
+        }
+        let bounds = padded(bounds, &look);
         let p = self.panel.read(cx);
         let focus = p.focus.clone();
         let mine = p.active_session().is_some_and(|s| s.id == self.id);
@@ -1642,27 +2052,50 @@ impl Element for GridElement {
         let (cw, lh) = p.cell;
         if mine {
             window.handle_input(&focus, ElementInputHandler::new(bounds, self.panel.clone()), cx);
+            // Window-wide, so a selection dragged out of the pane keeps going.
+            let panel = self.panel.clone();
+            window.on_mouse_event(move |ev: &gpui::MouseMoveEvent, phase, _, cx| {
+                if phase == gpui::DispatchPhase::Bubble && ev.pressed_button == Some(MouseButton::Left) {
+                    panel.update(cx, |p, cx| {
+                        if p.selecting {
+                            p.drag_to(ev.position, cx);
+                        }
+                    });
+                }
+            });
+            let panel = self.panel.clone();
+            window.on_mouse_event(move |ev: &gpui::MouseUpEvent, phase, _, cx| {
+                if phase == gpui::DispatchPhase::Bubble && ev.button == MouseButton::Left {
+                    panel.update(cx, |p, cx| p.end_select(cx));
+                }
+            });
         }
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             for row in &pre.rows {
+                let left = bounds.left() + cw * row.shift as f32;
                 for &(a, b, c) in &row.bgs {
                     window.paint_quad(fill(
-                        Bounds::new(point(bounds.left() + cw * a as f32, row.y), size(cw * (b - a) as f32, lh)),
+                        Bounds::new(point(left + cw * a as f32, row.y), size(cw * (b - a) as f32, lh)),
                         hex(c),
                     ));
                 }
                 for &(col, shape, c) in &row.shapes {
-                    let cell = Bounds::new(point(bounds.left() + cw * col as f32, row.y), size(cw, lh));
+                    let cell = Bounds::new(point(left + cw * col as f32, row.y), size(cw, lh));
                     for (r, alpha) in shape.rects(cell) {
                         let mut color = hex(c);
                         color.a *= alpha;
                         window.paint_quad(fill(r, color));
                     }
                 }
-                row.text.paint(point(bounds.left(), row.y), lh, gpui::TextAlign::Left, None, window, cx).ok();
+                row.text.paint(point(left, row.y), lh, gpui::TextAlign::Left, None, window, cx).ok();
             }
-            if let Some((r, c, shape)) = pre.cursor {
-                let origin = point(bounds.left() + cw * c as f32, pre.top + lh * r as f32);
+            let blinking = focused && pre.blink && pre.cursor.is_some();
+            if blinking {
+                self.panel.update(cx, |p, cx| p.keep_blinking(cx));
+            }
+            if let Some((r, c, shape)) = pre.cursor.filter(|_| !(blinking && self.panel.read(cx).blink_off)) {
+                let shift = pre.rows.get(r).map_or(0, |row| row.shift);
+                let origin = point(bounds.left() + cw * (c + shift) as f32, pre.top + lh * r as f32);
                 let q = match (focused, shape) {
                     (true, CursorShape::Beam) => fill(Bounds::new(origin, size(px(2.), lh)), crate::look::hsla(cursor_color)),
                     (true, CursorShape::Underline) => fill(Bounds::new(point(origin.x, origin.y + lh - px(2.)), size(cw, px(2.))), crate::look::hsla(cursor_color)),
@@ -1684,6 +2117,9 @@ impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
         let ui = look.theme.ui.clone();
+        if !cx.has_active_drag() {
+            self.drop_at = None;
+        }
         let split = self.active_group().is_some();
         let tiles = match self.active_group().map(|g| g.tile.clone()) {
             Some(t) => Some(self.gliding(&t, true, &look, cx)),
@@ -1707,7 +2143,7 @@ impl Render for TerminalPanel {
             .on_action(cx.listener(Self::line_end))
             .on_action(cx.listener(Self::kill_line))
             .on_action(cx.listener(Self::back_tab))
-            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::copy_action))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::close_terminal))
@@ -1716,6 +2152,10 @@ impl Render for TerminalPanel {
             .on_action(cx.listener(Self::focus_right))
             .on_action(cx.listener(Self::focus_up))
             .on_action(cx.listener(Self::focus_down))
+            .on_action(cx.listener(Self::move_left))
+            .on_action(cx.listener(Self::move_right))
+            .on_action(cx.listener(Self::move_up))
+            .on_action(cx.listener(Self::move_down))
             .children(message)
             .children(self.find.as_ref().map(|f| {
                 div()
@@ -1755,7 +2195,13 @@ impl Render for TerminalPanel {
                     }))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
-                    .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.resizing = None))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.resizing = None;
+                            this.end_select(cx);
+                        }),
+                    )
                     .on_scroll(cx.listener(Self::on_scroll))
                     .children(tiles),
             )
@@ -1814,14 +2260,75 @@ impl TerminalPanel {
                 } else {
                     gpui::transparent_black()
                 };
+                let id = *id;
+                let accent = look.c(look.theme.accents[0].base);
+                let group = SharedString::from(format!("term-pane-{id}"));
+                // Dragged by the grip on its top edge (shown on hover) onto
+                // another pane: a preview shows where it lands, as on the agent stage.
+                let grip = split.then(|| {
+                    let label: SharedString = self.session_by_id(id).map(|s| s.label.clone()).unwrap_or_default().into();
+                    div()
+                        .id(SharedString::from(format!("term-grip-{id}")))
+                        .absolute()
+                        .top_0()
+                        .left(relative(0.5))
+                        .ml(look.z(-24.))
+                        .w(look.z(48.))
+                        .h(look.z(10.))
+                        .flex()
+                        .justify_center()
+                        .pt(look.z(2.))
+                        .cursor_grab()
+                        .opacity(0.)
+                        .group_hover(group.clone(), |d| d.opacity(1.))
+                        .child(div().w(look.z(28.)).h(look.z(4.)).rounded(look.z(2.)).bg(look.c(ui.text_muted)).hover(|d| d.bg(accent)))
+                        .children(crate::script::mark(|| format!("term-grip:{id}")))
+                        // Not a text selection in the grid underneath.
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_drag(DragPane { panel: cx.entity_id(), id, label }, |d: &DragPane, _, _, cx| cx.new(|_| d.clone()))
+                });
+                let preview = self.drop_at.filter(|(t, _)| *t == id).map(|(_, e)| {
+                    let mut fill = accent;
+                    fill.a = 0.16;
+                    let half = relative(0.5);
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .when(e == Edge::Right, |d| d.left(half))
+                        .when(e == Edge::Bottom, |d| d.top(half))
+                        .when(matches!(e, Edge::Left | Edge::Right), |d| d.w(half))
+                        .when(matches!(e, Edge::Top | Edge::Bottom), |d| d.h(half))
+                        .child(div().size_full().p(look.z(6.)).child(div().size_full().rounded(look.z(10.)).bg(fill).border_2().border_color(accent)))
+                });
                 d.size_full()
+                    .relative()
+                    .group(group)
                     .px(look.z(8.))
                     .py(look.z(4.))
                     // Tiling-WM look: each pane its own rounded box, the
                     // focused one outlined in the accent.
                     .when(split && !tiled, |d| d.rounded(look.z(6.)))
                     .when(split || tiled && look.tiles.is_some_and(|t| t.border), |d| d.border_1().border_color(edge))
-                    .child(GridElement { panel: cx.entity(), id: *id })
+                    .child(GridElement { panel: cx.entity(), id })
+                    .children(grip)
+                    .children(preview)
+                    .on_drag_move::<DragPane>(cx.listener(move |this, ev: &gpui::DragMoveEvent<DragPane>, _, cx| {
+                        let t = ev.drag(cx);
+                        if t.panel != cx.entity_id() || !ev.bounds.contains(&ev.event.position) {
+                            return;
+                        }
+                        let at = (t.id != id).then(|| (id, crate::dock::edge_at(ev.bounds, ev.event.position, px(0.))));
+                        if std::mem::replace(&mut this.drop_at, at) != at {
+                            cx.notify();
+                        }
+                    }))
+                    .on_drop(cx.listener(move |this, t: &DragPane, _, cx| {
+                        if let Some((target, edge)) = this.drop_at.take().filter(|(target, _)| *target == id && t.panel == cx.entity_id()) {
+                            this.move_pane(t.id, target, edge, cx);
+                        }
+                    }))
                     .into_any_element()
             }
             Tile::Split { vertical, ratio, a, b } => {
@@ -2127,10 +2634,14 @@ fn shell_quote(s: &str) -> String {
 mod tests {
     #[test]
     fn shift_enter_is_newline() {
-        let k = |s| super::key_bytes(&gpui::Keystroke::parse(s).unwrap(), false);
+        let k = |s| super::key_bytes(&gpui::Keystroke::parse(s).unwrap(), false, false);
         assert_eq!(k("enter"), Some(b"\r".to_vec()));
         assert_eq!(k("shift-enter"), Some(b"\x1b\r".to_vec()));
         assert_eq!(k("alt-enter"), Some(b"\x1b\r".to_vec()));
+        let meta = |s| super::key_bytes(&gpui::Keystroke::parse(s).unwrap(), false, true);
+        assert_eq!(meta("alt-f"), Some(b"\x1bf".to_vec()));
+        assert_eq!(meta("alt-shift-f"), Some(b"\x1bF".to_vec()));
+        assert_eq!(k("alt-f"), None);
     }
 
     use super::*;
@@ -2297,6 +2808,25 @@ mod tests {
     }
 
     #[test]
+    fn dragged_panes() {
+        let term = |i| Box::new(Tile::Term(i));
+        // 1 | (2 / 3)
+        let mut t = Tile::Term(1);
+        t.split_at(1, 2, false);
+        t.split_at(2, 3, true);
+        let before = t.clone();
+        t.move_to(1, 1, Edge::Left);
+        t.move_to(1, 9, Edge::Left);
+        assert_eq!(t, before, "onto itself or a pane not here");
+        t.move_to(1, 3, Edge::Center);
+        assert_eq!(t.ids(), vec![3, 2, 1], "the middle swaps");
+        t.move_to(3, 1, Edge::Top);
+        assert_eq!(t, Tile::Split { vertical: true, ratio: 0.5, a: term(2), b: Box::new(Tile::Split { vertical: true, ratio: 0.5, a: term(3), b: term(1) }) });
+        t.move_to(2, 1, Edge::Right);
+        assert_eq!(t, Tile::Split { vertical: true, ratio: 0.5, a: term(3), b: Box::new(Tile::Split { vertical: false, ratio: 0.5, a: term(1), b: term(2) }) });
+    }
+
+    #[test]
     fn cmd_click_links() {
         let line = "  --> src/main.rs:12:5 (see https://example.com/x).";
         let at = |needle: &str| line.find(needle).unwrap();
@@ -2310,5 +2840,16 @@ mod tests {
         assert_eq!(classify_link("hello"), None);
         assert_eq!(classify_link("-->"), None);
         assert_eq!(link_at("error: 'lib/a.py', line 3", 9).as_deref(), Some("lib/a.py"));
+    }
+
+    #[test]
+    fn ghostty_theme_files() {
+        let mut o = super::Overrides::default();
+        let errs = o.parse_theme("# Dracula\npalette = 1=#ff5555\npalette = 200=#123456\nbackground = 282a36\nforeground = #f8f8f2\nfont-size = 14\ncursor-color = nope\n");
+        assert_eq!(o.palette[1], qur_theme::Rgba::parse("#ff5555"));
+        assert_eq!(o.bg, qur_theme::Rgba::parse("#282a36"));
+        assert_eq!(o.fg, qur_theme::Rgba::parse("#f8f8f2"));
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(o.set("palette", "x").is_err());
     }
 }

@@ -8,6 +8,7 @@
 //! - `key:<keystrokes>` presses keys, space-separated, as in keymaps: `key:cmd-shift-p`, `key:escape d d`, `key:cmd-\,` (Cmd+,).
 //! - `click:<at>`, `dclick:` (double), `rclick:` (right), `cmdclick:` (with Cmd).
 //! - `drag:<at>,<at>` presses, moves there in small steps (a frame apart), and releases.
+//!   `draghold:<ms>,<at>,<at>` holds the button that long at the end first (edge scrolling).
 //! - `move:<at>` moves the mouse there (no button), as hovering does.
 //! - `scroll:<at>,<dy>` turns the wheel over a point by `dy` points (negative scrolls down).
 //! - `state` prints a `STATE …` line: overlay, code modal, terminal find, git panel, docks.
@@ -76,7 +77,7 @@ pub enum Step {
     Type(String),
     Keys(String),
     Click { at: At, button: MouseButton, count: usize, cmd: bool },
-    Drag { from: At, to: At },
+    Drag { from: At, to: At, hold: u64 },
     Move(At),
     Scroll { at: At, dy: f32 },
     State,
@@ -118,7 +119,14 @@ pub fn parse(list: &str) -> Result<Vec<Step>, String> {
             "drag" => {
                 let from = at(&p, rest, &mut parts)?;
                 let next = parts.next().ok_or_else(|| format!("{p}: needs a second point"))?;
-                Step::Drag { from, to: at(&p, &next, &mut parts)? }
+                Step::Drag { from, to: at(&p, &next, &mut parts)?, hold: 0 }
+            }
+            "draghold" => {
+                let hold = rest.parse().map_err(|_| format!("{p}: {rest}: not a number"))?;
+                let first = parts.next().ok_or_else(|| format!("{p}: needs two points"))?;
+                let from = at(&p, &first, &mut parts)?;
+                let next = parts.next().ok_or_else(|| format!("{p}: needs a second point"))?;
+                Step::Drag { from, to: at(&p, &next, &mut parts)?, hold }
             }
             "move" => Step::Move(at(&p, rest, &mut parts)?),
             "scroll" => {
@@ -287,7 +295,7 @@ pub fn run(handle: AnyWindowHandle, list: &str, cx: &mut App) {
                         pause(30).await;
                     }
                 }
-                Step::Drag { from, to } => {
+                Step::Drag { from, to, hold } => {
                     let (Some(a), Some(b)) = (resolve(handle, cx, &from), resolve(handle, cx, &to)) else { continue };
                     println!("INPUT drag {from:?} -> {to:?} at {:.0},{:.0} -> {:.0},{:.0} t={t}ms", f32::from(a.x), f32::from(a.y), f32::from(b.x), f32::from(b.y));
                     let at = |f: f32| point(a.x + (b.x - a.x) * f, a.y + (b.y - a.y) * f);
@@ -301,7 +309,7 @@ pub fn run(handle: AnyWindowHandle, list: &str, cx: &mut App) {
                         let p = at(i as f32 / STEPS as f32);
                         mouse(handle, cx, PlatformInput::MouseMove(MouseMoveEvent { position: p, pressed_button: Some(left), modifiers: m }));
                     }
-                    pause(30).await;
+                    pause(30 + hold).await;
                     mouse(handle, cx, PlatformInput::MouseUp(MouseUpEvent { button: left, position: b, modifiers: m, click_count: 1 }));
                 }
                 Step::Move(at) => {
@@ -364,7 +372,7 @@ mod tests {
                 Step::Type("a, b\n".into()),
                 Step::Keys("cmd-shift-p escape".into()),
                 Step::Click { at: At::Xy(10., 20.), button: MouseButton::Left, count: 1, cmd: false },
-                Step::Drag { from: At::Xy(1., 2.), to: At::Mark("tab:X".into(), 0.9, 0.1) },
+                Step::Drag { from: At::Xy(1., 2.), to: At::Mark("tab:X".into(), 0.9, 0.1), hold: 0 },
                 Step::Click { at: At::Mark("agent:tt-1".into(), 0.5, 0.5), button: MouseButton::Right, count: 1, cmd: false },
                 Step::Scroll { at: At::Mark("list".into(), 0.5, 0.5), dy: -120. },
                 Step::State,
