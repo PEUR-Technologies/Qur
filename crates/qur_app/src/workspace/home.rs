@@ -20,6 +20,36 @@ impl Workspace {
         self.home && self.shells.is_empty() && self.buffers.dirty(cx).is_empty()
     }
 
+    /// The terminals, for the project this empty window is becoming (main.rs
+    /// `become_project`). None when it isn't one, or has unsaved files (they'd be lost).
+    pub fn hand_over(&self, cx: &App) -> Option<Carry> {
+        if !self.home || !self.buffers.dirty(cx).is_empty() {
+            return None;
+        }
+        let shown = match self.selected {
+            Some(Selected::Shell(tid)) => Some(tid),
+            _ => self.shells.first().copied(),
+        };
+        Some((self.terms.clone(), self.shells.clone(), shown))
+    }
+
+    /// A shell in the empty window cd'd into a project (a git work tree): the
+    /// window becomes that project's, terminals and all.
+    pub(super) fn follow_cd(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.home {
+            return;
+        }
+        let panel = self.terms.read(cx);
+        let root = self
+            .shells
+            .iter()
+            .filter_map(|&tid| crate::terminal::cwd_of(panel.session_by_id(tid)?.pid()))
+            .filter_map(|d| d.ancestors().find(|a| a.join(".git").exists()).map(Path::to_path_buf))
+            .find(|r| !crate::too_broad(r));
+        let (Some(root), Some(handle)) = (root, window.window_handle().downcast::<Workspace>()) else { return };
+        cx.defer(move |cx| _ = crate::become_project(handle, root, None, cx));
+    }
+
     /// A message in the top bar (main.rs: why the empty window opened).
     pub fn note(&mut self, msg: String, cx: &mut Context<Self>) {
         self.flash(msg, cx);

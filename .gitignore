@@ -5,3 +5,4 @@ target/
 .DS_Store
 /spikes/fixtures/web-repo/
 /.claude/
+/QUR_SITE_NOTES.md

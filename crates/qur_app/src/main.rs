@@ -1,8 +1,9 @@
 //! Qur: a lightweight agentic code editor for macOS.
 //!
 //! `qur [path]` opens a folder as a project, or a file in its project.
-//! Without a path it reopens the most recent project, else shows the empty
-//! window (no project: recent projects, Open Folder…, terminals).
+//! Without a path (opened from Spotlight or the Dock) it's a terminal: the
+//! empty window with a shell, which becomes a project's window once the
+//! shell cd's into one or a folder is picked.
 
 mod assets;
 mod agent_view;
@@ -45,7 +46,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use gpui::{
-    AnyWindowHandle, App, AppContext, Bounds, PathPromptOptions, TitlebarOptions, WindowBounds, WindowHandle,
+    AnyWindowHandle, App, AppContext, Bounds, Entity, PathPromptOptions, TitlebarOptions, Window, WindowBounds, WindowHandle,
     WindowOptions, point, px, size,
 };
 
@@ -119,7 +120,7 @@ fn project_root_for(path: &Path) -> PathBuf {
 /// Folders that are never opened as a project: the home folder and `/` (a
 /// file tree, watcher and search over all of it would only be slow). They
 /// get the empty window, whose terminals start in the home folder.
-fn too_broad(root: &Path) -> bool {
+pub fn too_broad(root: &Path) -> bool {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let home = std::fs::canonicalize(&home).unwrap_or(home);
     root == home || root.parent().is_none()
@@ -137,6 +138,10 @@ pub fn open_project(root: PathBuf, file: Option<PathBuf>, cx: &mut App) {
 /// Open (or focus) `root`'s window and run `then` in it. A folder that's gone
 /// or too broad to be a project gets the empty window instead.
 pub fn open_project_then(root: PathBuf, then: Option<Then>, cx: &mut App) {
+    open_project_from(root, then, true, cx)
+}
+
+fn open_project_from(root: PathBuf, mut then: Option<Then>, may_defer: bool, cx: &mut App) {
     let root = std::fs::canonicalize(&root).unwrap_or(root);
     if !root.is_dir() || too_broad(&root) {
         let missing = (!root.is_dir()).then(|| format!("{} isn't there any more", root.display()));
@@ -157,6 +162,16 @@ pub fn open_project_then(root: PathBuf, then: Option<Then>, cx: &mut App) {
             }
         }
     }
+    // From the empty window, that window becomes the project's. Deferred
+    // once: a click in it (a recent project) runs while the window is busy.
+    match cx.active_window().or_else(|| cx.window_stack()?.into_iter().next()).and_then(|w| w.downcast::<Workspace>()) {
+        Some(_) if may_defer => return cx.defer(move |cx| open_project_from(root, then, false, cx)),
+        Some(active) if active.read(cx).is_ok_and(|w| !w.has_project()) => match become_project(active, root.clone(), then, cx) {
+            Ok(()) => return,
+            Err(t) => then = t,
+        },
+        _ => {}
+    }
     log(&format!("open project {}", root.display()));
     let window = open_window(Some(root), cx);
     mark("window_open");
@@ -167,6 +182,27 @@ pub fn open_project_then(root: PathBuf, then: Option<Then>, cx: &mut App) {
     // The empty window has done its job once a project opens from it (it's
     // kept while it has terminals or unsaved files).
     cx.defer(retire_empty_windows);
+}
+
+/// Turn the empty window `home` into `root`'s project window, keeping its
+/// terminals (a shell cd'd into the project, or a folder picked from it),
+/// then run `then`. Hands `then` back when it can't: unsaved files there, or
+/// `root` already has a window.
+pub fn become_project(home: WindowHandle<Workspace>, root: PathBuf, then: Option<Then>, cx: &mut App) -> Result<(), Option<Then>> {
+    let shown = cx.windows().into_iter().filter_map(|h| h.downcast::<Workspace>()).any(|ws| ws.read(cx).is_ok_and(|w| w.has_project() && w.root == root));
+    let Some(carry) = home.read(cx).ok().and_then(|w| w.hand_over(cx)).filter(|_| !shown) else { return Err(then) };
+    log(&format!("empty window becomes project {}", root.display()));
+    cx.default_global::<EmptyWindows>().0.remove(&home.window_id());
+    let title = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let _ = cx.update_window(home.into(), |_, window, cx| {
+        let ws = window.replace_root(cx, |window, cx| Workspace::new(Some(root), Some(carry), window, cx));
+        guard_close(&ws, window, cx);
+        window.set_window_title(&title);
+        if let Some(then) = then {
+            ws.update(cx, |ws, cx| then(ws, window, cx));
+        }
+    });
+    Ok(())
 }
 
 /// The empty window: no project, for when Qur has none to show (launched
@@ -281,11 +317,8 @@ fn open_window(root: Option<PathBuf>, cx: &mut App) -> WindowHandle<Workspace> {
                 ..Default::default()
             },
             |window, cx| {
-                let ws = cx.new(|cx| Workspace::new(root, window, cx));
-                let w = ws.downgrade();
-                window.on_window_should_close(cx, move |window, cx| {
-                    w.update(cx, |ws, cx| ws.confirm_close(window, cx)).unwrap_or(true)
-                });
+                let ws = cx.new(|cx| Workspace::new(root, None, window, cx));
+                guard_close(&ws, window, cx);
                 ws
             },
         )
@@ -295,6 +328,12 @@ fn open_window(root: Option<PathBuf>, cx: &mut App) -> WindowHandle<Workspace> {
     }
     let _ = window.update(cx, |_, window, _| window.activate_window());
     window
+}
+
+/// Closing the window asks `ws` first (running agents, unsaved files).
+fn guard_close(ws: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
+    let w = ws.downgrade();
+    window.on_window_should_close(cx, move |window, cx| w.update(cx, |ws, cx| ws.confirm_close(window, cx)).unwrap_or(true));
 }
 
 fn main() {
@@ -348,13 +387,8 @@ fn main() {
                     open_project(project_root_for(&p), file, cx);
                 }
             }
-            // The most recent project, if it's still there; else the empty
-            // window (which lists the others).
-            None => match qur_config::State::load().recent_projects.into_iter().next() {
-                Some(p) if p.is_dir() => open_project(p, None, cx),
-                Some(p) => open_home(Some(format!("{} isn't there any more", p.display())), None, cx),
-                None => open_home(None, None, cx),
-            },
+            // A terminal (the empty window with a shell, in the home folder).
+            None => open_home(None, Some(Box::new(|ws, window, cx| ws.new_terminal(&commands::qur::NewTerminal, window, cx))), cx),
         }
 
         cx.on_window_closed(|cx, id| {

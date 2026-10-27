@@ -209,6 +209,10 @@ enum Overlay {
     Cleanup(cleanup::Cleanup),
 }
 
+/// Terminals moving from the empty window to the project it becomes: the
+/// panel, its shells, and the one that was showing.
+pub type Carry = (Entity<TerminalPanel>, Vec<usize>, Option<usize>);
+
 pub struct Workspace {
     focus: FocusHandle,
     /// The project folder; the home folder in the empty window.
@@ -323,8 +327,9 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// A project's window, or with `root` None the empty window.
-    pub fn new(root: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// A project's window, or with `root` None the empty window. `carry`:
+    /// the empty window's terminals, when it becomes this project's window.
+    pub fn new(root: Option<PathBuf>, carry: Option<Carry>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         crate::mark("ws_new");
         let (config, err) = Config::load();
         crate::terminal::set_scrollback(config.terminal.scrollback);
@@ -339,12 +344,15 @@ impl Workspace {
         let project = if home { ProjectSettings::default() } else { ProjectSettings::load(&project_id) };
         let repo = !home && root.ancestors().any(|d| d.join(".git").exists());
         let (roster, roster_err) = Roster::load();
-        let terms = cx.new(TerminalPanel::new);
+        let (terms, shells, shown) = carry.unwrap_or_else(|| (cx.new(TerminalPanel::new), Vec::new(), None));
         let subs = vec![
             cx.subscribe_in(&terms, window, |this, _, ev: &PanelEvent, window, cx| {
                 match ev {
                     PanelEvent::Closed => this.prune_closed_terms(window, cx),
-                    PanelEvent::Activity => this.terminal_activity(window, cx),
+                    PanelEvent::Activity => {
+                        this.terminal_activity(window, cx);
+                        this.follow_cd(window, cx);
+                    }
                     // Cmd-click in a terminal (M5): the user asked for it.
                     PanelEvent::OpenUrl(url) => {
                         if let Err(e) = std::process::Command::new("/usr/bin/open").arg(url).spawn() {
@@ -412,7 +420,7 @@ impl Workspace {
             roster,
             agents: Vec::new(),
             term_tasks: Vec::new(),
-            shells: Vec::new(),
+            shells,
             terms,
             selected: None,
             unread: HashSet::new(),
@@ -480,6 +488,9 @@ impl Workspace {
         window.focus(&ws.focus, cx);
         if !home {
             ws.restore_open_files(window, cx);
+        }
+        if let Some(tid) = shown {
+            ws.select(Some(Selected::Shell(tid)), window, cx);
         }
         crate::mark("files_restored");
         // The first-run picker, once (not in scripted runs, unless asked).
@@ -588,10 +599,7 @@ impl Workspace {
     fn refresh_overlaps(&self, cx: &mut Context<Self>) {
         let monitors: Vec<_> = self.agents.iter().map(|a| a.read(cx).monitor.clone()).chain(self.term_tasks.iter().map(|t| t.monitor.clone())).collect();
         if let Some(t) = self.trees.get(&self.root) {
-            t.update(cx, |t, cx| {
-                t.overlaps = monitors;
-                cx.notify();
-            });
+            t.update(cx, |t, cx| t.set_overlaps(monitors, cx));
         }
     }
 

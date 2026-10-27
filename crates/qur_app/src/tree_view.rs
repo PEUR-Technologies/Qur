@@ -45,6 +45,8 @@ pub struct TreeView {
     monitor: Option<Entity<TaskMonitor>>,
     /// Main-checkout tree: every task's monitor, for overlap dots.
     pub overlaps: Vec<Entity<TaskMonitor>>,
+    /// Repaint when a task's heat changes (the dots come from it).
+    overlap_subs: Vec<Subscription>,
     last_user: Option<Instant>,
     /// The focus path last auto-revealed (reveal once per change of focus).
     revealed: Option<PathBuf>,
@@ -61,11 +63,19 @@ impl TreeView {
             current: None,
             monitor: None,
             overlaps: Vec::new(),
+            overlap_subs: Vec::new(),
             last_user: None,
             revealed: None,
             scroll: UniformListScrollHandle::new(),
             _sub: None,
         }
+    }
+
+    /// Main checkout: the tasks whose changed files get overlap dots.
+    pub fn set_overlaps(&mut self, monitors: Vec<Entity<TaskMonitor>>, cx: &mut Context<Self>) {
+        self.overlap_subs = monitors.iter().map(|m| cx.observe(m, |_, _, cx| cx.notify())).collect();
+        self.overlaps = monitors;
+        cx.notify();
     }
 
     pub fn set_monitor(&mut self, m: Entity<TaskMonitor>, cx: &mut Context<Self>) {
