@@ -1375,6 +1375,7 @@ fn key_bytes(ks: &gpui::Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
             "left" => Some(b"\x1bb".to_vec()),
             "right" => Some(b"\x1bf".to_vec()),
             "backspace" => Some(b"\x1b\x7f".to_vec()),
+            "enter" => Some(b"\x1b\r".to_vec()),
             _ => None,
         };
     }
@@ -1392,6 +1393,8 @@ fn key_bytes(ks: &gpui::Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
         return Some(vec![b]);
     }
     Some(match key {
+        // ESC CR: what Claude Code, Codex and zsh read as "insert newline".
+        "enter" if m.shift => b"\x1b\r".to_vec(),
         "enter" => vec![b'\r'],
         "backspace" => vec![0x7f],
         "tab" if m.shift => b"\x1b[Z".to_vec(),
@@ -2108,6 +2111,14 @@ fn shell_quote(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shift_enter_is_newline() {
+        let k = |s| super::key_bytes(&gpui::Keystroke::parse(s).unwrap(), false);
+        assert_eq!(k("enter"), Some(b"\r".to_vec()));
+        assert_eq!(k("shift-enter"), Some(b"\x1b\r".to_vec()));
+        assert_eq!(k("alt-enter"), Some(b"\x1b\r".to_vec()));
+    }
+
     use super::*;
 
     #[test]
