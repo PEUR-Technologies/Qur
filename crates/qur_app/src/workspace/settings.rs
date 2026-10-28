@@ -69,7 +69,7 @@ impl Workspace {
         self.terms.update(cx, |p, cx| p.apply_config(cx));
         Docks::load(&self.config, cx);
         self.project = ProjectSettings::load(&self.project_id);
-        if let Some(e) = err.or(term_err).or_else(|| crate::hotkey::set(&self.config.keys.global).err()) {
+        if let Some(e) = err.or(term_err) {
             self.flash(e, cx);
         }
         let wrap = self.config.editor.soft_wrap;
@@ -246,7 +246,6 @@ impl Workspace {
             hue,
             brightness,
             vim: self.config.keys.vim,
-            global_key: self.config.keys.global.clone(),
             zen: self.config.ui.zen,
             traffic_lights: self.config.ui.traffic_lights.clone(),
             gaps: self.config.ui.gaps,
@@ -343,18 +342,6 @@ impl Workspace {
             }
             SetupEvent::Sidebar(mode) => this.set_sidebar_mode(mode, cx),
             SetupEvent::SidebarSide(right) => this.set_sidebar_side(*right, cx),
-            SetupEvent::GlobalKey(key) => match crate::hotkey::set(key) {
-                Ok(()) => {
-                    this.write_setting(false, "keys.global", Some(key.as_str().into()), cx);
-                    this.reload_settings(window, cx);
-                    this.broadcast_reload(cx);
-                    this.flash(if key.is_empty() { "Show or hide Qur: off".to_string() } else { format!("{key} now shows or hides Qur") }, cx);
-                }
-                Err(e) => {
-                    let _ = crate::hotkey::set(&this.config.keys.global);
-                    this.flash(e, cx);
-                }
-            },
             SetupEvent::ImportTerminal(source) => this.import_terminal(source, window, cx),
             SetupEvent::TrafficLights(key) => {
                 this.write_setting(false, "ui.traffic_lights", Some(key.as_str().into()), cx);
@@ -509,6 +496,8 @@ const CONFIG_TEMPLATE: &str = r#"# Qur settings. Saved changes apply right away.
 # copy_on_select = true      # selecting copies
 # scroll_multiplier = 1.0
 # focus_follows_mouse = true  # moving the pointer onto a split pane focuses it
+# bell = true               # a ringing terminal flashes, and the Dock icon bounces
+# secure_input = false       # Secure Keyboard Entry: other apps can't read what you type
 # shell = ""                # "" = your login shell; e.g. "nu" for Nushell's tables
 # text_align = "left"       # or "right": shell output grows from the right edge
 
@@ -531,7 +520,6 @@ const CONFIG_TEMPLATE: &str = r#"# Qur settings. Saved changes apply right away.
 
 [keys]
 # vim = false
-# global = "cmd-\\"          # from any app: show or hide Qur ("" = off; keys macOS uses are refused)
 "#;
 
 const KEYMAP_TEMPLATE: &str = r#"# Qur key bindings. Saved changes apply right away; entries Qur can't use

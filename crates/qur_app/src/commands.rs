@@ -26,7 +26,7 @@ pub mod qur {
             KeepWorking, DiscardTask, OpenWorktreeInTerminal, RevealWorktree, KeyboardShortcuts,
             RunDoctor, ShowLogs, ReportProblem, ExpandSelection, ShrinkSelection,
             RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge, Caffeinate, ShowKeepAwake, SwitchSession, ZenMode,
-            Gaps, ToggleGaps, AutoHideSidebar, SidebarOnRight,
+            Gaps, ToggleGaps, AutoHideSidebar, SidebarOnRight, SecureKeyboardEntry, TerminalBell,
             ShowLastTurn, RewindLastTurn, ReviewWork, ReviewPlan, SendReviewFindings,
             PlanMode, CommentOnPlan, ApprovePlan, SendPlanComments,
             PushPullRequest, OpenPullRequest,
@@ -86,7 +86,7 @@ pub mod agent {
 }
 
 pub mod terminal {
-    gpui::actions!(terminal, [Clear, SendLineStart, SendLineEnd, SendKillLine, SendBackTab, Find, SplitRight, SplitDown, Tile, FocusLeft, FocusRight, FocusUp, FocusDown, MovePaneLeft, MovePaneRight, MovePaneUp, MovePaneDown]);
+    gpui::actions!(terminal, [Clear, ZoomIn, ZoomOut, ZoomReset, SendLineStart, SendLineEnd, SendKillLine, SendBackTab, Find, SplitRight, SplitDown, Tile, FocusLeft, FocusRight, FocusUp, FocusDown, MovePaneLeft, MovePaneRight, MovePaneUp, MovePaneDown]);
 }
 
 /// The Browser view's keys (while it, or the page in it, has focus).
@@ -326,6 +326,11 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::ZenMode, "View", "Zen Mode", "ctrl-cmd-z", W, R),
     cmd!(qur::ToggleGaps, "View", "Toggle Gaps", "", W, R),
     cmd!(terminal::Clear, "Terminal", "Clear", "cmd-k", T, R),
+    cmd!(terminal::ZoomIn, "Terminal", "Bigger Text in This Terminal", "cmd-=|cmd-+", T, R),
+    cmd!(terminal::ZoomOut, "Terminal", "Smaller Text in This Terminal", "cmd--", T, R),
+    cmd!(terminal::ZoomReset, "Terminal", "Reset This Terminal's Text Size", "cmd-0", T, R),
+    cmd!(qur::SecureKeyboardEntry, "Terminal", "Secure Keyboard Entry", "", W, R),
+    cmd!(qur::TerminalBell, "Terminal", "Bell", "", W, R),
     cmd!(terminal::Find, "Terminal", "Find in Terminal", "cmd-f", T, R),
     cmd!(terminal::Tile, "Terminal", "New Tiled Terminal (Grid)", "cmd-enter", W, R),
     cmd!(terminal::SplitRight, "Terminal", "Split (Dwindle)", "cmd-d", T, R),
@@ -695,6 +700,10 @@ pub struct MenuState {
     pub zen: bool,
     /// Window gaps are on (`[ui] gaps`).
     pub gaps: bool,
+    /// `[terminal] secure_input`.
+    pub secure_input: bool,
+    /// `[terminal] bell`.
+    pub bell: bool,
     /// `keymap_generation()`: new shortcuts rebuild the menus.
     pub keymap: u64,
 }
@@ -955,6 +964,11 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(terminal::MovePaneDown),
             sep(),
             item(terminal::Clear),
+            item(terminal::ZoomIn),
+            item(terminal::ZoomOut),
+            item(terminal::ZoomReset),
+            item(qur::SecureKeyboardEntry).checked(s.secure_input),
+            item(qur::TerminalBell).checked(s.bell),
             item(qur::CloseTerminal),
         ]),
         Menu::new("Window").items([item(qur::Minimize), item(qur::Zoom)]),

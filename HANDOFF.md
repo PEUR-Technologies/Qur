@@ -2,7 +2,7 @@
 
 Read this first when you pick the project up, whether you're a person or a Claude session. It covers where things stand, the rules, how to work on the code, and what's next. Keep it current: update **Status** and **Next** at the end of every session.
 
-Last updated: 2026-10-27, release v0.1.9. All milestones M0–M7 are done, plus the 2026-10-25 improvements (decisions 49–58), the 2026-10-26 window and pane work (decisions 59–61) v0.1.6 (decisions 62–70), v0.1.7, v0.1.8 (decision 71) and v0.1.9 (decision 72). The newest build is installed at `/Applications/Qur.app`.
+Last updated: 2026-10-28, release v0.1.10. All milestones M0–M7 are done, plus the 2026-10-25 improvements (decisions 49–58), the 2026-10-26 window and pane work (decisions 59–61) v0.1.6 (decisions 62–70), v0.1.7, v0.1.8 (decision 71), v0.1.9 (decision 72) and v0.1.10 (decision 73). The newest build is installed at `/Applications/Qur.app`.
 
 ## What Qur is
 
@@ -24,7 +24,7 @@ Agents are first-class. The sidebar lists agents as buttons. Each agent works in
 
 ## Status: what's built
 
-All milestones are on `main`. There are 367 tests (`cargo test --release --workspace`), all passing; clippy is clean with `-D warnings`; `scripts/handcheck.sh` passes 125 scripted hand checks.
+All milestones are on `main`. There are 369 tests (`cargo test --release --workspace`), all passing; clippy is clean with `-D warnings`; `scripts/handcheck.sh` passes 124 scripted hand checks.
 
 | Milestone | What | Decisions |
 |---|---|---|
@@ -49,6 +49,7 @@ All milestones are on `main`. There are 367 tests (`cargo test --release --works
 | 2026-10-26 v0.1.7 | Settings > Agents: Add agent (name, command, Structured or Terminal), agents added by hand listed too, unticking removes; Gemini CLI, opencode, GitHub Copilot and Cursor built in (none tried in Qur yet); agent dropdown in New Agent Task; with gaps the green light fills the screen (Option-click for full screen); the auto-hide sidebar slides in and out like zen's bar, the stage easing with it; Cmd+W closes a dwindled row's newest pane first | — |
 | 2026-10-27 v0.1.8 | Opening Qur without a folder is a terminal; cd into a git repo (or pick a folder) and that window becomes the project, terminals kept; Shift+Enter inserts a newline in terminals; Agent Terminal changes show in the Changes panel and Files tree | 71 |
 | 2026-10-27 v0.1.9 | Cmd+\ shows or hides Qur from any app (`[keys] global`, macOS's own keys refused); `[terminal]` font, padding, cursor, colors, Ghostty themes, option-as-alt, `shell`, right-aligned text; import from Ghostty, kitty or Alacritty; settings files apply when saved from any editor (`$QUR_CONFIG`); hover focus as a setting, Cmd+Opt+Shift+arrows swap panes, panes dragged by a grip; copy on select, drag-scroll; Cmd+W on the last shell closes the window | 72 |
+| 2026-10-28 v0.1.10 | Cmd+\ removed (no system-wide key, nothing in the background); the empty window has no sidebar; Terminal > Bell toggle; inline terminal images (iTerm2 `imgcat`); Cmd+= / Cmd+- / Cmd+0 per terminal; Secure Keyboard Entry; the bell flashes the pane and bounces the Dock; double-click selects a whole URL or path; drag-scroll in the code modal | 73 |
 
 Latest numbers (`docs/budget.md`, M7 table, measured on battery; app size from the v0.1.9 bundle): app 30 MB (25 MB at M7), first frame 113 ms, idle 73 MB, 3 agents 129 MB, glow 81 ms, keystroke p99 2.0 ms, search 51 ms. `lsof` shows no network sockets in Qur's own process.
 
@@ -120,8 +121,8 @@ Where things are stored on the owner's Mac:
 ```sh
 source ~/.cargo/env
 cargo build --release -p qur_app && target/release/qur ~/some/project   # no argument = last project
-cargo test --release --workspace            # 367 tests
-scripts/handcheck.sh [check ...]            # 125 scripted hand checks (-l lists them); unlocked session
+cargo test --release --workspace            # 369 tests
+scripts/handcheck.sh [check ...]            # 124 scripted hand checks (-l lists them); unlocked session
 target/release/qur doctor                   # setup checks, exit 1 on any problem
 scripts/bundle.sh [--zip]                   # target/release/Qur.app (ad-hoc signed); then cp -R to /Applications
 scripts/budget.sh 3                         # the budget, incl. glow and 3 real agents; unlocked screen

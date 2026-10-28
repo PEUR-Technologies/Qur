@@ -30,6 +30,9 @@ gpui_platform.workspace = true
 libc.workspace = true
 nucleo-matcher.workspace = true
 raw-window-handle = "0.6"
+# Inline terminal images (images.rs): the versions alacritty_terminal already builds.
+base64 = "0.22"
+polling = "3.11"
 smallvec = "1"
 serde_json = "1"
 # Agent chat Markdown (MIT). No default features: no CLI, no SIMD.
