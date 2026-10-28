@@ -175,3 +175,22 @@ On battery the display runs at 60 Hz, so scroll and theme frames pace at ~16.7 m
 ## Memory checks and readout
 
 `scripts/memcheck.sh` opens and closes the code modal, the file viewer (images, a binary file) and terminals with filled scrollback, and fails when physical footprint doesn't come back (median of 3 runs; thresholds in the script). It needs a window, so it isn't in CI: run it by hand on an unlocked screen. About and `qur doctor` show Qur's own footprint plus its agents' and terminals' (sampled on demand, never polled). About 33 MB of "Owned physical footprint (unmapped) (graphics)" stays dirty after closing any modal (Metal command buffers); not investigated.
+
+## v0.1.11 (2026-10-28, MacBook Air M5, AC power)
+
+`scripts/budget.sh 3` on v0.1.10, then the one fix. Built v0.1.6 alongside: first frame with large.ts and its idle footprint were the same (124–156 ms vs 125–149 ms; 75–83 MB vs 66–76 MB), so nothing regressed since.
+
+| Metric | Target | v0.1.10 | v0.1.11 | |
+|---|---|---|---|---|
+| Release binary | < 40 MB | 30.6 MB | | ✅ |
+| Cold start to first frame, large.ts | < 250 ms | 123 ms (121–124) | | ✅ |
+| Cold start to first frame, no folder (empty window with a shell) | < 250 ms | 347–382 ms | 106–121 ms | ✅ |
+| Open 10k-line file, fully highlighted | < 100 ms | 66 ms | | ✅ |
+| Idle footprint, project only / small file / large file | < 80 MB | 67 / 72 / 97 MB (large file 66–76 on rerun) | | ✅ |
+| Keystroke p50 / p99 | ≤ 8.3 ms | 0.52 / 1.63 ms | | ✅ |
+| Agent write → glow | < 100 ms | p50 80.8, max 84.9, 0 missed | | ✅ |
+| Footprint with 3 Claude agents | < 150 MB | 85 MB | | ✅ |
+| Agent processes left after quit | 0 | 0 | | ✅ |
+
+The empty window's shell waited on the UI thread for `qur_agents::login_path()` (an interactive login shell, ~250 ms). A plain terminal is `$SHELL -l` and builds that PATH itself, so only agent commands and a custom `[terminal] shell` wait for it now.
+
