@@ -394,6 +394,15 @@ impl Workspace {
         self.flash(if on { "Secure Keyboard Entry on: other apps can't read what you type in Qur" } else { "Secure Keyboard Entry off" }, cx);
     }
 
+    pub(super) fn toggle_bell(&mut self, _: &qur::TerminalBell, window: &mut Window, cx: &mut Context<Self>) {
+        let on = !self.config.terminal.bell;
+        self.write_setting(false, "terminal.bell", Some(Value::Bool(on)), cx);
+        self.reload_settings(window, cx);
+        self.broadcast_reload(cx);
+        self.sync_menus(cx);
+        self.flash(if on { "Bell on: a ringing terminal flashes, and the Dock icon bounces" } else { "Bell off" }, cx);
+    }
+
     /// Drag on a Gaps slider (0 gap, 1 corner radius). Moving the gap
     /// slider turns gaps on, and the radius slider rounded corners.
     fn gap_slide_to(&mut self, which: usize, x: Pixels, window: &mut Window, cx: &mut Context<Self>) {

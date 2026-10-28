@@ -26,7 +26,7 @@ pub mod qur {
             KeepWorking, DiscardTask, OpenWorktreeInTerminal, RevealWorktree, KeyboardShortcuts,
             RunDoctor, ShowLogs, ReportProblem, ExpandSelection, ShrinkSelection,
             RunChecks, RunProject, RenameAgent, AccentColor, ChooseLayout, GitStageAll, GitUnstageAll, GitCommit, NextConflict, PrevConflict, AcceptOurs, AcceptTheirs, AcceptBoth, FinishMerge, AbortMerge, Caffeinate, ShowKeepAwake, SwitchSession, ZenMode,
-            Gaps, ToggleGaps, AutoHideSidebar, SidebarOnRight, SecureKeyboardEntry,
+            Gaps, ToggleGaps, AutoHideSidebar, SidebarOnRight, SecureKeyboardEntry, TerminalBell,
             ShowLastTurn, RewindLastTurn, ReviewWork, ReviewPlan, SendReviewFindings,
             PlanMode, CommentOnPlan, ApprovePlan, SendPlanComments,
             PushPullRequest, OpenPullRequest,
@@ -330,6 +330,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(terminal::ZoomOut, "Terminal", "Smaller Text in This Terminal", "cmd--", T, R),
     cmd!(terminal::ZoomReset, "Terminal", "Reset This Terminal's Text Size", "cmd-0", T, R),
     cmd!(qur::SecureKeyboardEntry, "Terminal", "Secure Keyboard Entry", "", W, R),
+    cmd!(qur::TerminalBell, "Terminal", "Bell", "", W, R),
     cmd!(terminal::Find, "Terminal", "Find in Terminal", "cmd-f", T, R),
     cmd!(terminal::Tile, "Terminal", "New Tiled Terminal (Grid)", "cmd-enter", W, R),
     cmd!(terminal::SplitRight, "Terminal", "Split (Dwindle)", "cmd-d", T, R),
@@ -701,6 +702,8 @@ pub struct MenuState {
     pub gaps: bool,
     /// `[terminal] secure_input`.
     pub secure_input: bool,
+    /// `[terminal] bell`.
+    pub bell: bool,
     /// `keymap_generation()`: new shortcuts rebuild the menus.
     pub keymap: u64,
 }
@@ -965,6 +968,7 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(terminal::ZoomOut),
             item(terminal::ZoomReset),
             item(qur::SecureKeyboardEntry).checked(s.secure_input),
+            item(qur::TerminalBell).checked(s.bell),
             item(qur::CloseTerminal),
         ]),
         Menu::new("Window").items([item(qur::Minimize), item(qur::Zoom)]),

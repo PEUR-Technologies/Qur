@@ -1332,6 +1332,9 @@ impl TerminalPanel {
 
     /// The bell: the pane flashes, and the Dock icon bounces once when Qur is behind.
     fn ring(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if !opts().cfg.bell {
+            return;
+        }
         self.sessions[ix].bell_at = Some(Instant::now());
         crate::secure::bounce_if_inactive();
         cx.notify();

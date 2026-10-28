@@ -332,8 +332,9 @@ impl Workspace {
     pub fn new(root: Option<PathBuf>, carry: Option<Carry>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         crate::mark("ws_new");
         let (config, err) = Config::load();
-        let errs = [crate::terminal::set_config(&config.terminal), crate::hotkey::set(&config.keys.global).err()];
-        errs.into_iter().flatten().for_each(|e| eprintln!("{e}"));
+        if let Some(e) = crate::terminal::set_config(&config.terminal) {
+            eprintln!("{e}");
+        }
         if !cx.has_global::<Docks>() {
             Docks::load(&config, cx);
         }
@@ -562,6 +563,7 @@ impl Workspace {
             zen: self.config.ui.zen,
             gaps: self.config.ui.gaps,
             secure_input: self.config.terminal.secure_input,
+            bell: self.config.terminal.bell,
             keymap: commands::keymap_generation(),
         }
     }
@@ -860,6 +862,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::gaps))
             .on_action(cx.listener(Self::toggle_gaps))
             .on_action(cx.listener(Self::toggle_secure_input))
+            .on_action(cx.listener(Self::toggle_bell))
             .on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::close_terminal))
             .on_action(cx.listener(Self::tile_terminal))

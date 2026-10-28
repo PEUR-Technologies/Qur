@@ -124,8 +124,6 @@ pub struct Current {
     pub hue: f32,
     pub brightness: f32,
     pub vim: bool,
-    /// `[keys] global`: opens a new Qur window from any app.
-    pub global_key: String,
     pub zen: bool,
     pub traffic_lights: String,
     /// Window gaps (`[ui] gaps`) and their size (`[ui] gap`).
@@ -163,8 +161,6 @@ pub enum SetupEvent {
     /// Accent color and brightness sliders; `save` on release.
     Tune { hue: f32, brightness: f32, save: bool },
     TrafficLights(String),
-    /// A new `[keys] global` ("" = off), typed and confirmed.
-    GlobalKey(String),
     /// Import another terminal's settings into `[terminal]` (`qur_config::import`).
     ImportTerminal(&'static str),
     /// Window gaps on or off, and the gap (saved at once).
@@ -201,7 +197,6 @@ pub struct SetupView {
     new_name: Entity<TextInput>,
     new_command: Entity<TextInput>,
     new_mode: Mode,
-    global_key: Entity<TextInput>,
     _watch: Option<Task<()>>,
 }
 
@@ -259,17 +254,8 @@ impl SetupView {
             new_name: cx.new(|cx| TextInput::new("Name", cx)),
             new_command: cx.new(|cx| TextInput::new("Command, e.g. gemini --acp", cx)),
             new_mode: Mode::Acp,
-            global_key: cx.new(|cx| TextInput::new("e.g. cmd-\\ (empty: off)", cx)),
             _watch: None,
         };
-        let key = this.current.global_key.clone();
-        this.global_key.update(cx, |i, cx| i.set_text(&key, cx));
-        cx.subscribe(&this.global_key, |_, input, ev: &InputEvent, cx| {
-            if let InputEvent::Confirm { .. } = ev {
-                cx.emit(SetupEvent::GlobalKey(input.read(cx).text.trim().to_string()));
-            }
-        })
-        .detach();
         for input in [this.new_name.clone(), this.new_command.clone()] {
             cx.subscribe(&input, |this, _, ev: &InputEvent, cx| {
                 if let InputEvent::Confirm { .. } = ev {
@@ -285,10 +271,6 @@ impl SetupView {
     /// The workspace's settings after a change (or a preview).
     pub fn set_current(&mut self, current: Current, cx: &mut Context<Self>) {
         if self.current != current {
-            if self.current.global_key != current.global_key {
-                let key = current.global_key.clone();
-                self.global_key.update(cx, |i, cx| i.set_text(&key, cx));
-            }
             self.current = current;
             cx.notify();
         }
@@ -911,22 +893,9 @@ impl SetupView {
             .gap(look.z(10.))
             .child(div().text_size(look.text(-1.)).text_color(look.c(ui.text)).child("VS Code"))
             .child(link(look, "keys-keymap", "Rebind in keymap.toml…").on_click(cx.listener(|this, _, window, cx| this.open_file(Box::new(qur::OpenKeymap), window, cx))));
-        let f = self.global_key.read(cx).focus.clone();
-        let global = div()
-            .w(look.z(160.))
-            .px(look.z(6.))
-            .py(look.z(3.))
-            .rounded(look.z(4.))
-            .border_1()
-            .border_color(look.c(ui.border))
-            .bg(look.c(ui.editor_bg))
-            .text_size(look.text(-1.))
-            .on_mouse_down(MouseButton::Left, move |_, window, cx| window.focus(&f, cx))
-            .child(self.global_key.clone());
         section(look, "Editor")
             .child(row(look, "Vim mode", Some("In the code modal: Esc for normal mode"), vim))
             .child(row(look, "Keys", None, keys))
-            .child(row(look, "New Qur window", Some("From any app while Qur runs. Return applies; keys macOS uses are refused"), global))
             .child(row(look, "Terminal settings", Some("Font, colors, cursor and habits from the terminal you use now"), self.import_links(look, cx)))
     }
 

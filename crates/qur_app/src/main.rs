@@ -19,7 +19,6 @@ mod editor_view;
 mod files;
 mod git_panel;
 mod grid;
-mod hotkey;
 mod images;
 mod hex_view;
 mod input;
@@ -414,7 +413,6 @@ fn main() {
             }
         });
         mark("keys_bound");
-        hotkey::listen(cx);
         cx.activate(true);
 
         match arg {
