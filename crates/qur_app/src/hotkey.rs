@@ -1,9 +1,13 @@
-//! `[keys] global`: a system-wide key that brings Qur to the front, or hides
-//! it when it's already in front. Carbon's RegisterEventHotKey needs no
+//! `[keys] global`: a system-wide key that opens a new Qur window (as File >
+//! New Window) from any app, while Qur runs. Carbon's RegisterEventHotKey needs no
 //! Accessibility permission (an NSEvent global monitor would).
 
 use std::ffi::c_void;
 use std::sync::Mutex;
+
+use futures::StreamExt;
+use futures::channel::mpsc::{UnboundedSender, unbounded};
+use gpui::App;
 
 #[repr(C)]
 struct EventTypeSpec {
@@ -30,19 +34,31 @@ unsafe extern "C" {
 /// The registered key (an EventHotKeyRef) and whether the handler is installed.
 static STATE: Mutex<(usize, bool)> = Mutex::new((0, false));
 
+static PRESSED: std::sync::OnceLock<UnboundedSender<()>> = std::sync::OnceLock::new();
+
 extern "C" fn on_hotkey(_: *mut c_void, _: *mut c_void, _: *mut c_void) -> i32 {
-    use objc2_app_kit::NSApplication;
-    if let Some(mtm) = objc2::MainThreadMarker::new() {
-        let app = NSApplication::sharedApplication(mtm);
-        if app.isActive() {
-            app.hide(None);
-        } else {
-            app.unhide(None);
-            #[allow(deprecated)]
-            app.activateIgnoringOtherApps(true);
-        }
+    if let Some(tx) = PRESSED.get() {
+        let _ = tx.unbounded_send(());
     }
     0
+}
+
+/// Open a new window on each press. The Carbon handler has no `App`, so it
+/// hands presses to the main loop.
+pub fn listen(cx: &mut App) {
+    let (tx, mut rx) = unbounded();
+    if PRESSED.set(tx).is_err() {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        while rx.next().await.is_some() {
+            cx.update(|cx| {
+                cx.activate(true);
+                crate::open_home(None, None, cx);
+            });
+        }
+    })
+    .detach();
 }
 
 /// Register `keys` (GPUI syntax, e.g. "ctrl-`" or "cmd-shift-space"), replacing

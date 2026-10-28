@@ -101,6 +101,10 @@ pub struct EditorView {
     content_w: Pixels,
     find: Option<FindBar>,
     dragging: bool,
+    /// A selection dragged past the top or bottom: where the pointer is, and
+    /// the timer scrolling that way while it stays there.
+    drag_at: Option<gpui::Point<Pixels>>,
+    drag_scroll: Option<Task<()>>,
     /// Last time the user scrolled or clicked (Live follow respects it).
     pub last_user_input: Option<Instant>,
     /// Live view: edits are ignored while the agent is editing this file.
@@ -176,6 +180,8 @@ impl EditorView {
             content_w: px(0.),
             find: None,
             dragging: false,
+            drag_at: None,
+            drag_scroll: None,
             last_user_input: None,
             read_only,
             vim: None,
@@ -814,6 +820,9 @@ impl EditorView {
             return;
         }
         let p = self.hit(ev.position);
+        if ev.modifiers.platform && ev.click_count == 1 && self.open_link_at(p, cx) {
+            return;
+        }
         match ev.click_count {
             2 => self.model.select_word_at(p),
             3 => self.model.select_line_at(p),
@@ -824,27 +833,62 @@ impl EditorView {
         cx.notify();
     }
 
-    fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.dragging && ev.pressed_button == Some(MouseButton::Left) {
-            let p = self.hit(ev.position);
-            self.model.drag_to(p);
-            // Auto-scroll while dragging past the edges.
-            if let Some(b) = self.bounds {
-                if ev.position.y < b.top() {
-                    self.scroll_y = (self.scroll_y - self.line_h).max(px(0.));
-                } else if ev.position.y > b.bottom() {
-                    self.scroll_y = (self.scroll_y + self.line_h).min(self.max_scroll_y());
-                }
+    /// Cmd-click: open the URL under the pointer.
+    fn open_link_at(&self, p: Point, cx: &mut Context<Self>) -> bool {
+        let text = self.model.rope().line(p.line).to_string();
+        match crate::terminal::link_at(&text, p.col) {
+            Some(u) if u.starts_with("http://") || u.starts_with("https://") => {
+                cx.open_url(&u);
+                true
             }
-            cx.notify();
-        } else {
-            self.dragging = false;
+            _ => false,
         }
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.dragging {
-            self.dragging = false;
+    /// Extend the selection to the pointer; past the top or bottom it takes
+    /// the edge row and the view scrolls that way (`drag_scroll_step`).
+    fn drag_to(&mut self, pos: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(b) = self.bounds else { return };
+        self.drag_at = Some(pos);
+        let inside = point(pos.x, pos.y.clamp(b.top(), b.bottom() - px(1.)));
+        self.model.drag_to(self.hit(inside));
+        if (pos.y < b.top() || pos.y > b.bottom()) && self.drag_scroll.is_none() {
+            let bg = cx.background_executor().clone();
+            self.drag_scroll = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    bg.timer(Duration::from_millis(50)).await;
+                    if !this.update(cx, |v, cx| v.drag_scroll_step(cx)).unwrap_or(false) {
+                        break;
+                    }
+                }
+            }));
+        }
+        cx.notify();
+    }
+
+    /// One tick of drag-scrolling: faster the farther the pointer is past the edge.
+    fn drag_scroll_step(&mut self, cx: &mut Context<Self>) -> bool {
+        let (Some(pos), Some(b), true) = (self.drag_at, self.bounds, self.dragging) else {
+            self.drag_scroll = None;
+            return false;
+        };
+        let lines = if pos.y < b.top() {
+            -(1. + ((b.top() - pos.y) / self.line_h).floor())
+        } else if pos.y > b.bottom() {
+            1. + ((pos.y - b.bottom()) / self.line_h).floor()
+        } else {
+            self.drag_scroll = None;
+            return false;
+        };
+        self.scroll_y = (self.scroll_y + self.line_h * lines.clamp(-8., 8.)).clamp(px(0.), self.max_scroll_y());
+        self.drag_to(pos, cx);
+        true
+    }
+
+    fn end_drag(&mut self, cx: &mut Context<Self>) {
+        self.drag_scroll = None;
+        self.drag_at = None;
+        if std::mem::take(&mut self.dragging) {
             cx.emit(EditorEvent::Changed);
         }
     }
@@ -1485,6 +1529,24 @@ impl Element for EditorElement {
         let v = self.view.read(cx);
         let focus = v.focus.clone();
         let focused = focus.is_focused(window);
+        if v.dragging {
+            // Window-wide, so a selection dragged out of the editor keeps going.
+            let view = self.view.clone();
+            window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
+                if phase == gpui::DispatchPhase::Bubble {
+                    view.update(cx, |v, cx| match ev.pressed_button {
+                        Some(MouseButton::Left) => v.drag_to(ev.position, cx),
+                        _ => v.end_drag(cx),
+                    });
+                }
+            });
+            let view = self.view.clone();
+            window.on_mouse_event(move |ev: &MouseUpEvent, phase, _, cx| {
+                if phase == gpui::DispatchPhase::Bubble && ev.button == MouseButton::Left {
+                    view.update(cx, |v, cx| v.end_drag(cx));
+                }
+            });
+        }
         let lh = v.line_h;
         let cw = v.cell_w;
         let block = v.vim.as_ref().is_some_and(|vim| vim.block_cursor());
@@ -1886,8 +1948,6 @@ impl Render for EditorView {
                     .relative()
                     .cursor_text()
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-                    .on_mouse_move(cx.listener(Self::on_mouse_move))
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_scroll(cx.listener(Self::on_scroll))
                     .child(EditorElement { view: cx.entity() })
                     .children(self.peek_view(&look, cx)),

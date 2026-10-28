@@ -384,6 +384,16 @@ impl Workspace {
         self.flash(if on { "Gaps on (View > Appearance > Gaps… to adjust)" } else { "Gaps off" }, cx);
     }
 
+    pub(super) fn toggle_secure_input(&mut self, _: &qur::SecureKeyboardEntry, _: &mut Window, cx: &mut Context<Self>) {
+        let on = !self.config.terminal.secure_input;
+        self.config.terminal.secure_input = on;
+        crate::secure::set(on);
+        self.write_setting(false, "terminal.secure_input", Some(Value::Bool(on)), cx);
+        self.broadcast_reload(cx);
+        self.sync_menus(cx);
+        self.flash(if on { "Secure Keyboard Entry on: other apps can't read what you type in Qur" } else { "Secure Keyboard Entry off" }, cx);
+    }
+
     /// Drag on a Gaps slider (0 gap, 1 corner radius). Moving the gap
     /// slider turns gaps on, and the radius slider rounded corners.
     fn gap_slide_to(&mut self, which: usize, x: Pixels, window: &mut Window, cx: &mut Context<Self>) {

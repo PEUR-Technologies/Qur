@@ -20,6 +20,7 @@ mod files;
 mod git_panel;
 mod grid;
 mod hotkey;
+mod images;
 mod hex_view;
 mod input;
 mod large_view;
@@ -32,6 +33,7 @@ mod picker;
 mod prompt;
 mod pull_request;
 mod script;
+mod secure;
 mod review;
 mod search_view;
 mod setup_view;
@@ -412,6 +414,7 @@ fn main() {
             }
         });
         mark("keys_bound");
+        hotkey::listen(cx);
         cx.activate(true);
 
         match arg {

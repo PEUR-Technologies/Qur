@@ -18,7 +18,8 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | `Cmd+Opt+O` | Switch Project… (also: click the project name in the top bar) | File | M1 |
 | `Cmd+Shift+W` | Close Window | File | S |
 | `Cmd+M` | Minimize | Window | S |
-| `Cmd+\` (from any app) | Show or hide Qur: `[keys] global` in config.toml or Settings > Editor; keys macOS uses are refused | — | ✅ |
+| `Cmd+\` (from any app) | New Qur window, while Qur runs: `[keys] global` in config.toml or Settings > Editor; keys macOS uses are refused | — | ✅ |
+| `Cmd+=` / `Cmd+-` / `Cmd+0` | This terminal's text bigger / smaller / reset | Terminal | ✅ |
 | `Ctrl+Cmd+F` | Toggle Full Screen | View | S |
 | `Ctrl+Cmd+Z` | Zen Mode (hide the top bar until the mouse nears the top) | View | ✅ |
 | `Cmd+Shift+P` / `F1` | Command Palette | View | S |

@@ -123,6 +123,8 @@ pub struct TerminalConfig {
     /// "left", or "right": shell output hugs the right edge (full-screen
     /// programs such as vim stay as they are).
     pub text_align: String,
+    /// Secure Keyboard Entry: other apps can't read keys typed in Qur (as Terminal.app's).
+    pub secure_input: bool,
 }
 
 pub const DEFAULT_SCROLLBACK: usize = 5000;
@@ -153,6 +155,7 @@ impl Default for TerminalConfig {
             focus_follows_mouse: true,
             shell: String::new(),
             text_align: "left".into(),
+            secure_input: false,
         }
     }
 }
@@ -263,7 +266,7 @@ pub struct PanelsConfig {
 #[serde(default)]
 pub struct KeysConfig {
     pub vim: bool,
-    /// A system-wide key that shows or hides Qur (GPUI syntax, e.g. "cmd-\\"); "" is off.
+    /// A system-wide key that opens a new Qur window while Qur runs (GPUI syntax, e.g. "cmd-\\"); "" is off.
     pub global: String,
 }
 

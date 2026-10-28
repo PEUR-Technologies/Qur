@@ -124,7 +124,7 @@ pub struct Current {
     pub hue: f32,
     pub brightness: f32,
     pub vim: bool,
-    /// `[keys] global`: shows or hides Qur from any app.
+    /// `[keys] global`: opens a new Qur window from any app.
     pub global_key: String,
     pub zen: bool,
     pub traffic_lights: String,
@@ -926,7 +926,7 @@ impl SetupView {
         section(look, "Editor")
             .child(row(look, "Vim mode", Some("In the code modal: Esc for normal mode"), vim))
             .child(row(look, "Keys", None, keys))
-            .child(row(look, "Show or hide Qur", Some("From any app. Return applies; keys macOS uses are refused"), global))
+            .child(row(look, "New Qur window", Some("From any app while Qur runs. Return applies; keys macOS uses are refused"), global))
             .child(row(look, "Terminal settings", Some("Font, colors, cursor and habits from the terminal you use now"), self.import_links(look, cx)))
     }
 

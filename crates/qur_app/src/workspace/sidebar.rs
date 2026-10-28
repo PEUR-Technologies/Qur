@@ -543,9 +543,9 @@ impl Workspace {
 
     /// Whether the sidebar takes its column now: on (`Cmd+B`), and with
     /// auto-hide only while slid in.
-    /// The empty window has one only while it has terminals.
+    /// The empty window (no project) has none.
     pub(super) fn sidebar_visible(&self) -> bool {
-        self.sidebar && (self.config.ui.sidebar != "auto" || self.sidebar_p() > 0.) && !(self.home && self.shells.is_empty())
+        self.sidebar && (self.config.ui.sidebar != "auto" || self.sidebar_p() > 0.) && !self.home
     }
 
     /// Auto-hide: how far in the sidebar is, 0 (away) to 1 (in), eased over

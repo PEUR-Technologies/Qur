@@ -37,6 +37,7 @@ use qur_theme::{Rgba, TerminalColors};
 use crate::commands::{edit, qur, terminal as ta};
 use crate::input::{InputEvent, TextInput};
 use crate::dock::Edge;
+use crate::images;
 use crate::look::Look;
 use crate::tiling::{self, Motion, Rect};
 
@@ -111,8 +112,14 @@ type Reply = Arc<std::sync::Mutex<Option<EventLoopSender>>>;
 /// panel, set from its window's look, so each window answers with its own theme.
 type ColorsCell = Arc<std::sync::Mutex<Option<TerminalColors>>>;
 
+/// How long a pane flashes when its bell rings.
+const BELL_FLASH: Duration = Duration::from_millis(150);
+
+/// The program rang the bell (BEL) since the reader last looked.
+type BellCell = Arc<std::sync::atomic::AtomicBool>;
+
 #[derive(Clone)]
-pub struct Listener(UnboundedSender<()>, TitleCell, Reply, ColorsCell);
+pub struct Listener(UnboundedSender<()>, TitleCell, Reply, ColorsCell, BellCell);
 
 impl Listener {
     fn reply(&self, text: String) {
@@ -151,9 +158,10 @@ impl EventListener for Listener {
                     self.reply(format(c));
                 }
             }
+            TermEvent::Bell => self.4.store(true, std::sync::atomic::Ordering::Relaxed),
             _ => {}
         }
-        if matches!(ev, TermEvent::Wakeup | TermEvent::ChildExit(_) | TermEvent::Exit | TermEvent::Title(_) | TermEvent::ResetTitle) {
+        if matches!(ev, TermEvent::Wakeup | TermEvent::ChildExit(_) | TermEvent::Exit | TermEvent::Title(_) | TermEvent::ResetTitle | TermEvent::Bell) {
             let _ = self.0.unbounded_send(());
         }
     }
@@ -208,6 +216,12 @@ pub struct Session {
     kept: Option<(Selection, usize)>,
     /// What that selection said when you made it (what Cmd+C copies).
     selected_text: Option<String>,
+    /// Font size change for this terminal alone (Cmd+= / Cmd+-), in points.
+    zoom: f32,
+    /// When the bell last rang (the pane flashes briefly).
+    bell_at: Option<Instant>,
+    /// Its cell size and width, for sizing inline images (images.rs).
+    geo: images::GeoCell,
     _reader: Task<()>,
 }
 
@@ -314,6 +328,7 @@ pub fn set_config(cfg: &qur_config::TerminalConfig) -> Option<String> {
             errors.push(format!("[terminal] {e}"));
         }
     }
+    crate::secure::set(cfg.secure_input);
     *OPTS.write().unwrap_or_else(|e| e.into_inner()) = Opts { cfg: cfg.clone(), colors };
     (!errors.is_empty()).then(|| errors.join("; "))
 }
@@ -356,10 +371,10 @@ fn term_config() -> TermConfig {
     }
 }
 
-fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize, title: TitleCell, colors: ColorsCell) -> std::io::Result<Spawned> {
+fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize, title: TitleCell, colors: ColorsCell, bell: BellCell, geo: images::GeoCell) -> std::io::Result<Spawned> {
     let (tx, rx) = unbounded();
     let reply = Reply::default();
-    let listener = Listener(tx, title, reply.clone(), colors);
+    let listener = Listener(tx, title, reply.clone(), colors, bell);
     let (cols, lines) = (100, 12);
     // `env -u` strips vendor API keys so the CLIs use their own logins.
     // `[terminal] shell` for plain shells; an agent's command is written for $SHELL.
@@ -391,6 +406,7 @@ fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize, title: TitleCell, colors:
     let term = Arc::new(FairMutex::new(Term::new(term_config(), &Dims { cols, lines }, listener.clone())));
     let pty = tty::new(&opts, WindowSize { num_lines: lines as u16, num_cols: cols as u16, cell_width: 8, cell_height: 16 }, id as u64)?;
     let pid = pty.child().id() as i32;
+    let pty = images::ImgPty::new(pty, geo)?;
     let ev = EventLoop::new(term.clone(), listener, pty, false, false)?;
     let sender = ev.channel();
     *reply.lock().unwrap_or_else(|e| e.into_inner()) = Some(sender.clone());
@@ -728,7 +744,8 @@ pub struct TerminalPanel {
     pub active: usize,
     next_id: usize,
     pub message: Option<String>,
-    cell: (Pixels, Pixels),
+    /// Each shown pane's cell size, as last laid out (panes zoom on their own).
+    cells: HashMap<usize, (Pixels, Pixels)>,
     /// `cursor_blink`: the cursor's off half, and the timer that flips it
     /// while a focused pane draws a blinking cursor (`blink_seen`).
     blink_off: bool,
@@ -791,7 +808,7 @@ impl TerminalPanel {
             active: 0,
             next_id: 1,
             message: None,
-            cell: (px(8.), px(16.)),
+            cells: HashMap::new(),
             pane_bounds: HashMap::new(),
             zen_hold: std::cell::Cell::new(false),
             rest_size: HashMap::new(),
@@ -869,7 +886,9 @@ impl TerminalPanel {
             Kind::Shell => None,
         };
         let title = TitleCell::default();
-        let (term, sender, pid, mut rx) = match spawn_pty(cwd, run.as_deref(), id, title.clone(), self.colors.clone()) {
+        let bell = BellCell::default();
+        let geo = images::geo_cell();
+        let (term, sender, pid, mut rx) = match spawn_pty(cwd, run.as_deref(), id, title.clone(), self.colors.clone(), bell.clone(), geo.clone()) {
             Ok(x) => x,
             Err(e) => {
                 self.message = Some(format!("terminal failed: {e}"));
@@ -886,6 +905,9 @@ impl TerminalPanel {
                         let Some(ix) = p.sessions.iter().position(|s| s.id == id) else { return };
                         let was_busy = p.sessions[ix].is_busy();
                         p.sessions[ix].last_output = Some(Instant::now());
+                        if bell.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                            p.ring(ix, cx);
+                        }
                         if p.shown().contains(&id) {
                             cx.notify();
                         }
@@ -917,6 +939,9 @@ impl TerminalPanel {
             title,
             kept: None,
             selected_text: None,
+            zoom: 0.,
+            bell_at: None,
+            geo,
             _reader: reader,
         });
         self.active = self.sessions.len() - 1;
@@ -1276,6 +1301,47 @@ impl TerminalPanel {
         self.sessions.get(self.active)
     }
 
+    /// A pane's cell size, as last laid out.
+    fn cell(&self, id: usize) -> (Pixels, Pixels) {
+        self.cells.get(&id).copied().unwrap_or((px(8.), px(16.)))
+    }
+
+    fn active_cell(&self) -> (Pixels, Pixels) {
+        self.active_session().map_or((px(8.), px(16.)), |s| self.cell(s.id))
+    }
+
+    /// Cmd+= / Cmd+- / Cmd+0: this terminal's font only.
+    fn zoom_by(&mut self, delta: Option<f32>, cx: &mut Context<Self>) {
+        let base = opts().cfg.font_size;
+        if let Some(s) = self.sessions.get_mut(self.active) {
+            // Keep the size between 6 and 72 points (as `[terminal] font_size`).
+            let size = if base > 0. { base } else { 13. };
+            s.zoom = delta.map_or(0., |d| (s.zoom + d).clamp(6. - size, 72. - size));
+        }
+        cx.notify();
+    }
+    fn zoom_in(&mut self, _: &ta::ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
+        self.zoom_by(Some(1.), cx)
+    }
+    fn zoom_out(&mut self, _: &ta::ZoomOut, _: &mut Window, cx: &mut Context<Self>) {
+        self.zoom_by(Some(-1.), cx)
+    }
+    fn zoom_reset(&mut self, _: &ta::ZoomReset, _: &mut Window, cx: &mut Context<Self>) {
+        self.zoom_by(None, cx)
+    }
+
+    /// The bell: the pane flashes, and the Dock icon bounces once when Qur is behind.
+    fn ring(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.sessions[ix].bell_at = Some(Instant::now());
+        crate::secure::bounce_if_inactive();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(BELL_FLASH).await;
+            this.update(cx, |_, cx| cx.notify()).ok();
+        })
+        .detach();
+    }
+
     fn write_active(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         let Some(s) = self.sessions.get_mut(self.active) else { return };
         // Typing snaps back to the bottom of the scrollback.
@@ -1425,12 +1491,13 @@ impl TerminalPanel {
         let id = self.active_session().map(|s| s.id);
         let b = id.and_then(|id| self.pane_bounds.get(&id)).copied().unwrap_or_default();
         let shift = id.and_then(|id| self.grid_shift.get(&id)).copied().unwrap_or_default();
-        let row = ((p.y - b.top()).max(px(0.)) + shift) / self.cell.1;
+        let cell = self.active_cell();
+        let row = ((p.y - b.top()).max(px(0.)) + shift) / cell.1;
         let row = row.floor() as i32;
         let moved = id.and_then(|id| self.row_shift.get(&id)).and_then(|v| v.get(row.max(0) as usize)).copied().unwrap_or(0);
-        let x = (p.x - b.left() - self.cell.0 * moved as f32).max(px(0.));
-        let col = (x / self.cell.0).floor() as usize;
-        let side = if (x / self.cell.0).fract() < 0.5 { Side::Left } else { Side::Right };
+        let x = (p.x - b.left() - cell.0 * moved as f32).max(px(0.));
+        let col = (x / cell.0).floor() as usize;
+        let side = if (x / cell.0).fract() < 0.5 { Side::Left } else { Side::Right };
         (TPoint::new(Line(row - display_offset as i32), Column(col)), side)
     }
 
@@ -1449,13 +1516,26 @@ impl TerminalPanel {
             let off = t.grid().display_offset();
             let (p, side) = self.grid_point(ev.position, off);
             let p = TPoint::new(p.line, p.column.min(t.last_column()));
-            // Double-click selects a word, triple-click a line.
-            let kind = match ev.click_count {
-                2 => SelectionType::Semantic,
-                3 => SelectionType::Lines,
-                _ => SelectionType::Simple,
-            };
-            t.selection = Some(Selection::new(kind, p, side));
+            // Double-click selects a word (a whole URL or path), triple-click a line.
+            let link = (ev.click_count == 2).then(|| {
+                let text: String = (0..t.columns()).map(|c| t.grid()[p.line][Column(c)].c).collect();
+                link_span(&text, p.column.0).filter(|r| classify_link(&text.chars().skip(r.start).take(r.len()).collect::<String>()).is_some())
+            });
+            t.selection = Some(match link.flatten() {
+                Some(r) => {
+                    let mut sel = Selection::new(SelectionType::Simple, TPoint::new(p.line, Column(r.start)), Side::Left);
+                    sel.update(TPoint::new(p.line, Column(r.end - 1)), Side::Right);
+                    sel
+                }
+                None => {
+                    let kind = match ev.click_count {
+                        2 => SelectionType::Semantic,
+                        3 => SelectionType::Lines,
+                        _ => SelectionType::Simple,
+                    };
+                    Selection::new(kind, p, side)
+                }
+            });
             drop(t);
             self.selecting = true;
             let ix = self.active;
@@ -1647,7 +1727,7 @@ impl TerminalPanel {
             self.drag_scroll = None;
             return false;
         };
-        let lh = self.cell.1;
+        let lh = self.active_cell().1;
         let lines = if pos.y < b.top() {
             1 + ((b.top() - pos.y) / lh) as i32
         } else if pos.y > b.bottom() {
@@ -1675,7 +1755,7 @@ impl TerminalPanel {
     /// full-screen ones (alt screen) get arrow keys, else the scrollback moves.
     /// Shift always scrolls the scrollback.
     fn on_scroll(&mut self, ev: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let lh = self.cell.1;
+        let lh = self.active_cell().1;
         match ev.touch_phase {
             TouchPhase::Started => self.scroll_px = px(0.),
             TouchPhase::Moved => {}
@@ -1850,6 +1930,8 @@ struct GridPrepaint {
     cursor: Option<(usize, usize, CursorShape)>,
     blink: bool,
     has_content: bool,
+    /// Inline images on screen: id, top row (above the screen when < 0), column.
+    images: Vec<(u32, i32, usize)>,
 }
 
 /// A pane's grid area: inside `[terminal] padding_x` / `padding_y`.
@@ -1894,6 +1976,8 @@ impl Element for GridElement {
             let family = if c.font_family.is_empty() { look.code_font.clone() } else { c.font_family.clone().into() };
             (base, family, c.line_height, c.bold_is_bright, o.colors.sel_fg.map(rgb), c.text_align == "right")
         };
+        let zoom = self.panel.read(cx).sessions.iter().find(|s| s.id == self.id).map_or(0., |s| s.zoom);
+        let base = base + zoom;
         let fs = look.z(base);
         let f = font(family);
         let ts = window.text_system().clone();
@@ -1914,14 +1998,16 @@ impl Element for GridElement {
         });
         let cols = ((grid.size.width / cw).floor() as usize).max(2);
         let lines = ((grid.size.height / lh).floor() as usize).max(1);
-        let mut out = GridPrepaint { top: grid.top(), rows: Vec::new(), cursor: None, blink: false, has_content: false };
+        let mut out = GridPrepaint { top: grid.top(), rows: Vec::new(), cursor: None, blink: false, has_content: false, images: Vec::new() };
+        let scale = window.scale_factor();
         self.panel.update(cx, |p, _| {
-            p.cell = (cw, lh);
+            p.cells.insert(id, (cw, lh));
             p.pane_bounds.insert(id, bounds);
             p.grid_shift.insert(id, bounds.top() - grid.top());
             crate::script::record(|| format!("term:{id}"), bounds);
             crate::script::record(|| format!("term-cell:{id}"), Bounds::new(bounds.origin, gpui::size(cw, lh)));
             let Some(s) = p.sessions.iter_mut().find(|s| s.id == id) else { return };
+            *s.geo.lock().unwrap_or_else(|e| e.into_inner()) = images::Geo { cw: cw / px(1.), lh: lh / px(1.), cols, scale };
             s.restore_selection();
             if s.size != (cols, lines) {
                 // New columns rewrap the lines: the old selection means nothing.
@@ -1971,6 +2057,11 @@ impl Element for GridElement {
                 continue;
             }
             let col = ic.point.column.0;
+            if let Some((img, r)) = cell.hyperlink().and_then(|h| images::tag(h.uri()))
+                && !out.images.iter().any(|(i, ..)| *i == img)
+            {
+                out.images.push((img, row as i32 - r as i32, col));
+            }
             let dim = cell.flags.contains(Flags::DIM);
             let bold = cell.flags.contains(Flags::BOLD);
             let fgc = match cell.fg {
@@ -2049,7 +2140,7 @@ impl Element for GridElement {
         let focus = p.focus.clone();
         let mine = p.active_session().is_some_and(|s| s.id == self.id);
         let focused = mine && focus.is_focused(window);
-        let (cw, lh) = p.cell;
+        let (cw, lh) = p.cell(self.id);
         if mine {
             window.handle_input(&focus, ElementInputHandler::new(bounds, self.panel.clone()), cx);
             // Window-wide, so a selection dragged out of the pane keeps going.
@@ -2070,7 +2161,11 @@ impl Element for GridElement {
                 }
             });
         }
+        let flash = p.sessions.iter().find(|s| s.id == self.id).and_then(|s| s.bell_at).is_some_and(|t| t.elapsed() < BELL_FLASH);
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            if flash {
+                window.paint_quad(fill(bounds, look.c(look.theme.terminal.foreground).opacity(0.12)));
+            }
             for row in &pre.rows {
                 let left = bounds.left() + cw * row.shift as f32;
                 for &(a, b, c) in &row.bgs {
@@ -2088,6 +2183,18 @@ impl Element for GridElement {
                     }
                 }
                 row.text.paint(point(left, row.y), lh, gpui::TextAlign::Left, None, window, cx).ok();
+            }
+            for &(id, top, col) in &pre.images {
+                let Some(img) = images::get(id) else { continue };
+                let r = Bounds::new(
+                    point(bounds.left() + cw * col as f32, pre.top + lh * top as f32),
+                    size(cw * img.cols as f32, lh * img.rows as f32),
+                );
+                // Fit inside its cells, keeping its shape (it was sized to them).
+                let s = img.data.size(0);
+                let k = (r.size.width / px(s.width.0 as f32)).min(r.size.height / px(s.height.0 as f32));
+                let fit = Bounds::new(r.origin, size(px(s.width.0 as f32) * k, px(s.height.0 as f32) * k));
+                window.paint_image(fit, fit, gpui::Corners::default(), img.data.clone(), 0, false).ok();
             }
             let blinking = focused && pre.blink && pre.cursor.is_some();
             if blinking {
@@ -2139,6 +2246,9 @@ impl Render for TerminalPanel {
             .when(tiled, |d| d.gap(look.gap()))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_action(cx.listener(Self::clear))
+            .on_action(cx.listener(Self::zoom_in))
+            .on_action(cx.listener(Self::zoom_out))
+            .on_action(cx.listener(Self::zoom_reset))
             .on_action(cx.listener(Self::line_start))
             .on_action(cx.listener(Self::line_end))
             .on_action(cx.listener(Self::kill_line))
@@ -2587,7 +2697,13 @@ enum Link {
 
 /// The whitespace-free word at `col` in a terminal line, without wrapping
 /// quotes/brackets or trailing punctuation.
-fn link_at(text: &str, col: usize) -> Option<String> {
+pub(crate) fn link_at(text: &str, col: usize) -> Option<String> {
+    let r = link_span(text, col)?;
+    Some(text.chars().skip(r.start).take(r.len()).collect())
+}
+
+/// Where `link_at`'s word is, in chars.
+fn link_span(text: &str, col: usize) -> Option<Range<usize>> {
     let chars: Vec<char> = text.chars().collect();
     let stop = |c: char| c.is_whitespace() || "\"'`()[]{}<>|".contains(c);
     if col >= chars.len() || stop(chars[col]) {
@@ -2601,9 +2717,13 @@ fn link_at(text: &str, col: usize) -> Option<String> {
     while b + 1 < chars.len() && !stop(chars[b + 1]) {
         b += 1;
     }
-    let tok: String = chars[a..=b].iter().collect();
-    let tok = tok.trim_end_matches(['.', ',', ';', ':', '!', '?']);
-    (!tok.is_empty()).then(|| tok.to_string())
+    while b >= a && ['.', ',', ';', ':', '!', '?'].contains(&chars[b]) {
+        if b == a {
+            return None;
+        }
+        b -= 1;
+    }
+    Some(a..b + 1)
 }
 
 fn classify_link(tok: &str) -> Option<Link> {
@@ -2653,7 +2773,7 @@ mod tests {
         let light = themes.iter().find(|t| t.appearance == qur_theme::Appearance::Light).expect("a light theme").terminal.clone();
         let dark = themes.iter().find(|t| t.appearance == qur_theme::Appearance::Dark).expect("a dark theme").terminal.clone();
         assert_ne!(rgb(light.background), rgb(dark.background));
-        let listener = |colors: &ColorsCell| Listener(unbounded().0, TitleCell::default(), Reply::default(), colors.clone());
+        let listener = |colors: &ColorsCell| Listener(unbounded().0, TitleCell::default(), Reply::default(), colors.clone(), BellCell::default());
         let (a, b) = (ColorsCell::default(), ColorsCell::default());
         let (la, lb) = (listener(&a), listener(&b));
         // Nothing to answer before the panel has its window's colors.

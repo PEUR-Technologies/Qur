@@ -302,7 +302,7 @@ check_empty_window() {  # no project to reopen: the empty window opens with a sh
   setup empty_window
   drive "wait:1500,state,qur::QuickOpen,qur::GitPanel,qur::FindInProject,wait:300,state,qur::NewTerminal,wait:1000,state,key:cmd-\\,,wait:300,click:@settings:nav:Appearance,wait:300,click:@settings:theme:1,wait:300,qur::Quit" -
   ok "the empty window opened (no project)" has 'WINDOW empty'
-  ok "with a shell, and the sidebar showing it" grep -qE '^STATE.*project=none overlay=none selected=shell:1 .*sessions=1 .*visible=true' "$LOG"
+  ok "with a shell, and no sidebar" grep -qE '^STATE.*project=none overlay=none selected=shell:1 .*sessions=1 .*visible=false' "$LOG"
   ok "Go to File, Git and Find in Project do nothing there" test "$(grep -c '^STATE.*project=none overlay=none selected=shell:1 .*git={none}' "$LOG")" -eq 2
   ok "New Terminal adds a second shell" state_has 'sessions=2'
   ok "and the empty window isn't a recent project" test -z "$(grep -F recent_projects "$QUR_HOME/state.toml" | grep -F /)"

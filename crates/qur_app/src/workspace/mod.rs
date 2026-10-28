@@ -561,6 +561,7 @@ impl Workspace {
             keep_awake: self.config.ui.keep_awake,
             zen: self.config.ui.zen,
             gaps: self.config.ui.gaps,
+            secure_input: self.config.terminal.secure_input,
             keymap: commands::keymap_generation(),
         }
     }
@@ -858,6 +859,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::transparency))
             .on_action(cx.listener(Self::gaps))
             .on_action(cx.listener(Self::toggle_gaps))
+            .on_action(cx.listener(Self::toggle_secure_input))
             .on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::close_terminal))
             .on_action(cx.listener(Self::tile_terminal))
