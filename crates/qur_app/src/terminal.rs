@@ -382,26 +382,32 @@ fn spawn_pty(cwd: &Path, run: Option<&str>, id: usize, title: TitleCell, colors:
         s if run.is_none() && !s.trim().is_empty() => s.trim().to_string(),
         _ => shell(),
     };
+    let plain = run.is_none() && program == shell();
     let mut args = vec!["-u".into(), "ANTHROPIC_API_KEY".into(), "-u".into(), "OPENAI_API_KEY".into(), program, "-l".into()];
     if let Some(cmd) = run {
         // The shell stays open after the agent exits.
         args.push("-c".into());
         args.push(format!("{cmd}; exec \"$SHELL\" -l"));
     }
+    let mut env = HashMap::from([
+        ("TERM".into(), "xterm-256color".into()),
+        ("COLORTERM".into(), "truecolor".into()),
+        ("TERM_PROGRAM".into(), "qur".into()),
+        // `$EDITOR $QUR_CONFIG`: Qur's settings, applied when saved.
+        ("QUR_CONFIG".into(), qur_config::config_path().to_string_lossy().into_owned()),
+    ]);
+    // The user's full shell PATH (qur_agents::login_path), so `claude` and
+    // friends are found even when Qur was opened from Finder. A plain `$SHELL -l`
+    // builds that PATH itself, and waiting for login_path held the first
+    // window's shell (and its first frame) up to ~250 ms.
+    if !plain {
+        env.insert("PATH".into(), qur_agents::login_path().into());
+    }
     let opts = tty::Options {
         shell: Some(tty::Shell::new("/usr/bin/env".into(), args)),
         working_directory: Some(cwd.to_path_buf()),
         drain_on_exit: false,
-        env: HashMap::from([
-            ("TERM".into(), "xterm-256color".into()),
-            ("COLORTERM".into(), "truecolor".into()),
-            ("TERM_PROGRAM".into(), "qur".into()),
-            // `$EDITOR $QUR_CONFIG`: Qur's settings, applied when saved.
-            ("QUR_CONFIG".into(), qur_config::config_path().to_string_lossy().into_owned()),
-            // The user's full shell PATH (qur_agents::login_path), so `claude`
-            // and friends are found even when Qur was opened from Finder.
-            ("PATH".into(), qur_agents::login_path().into()),
-        ]),
+        env,
     };
     let term = Arc::new(FairMutex::new(Term::new(term_config(), &Dims { cols, lines }, listener.clone())));
     let pty = tty::new(&opts, WindowSize { num_lines: lines as u16, num_cols: cols as u16, cell_width: 8, cell_height: 16 }, id as u64)?;
