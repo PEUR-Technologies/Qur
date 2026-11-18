@@ -24,7 +24,7 @@ Agents are first-class. The sidebar lists agents as buttons. Each agent works in
 
 ## Status: what's built
 
-All milestones are on `main`. There are 370 tests (`cargo test --release --workspace`), all passing; clippy is clean with `-D warnings`; `scripts/handcheck.sh` passes 124 scripted hand checks.
+All milestones are on `main`. There are 371 tests (`cargo test --release --workspace`), all passing; clippy is clean with `-D warnings`; `scripts/handcheck.sh` passes 124 scripted hand checks.
 
 | Milestone | What | Decisions |
 |---|---|---|
@@ -51,7 +51,7 @@ All milestones are on `main`. There are 370 tests (`cargo test --release --works
 | 2026-10-27 v0.1.9 | Cmd+\ shows or hides Qur from any app (`[keys] global`, macOS's own keys refused); `[terminal]` font, padding, cursor, colors, Ghostty themes, option-as-alt, `shell`, right-aligned text; import from Ghostty, kitty or Alacritty; settings files apply when saved from any editor (`$QUR_CONFIG`); hover focus as a setting, Cmd+Opt+Shift+arrows swap panes, panes dragged by a grip; copy on select, drag-scroll; Cmd+W on the last shell closes the window | 72 |
 | 2026-10-28 v0.1.10 | Cmd+\ removed (no system-wide key, nothing in the background); the empty window has no sidebar; Terminal > Bell toggle; inline terminal images (iTerm2 `imgcat`); Cmd+= / Cmd+- / Cmd+0 per terminal; Secure Keyboard Entry; the bell flashes the pane and bounces the Dock; double-click selects a whole URL or path; drag-scroll in the code modal | 73 |
 | 2026-10-28 v0.1.11 | Opening Qur from Spotlight or the Dock: first frame 360 → 108 ms (a plain terminal no longer waits for the login-shell PATH; its own `$SHELL -l` builds it) | — |
-| 2026-11-19 v0.2.0 | Hyprland keys for split terminals: `Cmd+D` Fullscreen Pane, `Cmd+Opt+J` Toggle Split, `Cmd+Ctrl+Arrows` resize; the grid's odd pane out is the oldest; Ctrl+Backspace deletes a word; the website has full docs (`~/qursite` `/docs/`, shortcuts generated from `commands.rs`) | 74 |
+| 2026-11-19 v0.2.0 | Hyprland keys for split terminals: `Cmd+D` Fullscreen Pane, `Cmd+Opt+J` Toggle Split, `Cmd+Ctrl+Arrows` resize; the grid's odd pane out is the oldest; Ctrl+Backspace deletes a word; Ctrl/Shift+Arrows reach terminals (xterm `ESC[1;5D`); the website has full docs (`~/qursite` `/docs/`, shortcuts generated from `commands.rs`) | 74 |
 
 Latest numbers (`docs/budget.md`, M7 table, measured on battery; app size from the v0.1.9 bundle): app 30 MB (25 MB at M7), first frame 113 ms, idle 73 MB, 3 agents 129 MB, glow 81 ms, keystroke p99 2.0 ms, search 51 ms. `lsof` shows no network sockets in Qur's own process.
 
@@ -123,7 +123,7 @@ Where things are stored on the owner's Mac:
 ```sh
 source ~/.cargo/env
 cargo build --release -p qur_app && target/release/qur ~/some/project   # no argument = last project
-cargo test --release --workspace            # 370 tests
+cargo test --release --workspace            # 371 tests
 scripts/handcheck.sh [check ...]            # 124 scripted hand checks (-l lists them); unlocked session
 target/release/qur doctor                   # setup checks, exit 1 on any problem
 scripts/bundle.sh [--zip]                   # target/release/Qur.app (ad-hoc signed); then cp -R to /Applications
