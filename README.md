@@ -1,6 +1,6 @@
 # Qur
 
-**See what your agents see.** A native macOS editor for running AI coding agents: each one gets its own worktree, and the file tree lights up as it works.
+**See what your agents see.** Qur is a native macOS editor for running AI coding agents. Each agent gets its own worktree. The file tree lights up as it works.
 
 Rust + GPUI · no Electron · runs locally · uses your Claude Code or Codex login, not an API key · pre-release 0.1, macOS only
 
@@ -16,16 +16,16 @@ Rust + GPUI · no Electron · runs locally · uses your Claude Code or Codex log
 
 ## Features
 
-- **Browser + Inspect.** Your dev server, right next to the agent. Click an element to point at it.
-- **Worktree per agent.** Run as many as you like. Your checkout never changes.
+- **Browser + Inspect.** Your dev server sits next to the agent. Click an element to point at it.
+- **Worktree per agent.** Run several agents at once. Your checkout never changes.
 - **Port per agent.** Run Project starts each agent's app on its own port.
 - **Heatmap.** See which files are being read and edited.
 - **Live.** Follow the agent's cursor. Take over anytime.
 - **Review → Merge.** Comment on lines, send them back, merge.
 - **Rewind.** Undo an agent's last turn.
 - **Second opinion.** Another agent reviews the work, read-only.
-- **Checks.** `cargo check` (or anything) after every turn.
-- **Alerts.** Notification and Dock badge when it's your turn.
+- **Checks.** Run `cargo check` or any command after every turn.
+- **Alerts.** You get a notification and a Dock badge when it's your turn.
 - **Any CLI agent.** Claude Code, Codex, Aider, …
 - **Editor.** 13 languages, multi-cursor, Vim, 17 themes.
 
@@ -35,7 +35,7 @@ Rust + GPUI · no Electron · runs locally · uses your Claude Code or Codex log
 
 ## Install
 
-Needs macOS 13+, git 2.38+ and [Claude Code](https://claude.com/claude-code).
+You need macOS 13+, git 2.38+ and [Claude Code](https://claude.com/claude-code).
 
 ```sh
 brew tap peur-technologies/qur
@@ -43,20 +43,20 @@ brew trust peur-technologies/qur
 brew install --cask qur
 ```
 
-Or [download the zip](https://github.com/PEUR-Technologies/Qur/releases/latest/download/Qur.zip) and move Qur.app to Applications. It isn't notarized yet, so macOS blocks it on first launch; to open it, run:
+Or [download the zip](https://github.com/PEUR-Technologies/Qur/releases/latest/download/Qur.zip) and move Qur.app to Applications. It isn't notarized yet, so macOS blocks it on first launch. To open it, run:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Qur.app
 ```
 
-Or build it yourself (needs Rust and Xcode too):
+Or build it yourself. This also needs Rust and Xcode.
 
 ```sh
 git clone https://github.com/PEUR-Technologies/Qur.git && cd Qur
 scripts/bundle.sh && cp -R target/release/Qur.app /Applications/
 ```
 
-Open a folder, press `⌘⇧T`, describe the task.
+Open a folder, press `⌘⇧T` and describe the task.
 
 | `⌘⇧T` Agent Terminal | `⌘⇧N` Structured agent | `⌘P` Go to file | `⌘⇧P` Commands | `⌘⇧F` Search |
 |---|---|---|---|---|
