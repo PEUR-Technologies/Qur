@@ -117,6 +117,7 @@ A file in an agent's worktree (the modal says "in <task>") shows the agent's cha
 | `Cmd+Opt+J` (terminal focused) | Toggle Split Direction: side by side ↔ stacked (Hyprland's togglesplit) | S |
 | `Cmd+Ctrl+Arrows` (terminal focused) | Move the focused pane's divider that way (Hyprland's resizeactive) | S |
 | `Ctrl+Backspace` | Delete the word before the cursor, as `Opt+Backspace` (terminals, editor, inputs) | S |
+| `Ctrl+Arrows` / `Shift+Arrows` (terminal focused) | Sent as xterm modified arrows (`ESC[1;5D` …), so Ctrl+Left/Right jump words in Claude Code and shells; macOS takes Ctrl+Left/Right for Spaces unless turned off in Keyboard Shortcuts → Mission Control | S |
 | `Cmd+Opt+Arrows` (terminal focused) | Focus the split pane in that direction. Moving the pointer onto a pane focuses it too (`[terminal] focus_follows_mouse`); a still pointer never undoes a pane picked with the keys | S |
 | `Cmd+Opt+Shift+Arrows` (terminal focused) | Move Pane: swap the focused pane with the one in that direction | ✅ |
 | `Cmd+Enter` | New Tiled Terminal: a shell tiled into the terminal on screen, splitting the focused pane along its longer side (like i3/Hyprland); with no terminal shown, a new one. Insert Line Below in the editor | S |

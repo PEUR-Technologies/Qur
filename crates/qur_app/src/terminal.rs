@@ -1890,8 +1890,10 @@ fn key_bytes(ks: &gpui::Keystroke, app_cursor: bool, meta: bool) -> Option<Vec<u
     }
     let key = ks.key.as_str();
     let arrow = |c: u8| {
-        if m.shift || m.control || m.alt {
-            None
+        // xterm modifier code: 1 + Shift(1) + Alt(2) + Ctrl(4), e.g. Ctrl+Left = ESC[1;5D.
+        let n = 1 + m.shift as u8 + 2 * m.alt as u8 + 4 * m.control as u8;
+        if n > 1 {
+            Some(format!("\x1b[1;{n}{}", c as char).into_bytes())
         } else if app_cursor {
             Some(vec![0x1b, b'O', c])
         } else {
@@ -1910,6 +1912,9 @@ fn key_bytes(ks: &gpui::Keystroke, app_cursor: bool, meta: bool) -> Option<Vec<u
             }
             _ => None,
         };
+    }
+    if let Some(c) = match key { "up" => Some(b'A'), "down" => Some(b'B'), "right" => Some(b'C'), "left" => Some(b'D'), _ => None } {
+        return arrow(c);
     }
     if m.control {
         let b = match key {
@@ -2856,6 +2861,16 @@ mod tests {
         assert_eq!(k("alt-f"), None);
         // Ctrl+Backspace deletes one word, like Option+Backspace.
         assert_eq!(k("ctrl-backspace"), Some(b"\x1b\x7f".to_vec()));
+    }
+
+    #[test]
+    fn modified_arrows() {
+        let k = |s| super::key_bytes(&gpui::Keystroke::parse(s).unwrap(), false, false);
+        assert_eq!(k("left"), Some(b"\x1b[D".to_vec()));
+        assert_eq!(k("ctrl-left"), Some(b"\x1b[1;5D".to_vec()));
+        assert_eq!(k("ctrl-right"), Some(b"\x1b[1;5C".to_vec()));
+        assert_eq!(k("shift-up"), Some(b"\x1b[1;2A".to_vec()));
+        assert_eq!(k("alt-left"), Some(b"\x1bb".to_vec()));
     }
 
     use super::*;
