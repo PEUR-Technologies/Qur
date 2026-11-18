@@ -188,7 +188,7 @@ check_gaps() {  # window gaps: toggle, a dock divider and the sidebar gap still 
 check_gaps_terminal() {  # with gaps on, split shells are tiles and their divider still drags.
   setup gaps_terminal
   printf '[ui]\ngaps = true\n' >> "$QUR_HOME/config.toml"
-  drive "wait:1500,qur::NewTerminal,wait:1500,key:cmd-d,wait:800,state,drag:@term-split:root,500,300,wait:300,state,qur::Quit"
+  drive "wait:1500,qur::NewTerminal,wait:1500,terminal::SplitRight,wait:800,state,drag:@term-split:root,500,300,wait:300,state,qur::Quit"
   ok "Cmd+D split the shell" grep -qF 'sessions=2 active=1 find=none selection="" split=0.500' "$LOG"
   local after; after=$(last_state | sed -nE 's/.* split=([0-9.]+).*/\1/p')
   ok "dragging the gap between them moved the divider (${after:-?})" test -n "$after" -a "$after" != "0.500"

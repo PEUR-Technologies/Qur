@@ -654,7 +654,9 @@ impl Tile {
         let mut rest = ids;
         let rows: Vec<Tile> = (0..rows)
             .map(|r| {
-                let take = n / rows + usize::from(r < n % rows);
+                // Fuller rows last: the odd pane out is the oldest, so a new
+                // pane is never bigger than the ones before it (dwindle's rule).
+                let take = n / rows + usize::from(r >= rows - n % rows);
                 let (row, more) = rest.split_at(take);
                 rest = more;
                 chain(row.iter().map(|&id| Tile::Term(id)).collect(), false)
@@ -675,6 +677,34 @@ impl Tile {
                 }
             }
         }
+    }
+
+    /// Hyprland's togglesplit: the split directly holding `id` turns from
+    /// side by side to stacked, or back.
+    fn flip(&mut self, id: usize) -> bool {
+        let Tile::Split { vertical, a, b, .. } = self else { return false };
+        if matches!(**a, Tile::Term(t) if t == id) || matches!(**b, Tile::Term(t) if t == id) {
+            *vertical = !*vertical;
+            return true;
+        }
+        a.flip(id) || b.flip(id)
+    }
+
+    /// Hyprland's resizeactive: move the nearest divider beside `id` that
+    /// runs across `axis` (stacked when `vertical`) by `d` of its split.
+    fn nudge(&mut self, id: usize, vertical: bool, d: f32) -> bool {
+        let Tile::Split { vertical: v, ratio, a, b } = self else { return false };
+        if !a.ids().contains(&id) && !b.ids().contains(&id) {
+            return false;
+        }
+        if a.nudge(id, vertical, d) || b.nudge(id, vertical, d) {
+            return true;
+        }
+        if *v != vertical {
+            return false;
+        }
+        *ratio = (*ratio + d).clamp(0.12, 0.88);
+        true
     }
 
     /// Without `id`; a split left with one pane collapses into it.
@@ -772,6 +802,8 @@ pub struct TerminalPanel {
     find: Option<Find>,
     idle_check: Option<Task<()>>,
     groups: Vec<Group>,
+    /// Cmd+D: this pane fills its row while it's the focused one.
+    zoomed: Option<usize>,
     /// A group's owner closed and another pane took its row: old -> new.
     moved: HashMap<usize, usize>,
     split_bounds: Rc<RefCell<HashMap<Vec<bool>, Bounds<Pixels>>>>,
@@ -831,6 +863,7 @@ impl TerminalPanel {
             drag_at: None,
             drag_scroll: None,
             groups: Vec::new(),
+            zoomed: None,
             moved: HashMap::new(),
             split_bounds: Rc::default(),
             glide: Motion::default(),
@@ -1175,8 +1208,17 @@ impl TerminalPanel {
         self.groups.iter().find(|g| g.tile.ids().contains(&id))
     }
 
+    /// The focused pane, when Cmd+D has it filling its row.
+    fn zoomed_pane(&self) -> Option<usize> {
+        let id = self.active_session()?.id;
+        (self.zoomed == Some(id) && self.active_group().is_some()).then_some(id)
+    }
+
     /// The sessions on screen: the focused one's group, or just it.
     fn shown(&self) -> Vec<usize> {
+        if let Some(id) = self.zoomed_pane() {
+            return vec![id];
+        }
         match self.active_group() {
             Some(g) => g.tile.ids(),
             None => self.active_session().map(|s| vec![s.id]).unwrap_or_default(),
@@ -1266,6 +1308,38 @@ impl TerminalPanel {
     }
     fn move_down(&mut self, _: &ta::MovePaneDown, _: &mut Window, cx: &mut Context<Self>) {
         self.move_toward(0., 1., cx)
+    }
+
+    /// Cmd+D: the focused pane fills its row, or goes back into the split.
+    fn fullscreen_pane(&mut self, _: &ta::FullscreenPane, _: &mut Window, cx: &mut Context<Self>) {
+        self.zoomed = if self.zoomed_pane().is_some() { None } else { self.active_session().map(|s| s.id) };
+        cx.notify();
+    }
+
+    /// Edit the focused pane's group by hand; it's no longer a grid.
+    fn edit_tile(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Tile, usize) -> bool) {
+        let Some(id) = self.active_session().map(|s| s.id) else { return };
+        if let Some(g) = self.groups.iter_mut().find(|g| g.tile.ids().contains(&id))
+            && f(&mut g.tile, id)
+        {
+            g.grid = false;
+            cx.notify();
+        }
+    }
+    fn toggle_split(&mut self, _: &ta::ToggleSplit, _: &mut Window, cx: &mut Context<Self>) {
+        self.edit_tile(cx, |t, id| t.flip(id))
+    }
+    fn resize_left(&mut self, _: &ta::ResizePaneLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.edit_tile(cx, |t, id| t.nudge(id, false, -0.05))
+    }
+    fn resize_right(&mut self, _: &ta::ResizePaneRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.edit_tile(cx, |t, id| t.nudge(id, false, 0.05))
+    }
+    fn resize_up(&mut self, _: &ta::ResizePaneUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.edit_tile(cx, |t, id| t.nudge(id, true, -0.05))
+    }
+    fn resize_down(&mut self, _: &ta::ResizePaneDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.edit_tile(cx, |t, id| t.nudge(id, true, 0.05))
     }
 
 
@@ -1846,6 +1920,8 @@ fn key_bytes(ks: &gpui::Keystroke, app_cursor: bool, meta: bool) -> Option<Vec<u
             "]" => 0x1d,
             "6" => 0x1e,
             "-" | "_" => 0x1f,
+            // Delete the word before the cursor, as Option+Backspace does.
+            "backspace" => return Some(b"\x1b\x7f".to_vec()),
             _ => return None,
         };
         return Some(vec![b]);
@@ -2238,6 +2314,7 @@ impl Render for TerminalPanel {
         }
         let split = self.active_group().is_some();
         let tiles = match self.active_group().map(|g| g.tile.clone()) {
+            Some(_) if let Some(id) = self.zoomed_pane() => Some(self.gliding(&Tile::Term(id), true, &look, cx)),
             Some(t) => Some(self.gliding(&t, true, &look, cx)),
             None => self.active_session().map(|s| s.id).map(|id| self.gliding(&Tile::Term(id), false, &look, cx)),
         };
@@ -2275,6 +2352,12 @@ impl Render for TerminalPanel {
             .on_action(cx.listener(Self::move_right))
             .on_action(cx.listener(Self::move_up))
             .on_action(cx.listener(Self::move_down))
+            .on_action(cx.listener(Self::fullscreen_pane))
+            .on_action(cx.listener(Self::toggle_split))
+            .on_action(cx.listener(Self::resize_left))
+            .on_action(cx.listener(Self::resize_right))
+            .on_action(cx.listener(Self::resize_up))
+            .on_action(cx.listener(Self::resize_down))
             .children(message)
             .children(self.find.as_ref().map(|f| {
                 div()
@@ -2771,6 +2854,8 @@ mod tests {
         assert_eq!(meta("alt-f"), Some(b"\x1bf".to_vec()));
         assert_eq!(meta("alt-shift-f"), Some(b"\x1bF".to_vec()));
         assert_eq!(k("alt-f"), None);
+        // Ctrl+Backspace deletes one word, like Option+Backspace.
+        assert_eq!(k("ctrl-backspace"), Some(b"\x1b\x7f".to_vec()));
     }
 
     use super::*;
@@ -2868,6 +2953,25 @@ mod tests {
     }
 
     #[test]
+    fn flip_and_nudge_change_the_focused_panes_split() {
+        // 1 | (2 over 3)
+        let mut t = Tile::Term(1);
+        t.split_at(1, 2, false);
+        t.split_at(2, 3, true);
+        // Flip 3's split: 2 and 3 side by side; the outer split stays.
+        assert!(t.flip(3));
+        assert_eq!(t.parent_vertical(3), Some(false));
+        assert_eq!(t.parent_vertical(1), Some(false));
+        // A side-by-side nudge from 3 moves its nearest such divider (2|3).
+        assert!(t.nudge(3, false, 0.1));
+        let Tile::Split { ratio: outer, b, .. } = &t else { panic!() };
+        let Tile::Split { ratio: inner, .. } = &**b else { panic!() };
+        assert_eq!((*outer, *inner), (0.5, 0.6));
+        // No stacked divider beside 1: nothing moves.
+        assert!(!t.nudge(1, true, 0.1));
+    }
+
+    #[test]
     fn grid_keeps_panes_near_square() {
         // Rows of Term ids, read back from a grid.
         fn rows(t: &Tile) -> Vec<Vec<usize>> {
@@ -2879,8 +2983,11 @@ mod tests {
         // A wide panel: two side by side, then a 2×2.
         assert_eq!(rows(&Tile::grid(&[1, 2], 1600., 800.)), vec![vec![1, 2]]);
         assert_eq!(rows(&Tile::grid(&[1, 2, 3, 4], 1600., 900.)), vec![vec![1, 2], vec![3, 4]]);
-        // Five: three on top, two below, never five thin columns.
-        assert_eq!(rows(&Tile::grid(&[1, 2, 3, 4, 5], 1600., 900.)), vec![vec![1, 2, 3], vec![4, 5]]);
+        // Three: the oldest on top, the two newer below; never a new pane
+        // bigger than the older ones.
+        assert_eq!(rows(&Tile::grid(&[1, 2, 3], 1600., 1000.)), vec![vec![1], vec![2, 3]]);
+        // Five: two on top, three below, never five thin columns.
+        assert_eq!(rows(&Tile::grid(&[1, 2, 3, 4, 5], 1600., 900.)), vec![vec![1, 2], vec![3, 4, 5]]);
         // A tall panel stacks them.
         assert_eq!(rows(&Tile::grid(&[1, 2], 600., 1200.)), vec![vec![1], vec![2]]);
         // Shares are even: a row of three gives the first a third.

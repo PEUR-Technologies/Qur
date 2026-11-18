@@ -31,7 +31,7 @@ Spike tier: **S** = implemented in the M0 toolkit prototypes; **M1+** = built wi
 | Keys | Command | Tier |
 |---|---|---|
 | `Cmd+P` | Quick Open file (fuzzy) | M1 |
-| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Recent files (MRU) | M1 |
+| `Ctrl+Tab` | Recent files (MRU) | M1 |
 | `Cmd+S` | Save | S |
 | `Cmd+Opt+S` | Save All | M1 |
 | `Cmd+Shift+E` | Reveal in Files (opens the Files dropdown) | S |
@@ -112,7 +112,11 @@ A file in an agent's worktree (the modal says "in <task>") shows the agent's cha
 | `Cmd+T` | New terminal | S |
 | `Cmd+Shift+T` | New Agent Terminal: a Claude agent task in its own worktree, shown as a terminal (decisions 12, 17) | S |
 | `Cmd+W` | Close focused terminal (or split pane); on the last shell, close the window; in an agent, Close/Delete Agent… (asks first) | ✅ |
-| `Cmd+D` / `Cmd+Shift+D` (terminal focused) | Split right / split down: a new shell in the project folder beside the focused one (decision 39) | S |
+| `Cmd+Shift+D` (terminal focused) | Split down: a new shell in the project folder below the focused one (decision 39); Split (Dwindle) is in the Terminal menu | S |
+| `Cmd+D` (terminal focused) | Fullscreen Pane: the focused pane fills its row; again to go back (Hyprland's fullscreen 1) | S |
+| `Cmd+Opt+J` (terminal focused) | Toggle Split Direction: side by side ↔ stacked (Hyprland's togglesplit) | S |
+| `Cmd+Ctrl+Arrows` (terminal focused) | Move the focused pane's divider that way (Hyprland's resizeactive) | S |
+| `Ctrl+Backspace` | Delete the word before the cursor, as `Opt+Backspace` (terminals, editor, inputs) | S |
 | `Cmd+Opt+Arrows` (terminal focused) | Focus the split pane in that direction. Moving the pointer onto a pane focuses it too (`[terminal] focus_follows_mouse`); a still pointer never undoes a pane picked with the keys | S |
 | `Cmd+Opt+Shift+Arrows` (terminal focused) | Move Pane: swap the focused pane with the one in that direction | ✅ |
 | `Cmd+Enter` | New Tiled Terminal: a shell tiled into the terminal on screen, splitting the focused pane along its longer side (like i3/Hyprland); with no terminal shown, a new one. Insert Line Below in the editor | S |

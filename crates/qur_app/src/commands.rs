@@ -86,7 +86,7 @@ pub mod agent {
 }
 
 pub mod terminal {
-    gpui::actions!(terminal, [Clear, ZoomIn, ZoomOut, ZoomReset, SendLineStart, SendLineEnd, SendKillLine, SendBackTab, Find, SplitRight, SplitDown, Tile, FocusLeft, FocusRight, FocusUp, FocusDown, MovePaneLeft, MovePaneRight, MovePaneUp, MovePaneDown]);
+    gpui::actions!(terminal, [Clear, ZoomIn, ZoomOut, ZoomReset, SendLineStart, SendLineEnd, SendKillLine, SendBackTab, Find, SplitRight, SplitDown, Tile, FocusLeft, FocusRight, FocusUp, FocusDown, MovePaneLeft, MovePaneRight, MovePaneUp, MovePaneDown, FullscreenPane, ToggleSplit, ResizePaneLeft, ResizePaneRight, ResizePaneUp, ResizePaneDown]);
 }
 
 /// The Browser view's keys (while it, or the page in it, has focus).
@@ -275,7 +275,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(editor::SelectPageDown, "Editor", "Select Page Down", "shift-pagedown", E, R),
     cmd!(editor::Backspace, "Editor", "Delete Left", "backspace|shift-backspace", E, R),
     cmd!(editor::Delete, "Editor", "Delete Right", "delete", E, R),
-    cmd!(editor::DeleteWordLeft, "Editor", "Delete Word Left", "alt-backspace", E, R),
+    cmd!(editor::DeleteWordLeft, "Editor", "Delete Word Left", "alt-backspace|ctrl-backspace", E, R),
     cmd!(editor::DeleteWordRight, "Editor", "Delete Word Right", "alt-delete", E, R),
     cmd!(editor::DeleteToLineStart, "Editor", "Delete to Line Start", "cmd-backspace", E, R),
     cmd!(editor::DeleteLine, "Selection", "Delete Line", "cmd-shift-k", E, R),
@@ -333,7 +333,13 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(qur::TerminalBell, "Terminal", "Bell", "", W, R),
     cmd!(terminal::Find, "Terminal", "Find in Terminal", "cmd-f", T, R),
     cmd!(terminal::Tile, "Terminal", "New Tiled Terminal (Grid)", "cmd-enter", W, R),
-    cmd!(terminal::SplitRight, "Terminal", "Split (Dwindle)", "cmd-d", T, R),
+    cmd!(terminal::SplitRight, "Terminal", "Split (Dwindle)", "", T, R),
+    cmd!(terminal::FullscreenPane, "Terminal", "Fullscreen Pane", "cmd-d", T, R),
+    cmd!(terminal::ToggleSplit, "Terminal", "Toggle Split Direction", "cmd-alt-j", T, R),
+    cmd!(terminal::ResizePaneLeft, "Terminal", "Resize Pane: Divider Left", "cmd-ctrl-left", T, R),
+    cmd!(terminal::ResizePaneRight, "Terminal", "Resize Pane: Divider Right", "cmd-ctrl-right", T, R),
+    cmd!(terminal::ResizePaneUp, "Terminal", "Resize Pane: Divider Up", "cmd-ctrl-up", T, R),
+    cmd!(terminal::ResizePaneDown, "Terminal", "Resize Pane: Divider Down", "cmd-ctrl-down", T, R),
     cmd!(terminal::SplitDown, "Terminal", "Split Down", "cmd-shift-d", T, R),
     cmd!(terminal::FocusLeft, "Terminal", "Focus Pane Left", "cmd-alt-left", T, R),
     cmd!(terminal::FocusRight, "Terminal", "Focus Pane Right", "cmd-alt-right", T, R),
@@ -436,7 +442,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!(input::Right, "Input", "Right", "right", I, R),
     cmd!(input::WordLeft, "Input", "Word Left", "alt-left", I, R),
     cmd!(input::WordRight, "Input", "Word Right", "alt-right", I, R),
-    cmd!(input::DeleteWordLeft, "Input", "Delete Word Left", "alt-backspace", I, R),
+    cmd!(input::DeleteWordLeft, "Input", "Delete Word Left", "alt-backspace|ctrl-backspace", I, R),
     cmd!(input::DeleteToStart, "Input", "Delete to Start", "cmd-backspace", I, R),
     cmd!(input::Home, "Input", "Start", "cmd-left|home", I, R),
     cmd!(input::End, "Input", "End", "cmd-right|end", I, R),
@@ -962,6 +968,12 @@ pub fn menus(s: &MenuState) -> Vec<Menu> {
             item(terminal::MovePaneRight),
             item(terminal::MovePaneUp),
             item(terminal::MovePaneDown),
+            item(terminal::FullscreenPane),
+            item(terminal::ToggleSplit),
+            item(terminal::ResizePaneLeft),
+            item(terminal::ResizePaneRight),
+            item(terminal::ResizePaneUp),
+            item(terminal::ResizePaneDown),
             sep(),
             item(terminal::Clear),
             item(terminal::ZoomIn),
